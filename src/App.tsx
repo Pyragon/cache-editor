@@ -8,6 +8,8 @@ import QuestViewer from './components/QuestViewer'
 import type { QuestData } from './components/QuestViewer'
 import SpriteViewer from './components/SpriteViewer'
 import type { SpriteData } from './loaders/sprites'
+import ModelViewer from './components/ModelViewer'
+import type { ModelData } from './loaders/models'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
 import './App.css'
@@ -52,6 +54,10 @@ function App() {
 
   const spriteContent = selectedEntry?.name === 'sprites' && selectedItemContent != null
     ? selectedItemContent as SpriteData
+    : null
+
+  const modelContent = selectedEntry?.name === 'models' && selectedItemContent != null
+    ? selectedItemContent as ModelData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -300,6 +306,8 @@ function App() {
                 ? <QuestViewer data={questContent.quest} serverData={questContent.server ?? undefined} onSave={(quest, server) => handleSaveItem({ quest, server })} />
                 : spriteContent != null
                 ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} />
+                : modelContent != null
+                ? <ModelViewer data={modelContent} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
