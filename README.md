@@ -13,31 +13,31 @@ A browser-based editor for OSRS game cache files, built with Vite + React + Type
 
 | Entry | Status | Notes |
 |---|---|---|
-| `animations` | Raw JSON | |
-| `areas` | Raw JSON | |
-| `billboards` | Raw JSON | |
-| `config` | Raw JSON | Subfolders: structs, etc. |
-| `cs2` | Raw JSON | |
-| `enums` | Raw JSON | |
-| `fonts` | Raw JSON | |
+| `animations` | Not started | |
+| `areas` | Not started | |
+| `billboards` | Not started | |
+| `config` | Not started | Subfolders: structs, etc. |
+| `cs2` | Not started | |
+| `enums` | Not started | |
+| `fonts` | Not started | |
 | `huffman` | **Done** | Read-only frequency table viewer |
-| `interfaces` | Raw JSON | |
-| `items` | Raw JSON | |
-| `map_areas` | Raw JSON | |
-| `midi_instruments` | Raw JSON | |
-| `models` | Raw JSON | |
-| `native_libraries` | Raw JSON | |
-| `npcs` | Raw JSON | |
-| `objects` | Raw JSON | |
-| `particles` | Raw JSON | |
+| `interfaces` | Not started | |
+| `items` | Not started | |
+| `map_areas` | Not started | |
+| `midi_instruments` | Not started | |
+| `models` | Not started | |
+| `native_libraries` | Not started | |
+| `npcs` | Not started | |
+| `objects` | Not started | |
+| `particles` | Not started | |
 | `quests` | **In Progress** | Full editor — reads/writes quest JSON and cache structs (start NPC, start location, slot ID, prereq quests, skill requirements) |
-| `quick_chat` | Raw JSON | |
-| `sound_effects` | Raw JSON | |
-| `spot_animations` | Raw JSON | |
-| `sprites` | Raw JSON | |
-| `texture_definitions` | Raw JSON | |
-| `textures` | Raw JSON | |
-| `varbits` | Raw JSON | |
+| `quick_chat` | Not started | |
+| `sound_effects` | Not started | |
+| `spot_animations` | Not started | |
+| `sprites` | Not started | |
+| `texture_definitions` | Not started | |
+| `textures` | Not started | |
+| `varbits` | Not started | |
 
 ## License
 
