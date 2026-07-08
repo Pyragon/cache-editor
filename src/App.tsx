@@ -6,6 +6,8 @@ import HuffmanViewer from './components/HuffmanViewer'
 import type { HuffmanData } from './components/HuffmanViewer'
 import QuestViewer from './components/QuestViewer'
 import type { QuestData } from './components/QuestViewer'
+import SpriteViewer from './components/SpriteViewer'
+import type { SpriteData } from './loaders/sprites'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
 import './App.css'
@@ -46,6 +48,10 @@ function App() {
 
   const questContent = selectedEntry?.name === 'quests' && selectedItemContent != null
     ? selectedItemContent as QuestContent
+    : null
+
+  const spriteContent = selectedEntry?.name === 'sprites' && selectedItemContent != null
+    ? selectedItemContent as SpriteData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -292,6 +298,8 @@ function App() {
             ) : selectedItemContent != null ? (
               questContent != null
                 ? <QuestViewer data={questContent.quest} serverData={questContent.server ?? undefined} onSave={(quest, server) => handleSaveItem({ quest, server })} />
+                : spriteContent != null
+                ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
