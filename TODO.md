@@ -11,6 +11,10 @@
 
 - **Get the rest of quest structs within the editor to edit the quest start interface.**
 
+## Sprites
+
+- **Look into the vertical field in sprites, should they be rotated?**
+
 ## General Editor
 
 - **Add/Remove/Clone buttons** in the middle item list panel are not yet wired up.
