@@ -38,12 +38,17 @@ const loader: CacheLoader = {
     const jsonFile = await jsonHandle.getFile()
     const raw = JSON.parse(await jsonFile.text())
 
-    raw.usesAlpha = meta.usesAlpha
-    raw.isVertical = meta.isVertical
-    raw.offsetsX = meta.offsetsX
-    raw.offsetsY = meta.offsetsY
-    raw.subWidths = meta.subWidths
-    raw.subHeights = meta.subHeights
+    raw.width       = meta.width
+    raw.height      = meta.height
+    raw.palette     = meta.palette
+    raw.pixelIndices = meta.pixelIndices
+    raw.alpha       = meta.alpha
+    raw.usesAlpha   = meta.usesAlpha
+    raw.isVertical  = meta.isVertical
+    raw.offsetsX    = meta.offsetsX
+    raw.offsetsY    = meta.offsetsY
+    raw.subWidths   = meta.subWidths
+    raw.subHeights  = meta.subHeights
 
     const writable = await jsonHandle.createWritable()
     await writable.write(JSON.stringify(raw, null, 2))
