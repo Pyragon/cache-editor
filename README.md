@@ -34,7 +34,7 @@ A browser-based editor for OSRS game cache files, built with Vite + React + Type
 | `quick_chat` | Not started | |
 | `sound_effects` | Not started | |
 | `spot_animations` | Not started | |
-| `sprites` | Not started | |
+| `sprites` | **In Progress** | Read-only viewer — displays PNG frames with zoom controls and metadata |
 | `texture_definitions` | Not started | |
 | `textures` | Not started | |
 | `varbits` | Not started | |
