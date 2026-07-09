@@ -10,6 +10,8 @@ import SpriteViewer from './components/SpriteViewer'
 import type { SpriteData } from './loaders/sprites'
 import ModelViewer from './components/ModelViewer'
 import type { ModelData } from './loaders/models'
+import NativeLibrariesViewer from './components/NativeLibrariesViewer'
+import type { NativeLibrariesData } from './loaders/native_libraries'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
 import './App.css'
@@ -300,6 +302,8 @@ function App() {
             ) : activeContent != null ? (
               selectedEntry?.name === 'huffman'
                 ? <HuffmanViewer data={activeContent as HuffmanData} />
+                : selectedEntry?.name === 'native_libraries'
+                ? <NativeLibrariesViewer data={activeContent as NativeLibrariesData} />
                 : <pre className="content-json">{JSON.stringify(activeContent, null, 2)}</pre>
             ) : selectedItemContent != null ? (
               questContent != null
