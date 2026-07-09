@@ -75,10 +75,11 @@ class BinReader {
   s8()  { const b = this.buf[this.pos++]; return b > 127 ? b - 256 : b }
   u16() { return (this.buf[this.pos++] << 8) | this.buf[this.pos++] }
 
+  // Java InputStream.readUnsignedSmart2: byte < 128 → byte - 64, else u16 - 49152
   smart2(): number {
     const b = this.buf[this.pos]
-    if (b < 128) { this.pos++; return b }
-    return this.u16() - 0x8000
+    if (b < 128) { this.pos++; return b - 64 }
+    return this.u16() - 49152
   }
 }
 
@@ -179,7 +180,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const hasVertexSkins  = r.u8()
   const modelVerticesX  = r.u16()
   const modelVerticesY  = r.u16()
-  const modelVerticesZ  = r.u16()
+  r.u16() // modelVerticesZ — last buffer before texture data, no offset depends on it
   const faceIndices     = r.u16()
   const textureIndices  = r.u16()
 
