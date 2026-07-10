@@ -1,5 +1,5 @@
-import type { CacheLoader } from './types'
-import { loadJsonItem, streamJsonItems } from './common'
+import type { CacheLoader } from '../types'
+import { loadJsonItem, streamJsonItems } from '../common'
 
 const loader: CacheLoader = {
   streamItems: streamJsonItems,

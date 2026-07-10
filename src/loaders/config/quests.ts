@@ -1,4 +1,4 @@
-import type { CacheLoader, LoadedItem, QuestServerData } from './types'
+import type { CacheLoader, LoadedItem, QuestServerData } from '../types'
 
 // Quest ID (from quest JSON "id" field) → Slot ID (from Quests.java)
 const QUEST_ID_TO_SLOT: Record<number, number> = {

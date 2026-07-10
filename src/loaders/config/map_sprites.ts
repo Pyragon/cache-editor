@@ -1,5 +1,5 @@
-import type { CacheLoader } from './types'
-import { streamDirItems } from './common'
+import type { CacheLoader } from '../types'
+import { streamDirItems } from '../common'
 
 const loader: CacheLoader = {
   streamItems: streamDirItems,

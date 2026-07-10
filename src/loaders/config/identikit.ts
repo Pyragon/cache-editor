@@ -1,3 +1,3 @@
-import { makeFixedFileLoader } from './common'
+import { makeFixedFileLoader } from '../common'
 
 export default makeFixedFileLoader('identikit.json')
