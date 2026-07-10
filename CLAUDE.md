@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A browser-based editor for OSRS-era game cache files (Vite + React 19 + TypeScript). It has no backend — it reads and writes cache files directly on the user's disk via the browser's **File System Access API** (`showDirectoryPicker({ mode: 'readwrite' })`). Everything happens client-side against a folder the user opens, which must be an unpacked cache dump (a folder of folders, one per cache table — `items/`, `models/`, `enums/`, `native_libraries/`, etc.). `App.tsx`'s `handleOpenCache` tries `getDirectoryHandle('unpacked')` on the selected folder first and falls back to the folder itself if that subfolder doesn't exist.
+A browser-based editor for RuneScape 2 (revision 727) game cache files (Vite + React 19 + TypeScript). It has no backend — it reads and writes cache files directly on the user's disk via the browser's **File System Access API** (`showDirectoryPicker({ mode: 'readwrite' })`). Everything happens client-side against a folder the user opens, which must be an unpacked cache dump (a folder of folders, one per cache table — `items/`, `models/`, `enums/`, `native_libraries/`, etc.). `App.tsx`'s `handleOpenCache` tries `getDirectoryHandle('unpacked')` on the selected folder first and falls back to the folder itself if that subfolder doesn't exist.
 
 ## Git workflow
 
