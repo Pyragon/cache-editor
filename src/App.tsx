@@ -12,6 +12,8 @@ import ModelViewer from './components/ModelViewer'
 import type { ModelData } from './loaders/models'
 import NativeLibrariesViewer from './components/NativeLibrariesViewer'
 import type { NativeLibrariesData } from './loaders/native_libraries'
+import EnumViewer from './components/EnumViewer'
+import type { EnumData } from './loaders/enums'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
 import './App.css'
@@ -60,6 +62,10 @@ function App() {
 
   const modelContent = selectedEntry?.name === 'models' && selectedItemContent != null
     ? selectedItemContent as ModelData
+    : null
+
+  const enumContent = selectedEntry?.name === 'enums' && selectedItemContent != null
+    ? selectedItemContent as EnumData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -312,6 +318,8 @@ function App() {
                 ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} />
                 : modelContent != null
                 ? <ModelViewer data={modelContent} />
+                : enumContent != null
+                ? <EnumViewer data={enumContent} onSave={(d) => handleSaveItem(d)} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>

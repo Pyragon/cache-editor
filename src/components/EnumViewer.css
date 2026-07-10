@@ -1,0 +1,196 @@
+.enum-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-bottom: 80px;
+}
+
+.enum-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.enum-title {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.enum-count {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.enum-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.type-dropdown-wrap {
+  position: relative;
+}
+
+.type-dropdown-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px 2px 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+
+.type-dropdown-char {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 16px;
+}
+
+.type-dropdown-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.type-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 100;
+  min-width: 220px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: #1a1d26;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.type-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  flex-shrink: 0;
+}
+
+.type-dropdown-item .type-dropdown-char {
+  font-size: 13px;
+  min-width: 14px;
+}
+
+.type-dropdown-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+
+.type-dropdown-item.active {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.type-dropdown-add {
+  border-top: 1px solid var(--border);
+  color: #7eb8ff;
+}
+
+.type-dropdown-custom-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.type-dropdown-custom-char {
+  width: 36px;
+  text-align: center;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 4px 2px;
+  outline: none;
+}
+
+.type-dropdown-custom-label {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 8px;
+  outline: none;
+}
+
+.type-dropdown-custom-char:focus,
+.type-dropdown-custom-label:focus {
+  border-color: var(--electric-blue-bright);
+}
+
+.type-dropdown-custom-save {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid rgba(47, 143, 255, 0.5);
+  background: rgba(0, 102, 255, 0.2);
+  color: #7eb8ff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.type-dropdown-custom-save:hover {
+  background: rgba(0, 102, 255, 0.35);
+  color: #fff;
+}
+
+.enum-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.enum-filter {
+  max-width: 280px;
+}
+
+.enum-table-wrap {
+  width: fit-content;
+  min-width: 340px;
+  max-width: 100%;
+  max-height: 440px;
+  overflow-y: auto;
+}
+
+.enum-table-wrap .quest-table {
+  width: auto;
+}
+
+.enum-table-wrap .cell-input {
+  width: 160px;
+}
+
+.enum-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #14161d;
+}
