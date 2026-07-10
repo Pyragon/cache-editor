@@ -56,8 +56,8 @@ async function getSlotToStruct(rootHandle: FileSystemDirectoryHandle): Promise<R
 }
 
 async function getStructsHandle(rootHandle: FileSystemDirectoryHandle): Promise<FileSystemDirectoryHandle> {
-  const configHandle = await rootHandle.getDirectoryHandle('config')
-  return configHandle.getDirectoryHandle('structs')
+  const configsHandle = await rootHandle.getDirectoryHandle('configs')
+  return configsHandle.getDirectoryHandle('structs')
 }
 
 async function getStructValues(rootHandle: FileSystemDirectoryHandle, structId: number): Promise<Record<string, unknown>> {

@@ -1,4 +1,4 @@
-import type { LoadedItem } from './types'
+import type { CacheLoader, LoadedItem } from './types'
 
 export async function* streamJsonItems(dirHandle: FileSystemDirectoryHandle): AsyncGenerator<LoadedItem> {
   for await (const handle of dirHandle.values()) {
@@ -22,4 +22,17 @@ export async function loadJsonItem(dirHandle: FileSystemDirectoryHandle, item: L
   const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
   const file = await fileHandle.getFile()
   return JSON.parse(await file.text())
+}
+
+// For entries dumped as `<id>/<fixedFileName>` (e.g. cursors/0/cursor.json).
+export function makeFixedFileLoader(fixedFileName: string): CacheLoader {
+  return {
+    streamItems: streamDirItems,
+    async loadItem(dirHandle, item) {
+      const subHandle = await dirHandle.getDirectoryHandle(String(item.id))
+      const fileHandle = await subHandle.getFileHandle(fixedFileName)
+      const file = await fileHandle.getFile()
+      return JSON.parse(await file.text())
+    },
+  }
 }

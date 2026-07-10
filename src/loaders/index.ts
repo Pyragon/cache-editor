@@ -1,12 +1,25 @@
 import type { CacheLoader } from './types'
+import animation_frame_bases from './animation_frame_bases'
+import animation_frame_sets from './animation_frame_sets'
 import animations from './animations'
-import areas from './areas'
 import billboards from './billboards'
-import config from './config'
+import config_cursors from './config_cursors'
+import config_hitbars from './config_hitbars'
+import config_hitsplats from './config_hitsplats'
+import config_identikit from './config_identikit'
+import config_inventories from './config_inventories'
+import config_map_areas from './config_map_areas'
+import config_map_sprites from './config_map_sprites'
+import config_params from './config_params'
+import config_quests from './config_quests'
+import config_skybox from './config_skybox'
+import config_structs from './config_structs'
+import config_sun from './config_sun'
+import config_vars from './config_vars'
 import cs2 from './cs2'
 import defaults from './defaults'
 import enums from './enums'
-import fonts from './fonts'
+import font_metrics from './font_metrics'
 import huffman from './huffman'
 import interfaces from './interfaces'
 import items from './items'
@@ -17,8 +30,8 @@ import native_libraries from './native_libraries'
 import npcs from './npcs'
 import objects from './objects'
 import particles from './particles'
-import quests from './quests'
-import quick_chat from './quick_chat'
+import quick_chat_menus from './quick_chat_menus'
+import quick_chat_messages from './quick_chat_messages'
 import sound_effects from './sound_effects'
 import spot_animations from './spot_animations'
 import sprites from './sprites'
@@ -27,14 +40,27 @@ import textures from './textures'
 import varbits from './varbits'
 
 const registry: Record<string, CacheLoader> = {
+  animation_frame_bases,
+  animation_frame_sets,
   animations,
-  areas,
   billboards,
-  config,
+  config_cursors,
+  config_hitbars,
+  config_hitsplats,
+  config_identikit,
+  config_inventories,
+  config_map_areas,
+  config_map_sprites,
+  config_params,
+  config_quests,
+  config_skybox,
+  config_structs,
+  config_sun,
+  config_vars,
   cs2,
   defaults,
   enums,
-  fonts,
+  font_metrics,
   huffman,
   interfaces,
   items,
@@ -45,8 +71,8 @@ const registry: Record<string, CacheLoader> = {
   npcs,
   objects,
   particles,
-  quests,
-  quick_chat,
+  quick_chat_menus,
+  quick_chat_messages,
   sound_effects,
   spot_animations,
   sprites,
@@ -60,3 +86,5 @@ export function getLoader(name: string): CacheLoader | null {
 }
 
 export type { CacheLoader, LoadedItem, QuestServerData } from './types'
+export { ENTRY_ORDER, getEntryPath, resolveEntryHandle } from './entryOrder'
+export type { EntryDef } from './entryOrder'

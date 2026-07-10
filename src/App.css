@@ -139,6 +139,69 @@
   box-shadow: 0 0 12px rgba(0, 102, 255, 0.25);
 }
 
+.item-list button.unavailable {
+  color: #b33a3a;
+  cursor: not-allowed;
+}
+
+.item-list button.unavailable:hover {
+  background: transparent;
+  color: #b33a3a;
+}
+
+.item-list button.generic {
+  color: #d9a441;
+}
+
+.item-list button.generic:hover {
+  color: #f0bb57;
+}
+
+.item-list button.generic.active {
+  color: #fff;
+}
+
+.sidebar-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-group-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebar-group-arrow {
+  display: inline-block;
+  flex-shrink: 0;
+  margin-left: 8px;
+  font-size: 16px;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+
+.sidebar-group-arrow.open {
+  transform: rotate(90deg);
+}
+
+.sidebar-group-members {
+  list-style: none;
+  margin: 2px 0 4px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-group-members li + li {
+  margin-top: 2px;
+}
+
+.sidebar-group-members button {
+  padding-left: 30px;
+  font-size: 13px;
+}
+
 /* Right section — middle panel + details grouped together */
 #right-section {
   flex: 1;

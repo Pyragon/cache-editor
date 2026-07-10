@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { getLoader } from './loaders'
+import { ENTRY_ORDER, getEntryPath, getLoader, resolveEntryHandle } from './loaders'
 import type { LoadedItem, QuestServerData } from './loaders'
 import HuffmanViewer from './components/HuffmanViewer'
 import type { HuffmanData } from './components/HuffmanViewer'
@@ -18,16 +18,78 @@ import type { EnumData } from './loaders/enums'
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
 import './App.css'
 
-type CacheEntry = { id: number; name: string }
+type CacheEntry = { id: number; name: string; available: boolean; group?: string }
+
+type SidebarRow =
+  | { type: 'entry'; entry: CacheEntry }
+  | { type: 'group'; groupName: string; members: CacheEntry[] }
+
+const GROUP_LABELS: Record<string, string> = {
+  configs: 'Config',
+}
+
+// Entries with a dedicated viewer component — everything else that resolves
+// falls back to the raw-JSON `<pre>` display, which gets a distinct sidebar
+// treatment ("dumped but not implemented" rather than "not dumped at all").
+const SPECIALIZED_ENTRIES = new Set([
+  'config_quests', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
+])
+
+function entryStatusClass(entry: CacheEntry): string {
+  if (!entry.available) return 'unavailable'
+  if (!SPECIALIZED_ENTRIES.has(entry.name)) return 'generic'
+  return ''
+}
+
+const ENTRY_LABEL_OVERRIDES: Record<string, string> = {
+  cs2: 'CS2',
+  music2: 'Music 2',
+  midi: 'MIDI',
+  npcs: 'NPCs',
+}
+
+function formatEntryLabel(name: string): string {
+  return name
+    .split('_')
+    .map((word) => ENTRY_LABEL_OVERRIDES[word.toLowerCase()] ?? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ')
+}
+
+function buildSidebarRows(entries: CacheEntry[]): SidebarRow[] {
+  const rows: SidebarRow[] = []
+  const seenGroups = new Set<string>()
+  for (const entry of entries) {
+    if (entry.group) {
+      if (seenGroups.has(entry.group)) continue
+      seenGroups.add(entry.group)
+      rows.push({ type: 'group', groupName: entry.group, members: entries.filter((e) => e.group === entry.group) })
+    } else {
+      rows.push({ type: 'entry', entry })
+    }
+  }
+  return rows
+}
 
 async function readCacheDir(dirHandle: FileSystemDirectoryHandle): Promise<CacheEntry[]> {
   const entries: CacheEntry[] = []
   let entryId = 1
-  for await (const handle of dirHandle.values()) {
-    if (handle.kind !== 'directory') continue
-    entries.push({ id: entryId++, name: handle.name })
+
+  const known = new Set(ENTRY_ORDER.map((def) => def.path[0]))
+  for (const def of ENTRY_ORDER) {
+    const handle = await resolveEntryHandle(dirHandle, def.path)
+    entries.push({ id: entryId++, name: def.name, available: handle != null, group: def.group })
   }
-  return entries.sort((a, b) => a.name.localeCompare(b.name))
+
+  // Anything present on disk but not covered by the canonical order (custom
+  // or not-yet-catalogued entries) still shows up, appended alphabetically.
+  const leftovers: string[] = []
+  for await (const handle of dirHandle.values()) {
+    if (handle.kind === 'directory' && !known.has(handle.name)) leftovers.push(handle.name)
+  }
+  leftovers.sort((a, b) => a.localeCompare(b))
+  for (const name of leftovers) entries.push({ id: entryId++, name, available: true })
+
+  return entries
 }
 
 function App() {
@@ -43,6 +105,7 @@ function App() {
   const [loadCount, setLoadCount] = useState(0)
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null)
   const [filter, setFilter] = useState('')
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
 
   const loadVersion = useRef(0)
   const itemListRef = useRef<HTMLUListElement>(null)
@@ -52,7 +115,9 @@ function App() {
   const currentLoader = selectedEntry ? getLoader(selectedEntry.name) : null
   const noPanel = currentLoader?.noPanel ?? false
 
-  const questContent = selectedEntry?.name === 'quests' && selectedItemContent != null
+  const sidebarRows = useMemo(() => buildSidebarRows(entries), [entries])
+
+  const questContent = selectedEntry?.name === 'config_quests' && selectedItemContent != null
     ? selectedItemContent as QuestContent
     : null
 
@@ -99,7 +164,8 @@ function App() {
     if (!loader) return
     let cancelled = false
     async function load() {
-      const entryHandle = await cacheHandle!.getDirectoryHandle(selectedEntry!.name)
+      const entryHandle = await resolveEntryHandle(cacheHandle!, getEntryPath(selectedEntry!.name))
+      if (!entryHandle) return
       const content = await loader!.loadItem(entryHandle, selectedItem!, cacheHandle!)
       if (!cancelled) setSelectedItemContent(content)
     }
@@ -111,9 +177,10 @@ function App() {
     if (!cacheHandle || !selectedEntry || !selectedItem) return
     const loader = getLoader(selectedEntry.name)
     if (!loader?.saveItem) return
-    const entryHandle = await cacheHandle.getDirectoryHandle(selectedEntry.name)
+    const entryHandle = await resolveEntryHandle(cacheHandle, getEntryPath(selectedEntry.name))
+    if (!entryHandle) return
     await loader.saveItem(entryHandle, selectedItem, data)
-    if (selectedEntry.name === 'quests') {
+    if (selectedEntry.name === 'config_quests') {
       setSelectedItemContent(data as QuestContent)
     } else {
       setSelectedItemContent(data)
@@ -127,7 +194,11 @@ function App() {
       return
     }
 
-    const entryHandle = await handle.getDirectoryHandle(entry.name)
+    const entryHandle = await resolveEntryHandle(handle, getEntryPath(entry.name))
+    if (!entryHandle) {
+      setIsLoading(false)
+      return
+    }
 
     if (loader.noPanel) {
       const content = await loader.loadItem(entryHandle, { id: 0, name: entry.name }, handle)
@@ -156,7 +227,7 @@ function App() {
 
   async function handleSelectEntry(id: number) {
     const entry = entries.find((e) => e.id === id)
-    if (!entry) return
+    if (!entry || !entry.available) return
 
     const version = ++loadVersion.current
     setSelectedEntryId(id)
@@ -202,7 +273,8 @@ function App() {
       setSelectedItemId(null)
       setFilter('')
 
-      const first = loaded[0]
+      const first = loaded.find((e) => e.available)
+      if (!first) return
       setSelectedEntryId(first.id)
       setIsLoading(true)
       setLoadCount(0)
@@ -226,17 +298,79 @@ function App() {
           <p className="sidebar-empty">Open a cache folder to begin.</p>
         ) : (
           <ul className="item-list">
-            {entries.map((entry) => (
-              <li key={entry.id}>
-                <button
-                  type="button"
-                  className={entry.id === selectedEntryId ? 'active' : ''}
-                  onClick={() => handleSelectEntry(entry.id)}
-                >
-                  {entry.name}
-                </button>
-              </li>
-            ))}
+            {sidebarRows.map((row) => {
+              if (row.type === 'entry') {
+                const entry = row.entry
+                return (
+                  <li key={entry.id}>
+                    <button
+                      type="button"
+                      className={[
+                        entry.id === selectedEntryId ? 'active' : '',
+                        entryStatusClass(entry),
+                      ].join(' ').trim()}
+                      disabled={!entry.available}
+                      title={entry.available ? undefined : 'No data found for this cache entry'}
+                      onClick={() => handleSelectEntry(entry.id)}
+                    >
+                      {formatEntryLabel(entry.name)}
+                    </button>
+                  </li>
+                )
+              }
+
+              const { groupName, members } = row
+              const isActiveGroup = selectedEntry?.group === groupName
+              const anyAvailable = members.some((m) => m.available)
+              const anySpecializedAvailable = members.some((m) => m.available && SPECIALIZED_ENTRIES.has(m.name))
+              const isOpen = openGroups.has(groupName) || isActiveGroup
+
+              return (
+                <li key={`group-${groupName}`} className="sidebar-group">
+                  <button
+                    type="button"
+                    className={[
+                      'sidebar-group-toggle',
+                      isActiveGroup ? 'active' : '',
+                      !anyAvailable ? 'unavailable' : !anySpecializedAvailable ? 'generic' : '',
+                    ].join(' ').trim()}
+                    disabled={!anyAvailable}
+                    title={anyAvailable ? undefined : 'No data found for this cache entry'}
+                    onClick={() => {
+                      setOpenGroups((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(groupName)) next.delete(groupName)
+                        else next.add(groupName)
+                        return next
+                      })
+                    }}
+                  >
+                    <span>{GROUP_LABELS[groupName] ?? formatEntryLabel(groupName)}</span>
+                    <span className={`sidebar-group-arrow${isOpen ? ' open' : ''}`}>▸</span>
+                  </button>
+                  {isOpen && (
+                    <ul className="sidebar-group-members">
+                      {members.map((m) => (
+                        <li key={m.id}>
+                          <button
+                            type="button"
+                            className={[
+                              m.id === selectedEntryId ? 'active' : '',
+                              entryStatusClass(m),
+                            ].join(' ').trim()}
+                            disabled={!m.available}
+                            title={m.available ? undefined : 'No data found for this cache entry'}
+                            onClick={() => handleSelectEntry(m.id)}
+                          >
+                            {formatEntryLabel(m.name.replace(/^config_/, ''))}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         )}
       </aside>
@@ -245,7 +379,7 @@ function App() {
         {selectedEntry && !noPanel && (
           <aside id="item-list-panel">
             <div className="panel-header">
-              <h2>{selectedEntry.name}</h2>
+              <h2>{formatEntryLabel(selectedEntry.name)}</h2>
               <div className="panel-actions">
                 <button type="button" className="panel-action-btn">Add</button>
                 <button type="button" className="panel-action-btn">Remove</button>
