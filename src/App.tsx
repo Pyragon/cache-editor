@@ -171,7 +171,7 @@ function App() {
     }
     load()
     return () => { cancelled = true }
-  }, [selectedItemId, selectedEntry?.name, cacheHandle])
+  }, [selectedItem, selectedEntry, cacheHandle])
 
   async function handleSaveItem(data: unknown) {
     if (!cacheHandle || !selectedEntry || !selectedItem) return

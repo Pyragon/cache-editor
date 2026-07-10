@@ -207,7 +207,6 @@ export default function QuestViewer({ data, serverData, onSave }: Props) {
     setServerDraft(serverData ?? DEFAULT_SERVER_DATA)
     setIsServerDirty(false)
     setNewServerPrereqId('')
-    setNewSkillReq([0, 1])
   }
 
   const varKey = draft.varValues !== undefined ? 'varValues' : 'varbitValues'
