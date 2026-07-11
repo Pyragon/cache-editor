@@ -5,6 +5,7 @@ import './EnumViewer.css'
 type Props = {
   data: EnumData
   onSave: (data: EnumData) => Promise<void>
+  onDirtyChange?: (dirty: boolean) => void
 }
 
 type Row = { key: string; value: string }
@@ -127,7 +128,7 @@ function TypeCharDropdown({ value, options, onChange, onAddCustom }: TypeCharDro
   )
 }
 
-export default function EnumViewer({ data, onSave }: Props) {
+export default function EnumViewer({ data, onSave, onDirtyChange }: Props) {
   const [keyTypeChar, setKeyTypeChar] = useState(data.keyTypeChar)
   const [valueTypeChar, setValueTypeChar] = useState(data.valueTypeChar)
   const [defaultStringValue, setDefaultStringValue] = useState(data.defaultStringValue)
@@ -162,6 +163,10 @@ export default function EnumViewer({ data, onSave }: Props) {
     setFilter('')
     setIsDirty(false)
   }, [data])
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty)
+  }, [isDirty, onDirtyChange])
 
   const valueIsNumeric = valueTypeChar !== 's'
 

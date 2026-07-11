@@ -157,9 +157,10 @@ type Props = {
   data: QuestData
   serverData?: QuestServerData
   onSave: (quest: QuestData, server: QuestServerData) => Promise<void>
+  onDirtyChange?: (dirty: boolean) => void
 }
 
-export default function QuestViewer({ data, serverData, onSave }: Props) {
+export default function QuestViewer({ data, serverData, onSave, onDirtyChange }: Props) {
   const [draft, setDraft] = useState<QuestData>(data)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -176,6 +177,10 @@ export default function QuestViewer({ data, serverData, onSave }: Props) {
     setIsServerDirty(false)
     setNewServerPrereqId('')
   }, [data, serverData])
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty || isServerDirty)
+  }, [isDirty, isServerDirty, onDirtyChange])
 
   function set<K extends keyof QuestData>(key: K, value: QuestData[K]) {
     setDraft((prev) => ({ ...prev, [key]: value }))

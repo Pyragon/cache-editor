@@ -14,6 +14,9 @@ import NativeLibrariesViewer from './components/NativeLibrariesViewer'
 import type { NativeLibrariesData } from './loaders/native_libraries'
 import EnumViewer from './components/EnumViewer'
 import type { EnumData } from './loaders/enums'
+import CursorViewer from './components/CursorViewer'
+import type { CursorData } from './loaders/config/cursors'
+import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
 import './App.css'
@@ -32,11 +35,18 @@ const GROUP_LABELS: Record<string, string> = {
 // falls back to the raw-JSON `<pre>` display, which gets a distinct sidebar
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
-  'config_quests', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
+  'config_quests', 'config_cursors', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
+])
+
+// Feature-complete entries — rendered green in the sidebar. Only entries
+// the user has manually reviewed and signed off go in here.
+const DONE_ENTRIES = new Set([
+  'config_cursors',
 ])
 
 function entryStatusClass(entry: CacheEntry): string {
   if (!entry.available) return 'unavailable'
+  if (DONE_ENTRIES.has(entry.name)) return 'done'
   if (!SPECIALIZED_ENTRIES.has(entry.name)) return 'generic'
   return ''
 }
@@ -106,6 +116,24 @@ function App() {
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null)
   const [filter, setFilter] = useState('')
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
+  const [isContentDirty, setIsContentDirty] = useState(false)
+  const { confirm: confirmDialog, dialog: confirmDialogElement } = useConfirm()
+
+  // An item created via Add that hasn't been saved yet — navigating away
+  // from it deletes it again instead of leaving a half-configured file.
+  const pendingNewRef = useRef<{ entryName: string; item: LoadedItem } | null>(null)
+
+  // Warn before the tab closes/reloads with unsaved changes. (The browser
+  // shows its own generic message; the returnValue text isn't displayed.)
+  useEffect(() => {
+    if (!isContentDirty) return
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [isContentDirty])
 
   const loadVersion = useRef(0)
   const itemListRef = useRef<HTMLUListElement>(null)
@@ -133,6 +161,10 @@ function App() {
     ? selectedItemContent as EnumData
     : null
 
+  const cursorContent = selectedEntry?.name === 'config_cursors' && selectedItemContent != null
+    ? selectedItemContent as CursorData
+    : null
+
   const filteredItems = activeItems.filter((item) =>
     item.name.toLowerCase().includes(filter.toLowerCase())
   )
@@ -144,12 +176,17 @@ function App() {
     overscan: 10,
   })
 
+  // Ref keeps the effect below honest without re-running it every render
+  // (handleSelectItem closes over fresh state each render).
+  const handleSelectItemRef = useRef<(id: number) => void>(() => {})
+  handleSelectItemRef.current = handleSelectItem
+
   useEffect(() => {
     if (/^\d+$/.test(filter)) {
       const num = parseInt(filter, 10)
       const idx = filteredItems.findIndex((item) => item.id === num)
       if (idx !== -1) {
-        setSelectedItemId(filteredItems[idx].id)
+        handleSelectItemRef.current(filteredItems[idx].id)
         virtualizer.scrollToIndex(idx, { align: 'center' })
       }
     }
@@ -185,6 +222,108 @@ function App() {
     } else {
       setSelectedItemContent(data)
     }
+    // A saved new item is a keeper.
+    if (pendingNewRef.current?.item.id === selectedItem.id && pendingNewRef.current.entryName === selectedEntry.name) {
+      pendingNewRef.current = null
+    }
+  }
+
+  async function currentEntryHandle(): Promise<FileSystemDirectoryHandle | null> {
+    if (!cacheHandle || !selectedEntry) return null
+    return resolveEntryHandle(cacheHandle, getEntryPath(selectedEntry.name))
+  }
+
+  // Deletes the never-saved Add-ed item (if any) from disk and, when we're
+  // still on its entry, from the item list.
+  async function discardPendingNew() {
+    const pending = pendingNewRef.current
+    if (!pending || !cacheHandle) return
+    pendingNewRef.current = null
+
+    if (pending.entryName === selectedEntry?.name) {
+      setActiveItems((prev) => prev.filter((i) => i.id !== pending.item.id))
+    }
+    const loader = getLoader(pending.entryName)
+    if (!loader?.deleteItem) return
+    const entryHandle = await resolveEntryHandle(cacheHandle, getEntryPath(pending.entryName))
+    if (!entryHandle) return
+    try {
+      await loader.deleteItem(entryHandle, pending.item)
+    } catch {
+      // already gone — nothing to clean up
+    }
+  }
+
+  // Central navigation guard: prompts on unsaved changes and cleans up a
+  // never-saved added item. Returns false when the user cancels.
+  async function confirmLeaveItem(): Promise<boolean> {
+    if (isContentDirty) {
+      const ok = await confirmDialog('You have unsaved changes. Discard them and continue?', {
+        title: 'Unsaved changes',
+        confirmLabel: 'Discard',
+        danger: true,
+      })
+      if (!ok) return false
+    }
+    setIsContentDirty(false)
+    return true
+  }
+
+  async function handleSelectItem(id: number) {
+    if (id === selectedItemId) return
+    if (!(await confirmLeaveItem())) return
+    if (pendingNewRef.current?.item.id !== id || pendingNewRef.current?.entryName !== selectedEntry?.name) {
+      void discardPendingNew()
+    }
+    setSelectedItemId(id)
+  }
+
+  async function handleAddItem() {
+    const loader = selectedEntry ? getLoader(selectedEntry.name) : null
+    const entryHandle = await currentEntryHandle()
+    if (!loader?.createItem || !entryHandle) return
+    if (!(await confirmLeaveItem())) return
+    await discardPendingNew()
+    const item = await loader.createItem(entryHandle)
+    pendingNewRef.current = { entryName: selectedEntry!.name, item }
+    setActiveItems((prev) => [...prev, item].sort((a, b) => a.id - b.id || a.name.localeCompare(b.name)))
+    setSelectedItemId(item.id)
+  }
+
+  async function handleRemoveItem() {
+    const loader = selectedEntry ? getLoader(selectedEntry.name) : null
+    const entryHandle = await currentEntryHandle()
+    if (!loader?.deleteItem || !entryHandle || !selectedItem) return
+    const ok = await confirmDialog(
+      `Delete ${selectedItem.name} from ${selectedEntry!.name}? This removes the file from disk.`,
+      { title: 'Delete item', confirmLabel: 'Delete', danger: true },
+    )
+    if (!ok) return
+    if (pendingNewRef.current?.item.id === selectedItem.id && pendingNewRef.current.entryName === selectedEntry!.name) {
+      pendingNewRef.current = null
+    }
+    await loader.deleteItem(entryHandle, selectedItem)
+    const removedId = selectedItem.id
+    setIsContentDirty(false)
+    setActiveItems((prev) => {
+      const next = prev.filter((i) => i.id !== removedId)
+      const idx = prev.findIndex((i) => i.id === removedId)
+      setSelectedItemId(next[Math.min(idx, next.length - 1)]?.id ?? null)
+      return next
+    })
+  }
+
+  async function handleCloneItem() {
+    const loader = selectedEntry ? getLoader(selectedEntry.name) : null
+    const entryHandle = await currentEntryHandle()
+    if (!loader?.cloneItem || !entryHandle || !selectedItem) return
+    if (!(await confirmLeaveItem())) return
+    // Clone before discarding a pending new item — the source could BE the
+    // pending item, and it has to still exist on disk to be read.
+    const item = await loader.cloneItem(entryHandle, selectedItem)
+    await discardPendingNew()
+    setActiveItems((prev) => [...prev, item].sort((a, b) => a.id - b.id || a.name.localeCompare(b.name)))
+    setSelectedItemId(item.id)
   }
 
   async function loadEntryItems(handle: FileSystemDirectoryHandle, entry: CacheEntry, version: number) {
@@ -228,6 +367,8 @@ function App() {
   async function handleSelectEntry(id: number) {
     const entry = entries.find((e) => e.id === id)
     if (!entry || !entry.available) return
+    if (entry.id !== selectedEntryId && !(await confirmLeaveItem())) return
+    await discardPendingNew()
 
     const version = ++loadVersion.current
     setSelectedEntryId(id)
@@ -323,7 +464,10 @@ function App() {
               const isActiveGroup = selectedEntry?.group === groupName
               const anyAvailable = members.some((m) => m.available)
               const anySpecializedAvailable = members.some((m) => m.available && SPECIALIZED_ENTRIES.has(m.name))
-              const isOpen = openGroups.has(groupName) || isActiveGroup
+              // Collapsible even while a member is selected — the toggle
+              // keeps its 'active' highlight so it's clear where the
+              // focused entry lives.
+              const isOpen = openGroups.has(groupName)
 
               return (
                 <li key={`group-${groupName}`} className="sidebar-group">
@@ -381,9 +525,30 @@ function App() {
             <div className="panel-header">
               <h2>{formatEntryLabel(selectedEntry.name)}</h2>
               <div className="panel-actions">
-                <button type="button" className="panel-action-btn">Add</button>
-                <button type="button" className="panel-action-btn">Remove</button>
-                <button type="button" className="panel-action-btn">Clone</button>
+                <button
+                  type="button"
+                  className="panel-action-btn"
+                  disabled={!currentLoader?.createItem}
+                  onClick={handleAddItem}
+                >
+                  Add
+                </button>
+                <button
+                  type="button"
+                  className="panel-action-btn"
+                  disabled={!currentLoader?.deleteItem || !selectedItem}
+                  onClick={handleRemoveItem}
+                >
+                  Remove
+                </button>
+                <button
+                  type="button"
+                  className="panel-action-btn"
+                  disabled={!currentLoader?.cloneItem || !selectedItem}
+                  onClick={handleCloneItem}
+                >
+                  Clone
+                </button>
               </div>
               <input
                 className="item-filter"
@@ -419,7 +584,7 @@ function App() {
                         type="button"
                         className={item.id === selectedItem?.id ? 'active' : ''}
                         title={item.name}
-                        onClick={() => setSelectedItemId(item.id)}
+                        onClick={() => handleSelectItem(item.id)}
                       >
                         {item.name}
                       </button>
@@ -447,13 +612,15 @@ function App() {
                 : <pre className="content-json">{JSON.stringify(activeContent, null, 2)}</pre>
             ) : selectedItemContent != null ? (
               questContent != null
-                ? <QuestViewer data={questContent.quest} serverData={questContent.server ?? undefined} onSave={(quest, server) => handleSaveItem({ quest, server })} />
+                ? <QuestViewer data={questContent.quest} serverData={questContent.server ?? undefined} onSave={(quest, server) => handleSaveItem({ quest, server })} onDirtyChange={setIsContentDirty} />
                 : spriteContent != null
-                ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} />
+                ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : modelContent != null
                 ? <ModelViewer data={modelContent} />
                 : enumContent != null
-                ? <EnumViewer data={enumContent} onSave={(d) => handleSaveItem(d)} />
+                ? <EnumViewer data={enumContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : cursorContent != null
+                ? <CursorViewer data={cursorContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
@@ -461,6 +628,7 @@ function App() {
           </div>
         </main>
       </div>
+      {confirmDialogElement}
     </div>
   )
 }

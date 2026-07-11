@@ -149,6 +149,18 @@
   color: #b33a3a;
 }
 
+.item-list button.done {
+  color: #4caf50;
+}
+
+.item-list button.done:hover {
+  color: #66d96b;
+}
+
+.item-list button.done.active {
+  color: #fff;
+}
+
 .item-list button.generic {
   color: #d9a441;
 }
@@ -258,10 +270,15 @@
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-.panel-action-btn:hover {
+.panel-action-btn:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
   border-color: rgba(255, 255, 255, 0.15);
+}
+
+.panel-action-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 

@@ -16,4 +16,9 @@ export type CacheLoader = {
   streamItems: (dirHandle: FileSystemDirectoryHandle) => AsyncGenerator<LoadedItem>
   loadItem: (dirHandle: FileSystemDirectoryHandle, item: LoadedItem, rootHandle?: FileSystemDirectoryHandle) => Promise<unknown>
   saveItem?: (dirHandle: FileSystemDirectoryHandle, item: LoadedItem, data: unknown) => Promise<void>
+  // Optional item-list CRUD — entries without these render the Add/Remove/
+  // Clone panel buttons disabled.
+  createItem?: (dirHandle: FileSystemDirectoryHandle) => Promise<LoadedItem>
+  deleteItem?: (dirHandle: FileSystemDirectoryHandle, item: LoadedItem) => Promise<void>
+  cloneItem?: (dirHandle: FileSystemDirectoryHandle, item: LoadedItem) => Promise<LoadedItem>
 }

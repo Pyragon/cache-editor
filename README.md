@@ -11,13 +11,15 @@ A browser-based editor for RuneScape 2 (revision 727) game cache files, built wi
 
 ## Cache Entries
 
-Ordered to match [`IndexType.java`](https://github.com/Pyragon/cryogen/blob/master/src/main/java/com/cryo/cache/IndexType.java) in the cryogen repo — the numbers are that enum's index ids. A few IndexType members share one physical folder (e.g. `animations/` holds `animation_frame_sets`, `animation_frame_bases`, and `animations` as separate subpaths) and are listed as separate rows here. `areas` and `quests` aren't IndexType members — they're CONFIG-index sub-archives dumped by the same unpacker — and are appended at the end. Entries marked **Not implemented upstream** have no `dumpFiles()` support in cryogen's own unpacker, so no folder for them will ever appear in a cache dump.
+Ordered to match [`IndexType.java`](https://github.com/Pyragon/cryogen/blob/master/src/main/java/com/cryo/cache/IndexType.java) in the cryogen repo — the numbers are that enum's index ids. A few IndexType members share one physical folder (e.g. `animations/` holds `animation_frame_sets`, `animation_frame_bases`, and `animations` as separate subpaths) and are listed as separate rows here. Entries marked **Not implemented upstream** have no `dumpFiles()` support in cryogen's own unpacker, so no folder for them will ever appear in a cache dump.
+
+Sidebar colours: **green** = feature-complete editor, white = dedicated viewer in progress, **amber** = dumped but only the raw-JSON fallback so far, **red** = not present in the dump (disabled).
 
 | # | Entry | Status | Notes |
 |---|---|---|---|
 | 0 | `animation_frame_sets` | Not started | `animations/frame_sets` |
 | 1 | `animation_frame_bases` | Not started | `animations/bases`, binary `.dat` files |
-| 2 | `config` | Not started | Subfolders: cursors, hitbars, hitsplats, identikits, inventories, map_sprites, params, skyboxes, structs, sun, vars |
+| 2 | `config` | Grouped | Collapsible sidebar group of CONFIG-index sub-archives — see the table below |
 | 3 | `interfaces` | Not started | |
 | 4 | `sound_effects` | Not started | |
 | 5 | `maps` | **Not implemented upstream** | |
@@ -52,8 +54,27 @@ Ordered to match [`IndexType.java`](https://github.com/Pyragon/cryogen/blob/mast
 | 34 | `jagex_fonts` | **Not implemented upstream** | |
 | 35 | `cutscenes` | **Not implemented upstream** | |
 | 36 | `vorbis` | **Not implemented upstream** | |
-| — | `areas` | Not started | Not an IndexType member — CONFIG-index sub-archive |
-| — | `quests` | **In Progress** | Full editor — reads/writes quest JSON and cache structs (start NPC, start location, slot ID, prereq quests, skill requirements). Not an IndexType member — CONFIG-index sub-archive |
+
+### Config sub-archives
+
+Sub-archives of `IndexType.CONFIG(2)`, mirroring [`FileType.java`](https://github.com/Pyragon/cryogen/blob/master/src/main/java/com/cryo/cache/FileType.java) (unnamed `SCT_#` placeholders excluded). Shown in-app as a collapsible dropdown under the **Config** sidebar entry. Entries marked *Not dumped* have no folder in the current cache dump.
+
+| Entry | Status | Notes |
+|---|---|---|
+| `cursors` | ✅ **Done** | Full editor — hotspot picking on the sprite preview, live "your mouse becomes the cursor" test area with RS-style click crosses, sprite download/upload (uploads allocate a new sprite id), add/remove/clone, save validation |
+| `quests` | **In Progress** | Full editor — reads/writes quest JSON and cache structs (start NPC, start location, slot ID, prereq quests, skill requirements) |
+| `identikits` | Not started | |
+| `inventories` | Not started | |
+| `params` | Not started | |
+| `vars` | Not started | |
+| `structs` | Not started | |
+| `skyboxes` | Not started | |
+| `sun` | Not started | |
+| `map_sprites` | Not started | |
+| `areas` | Not started | Dumped from `FileType.MAP_AREAS` (unrelated to the top-level `map_areas` IndexType) |
+| `hitsplats` | Not started | |
+| `hitbars` | Not started | |
+| `underlays`, `overlays`, `objects`, `enums`, `npcs`, `items`, `animations`, `spot_anims`, `varbits`, `varc_string`, `varc`, `light_intensities`, `bas`, `clan_var`, `clan_var_settings` | Not dumped | |
 
 ## License
 
