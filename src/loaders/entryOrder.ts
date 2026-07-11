@@ -11,14 +11,14 @@
 //
 // IndexType.CONFIG(2) is itself a whole other index of sub-archives, listed
 // in FileType.java (excluding the unnamed SCT_# placeholders). Those are
-// grouped under `group: 'configs'` and rendered as one "Config" row with a
+// grouped under `group: 'config'` and rendered as one "Config" row with a
 // dropdown rather than 28 separate sidebar rows. Several FileType names
 // collide with unrelated top-level IndexType names (e.g. FileType.ENUMS is
 // a config sub-archive, completely different from the top-level `enums`
 // entry), so grouped entries are prefixed with `config_` to stay unique —
 // except `config_quests`/`config_map_areas`, which keep the folder names
 // `quests`/`areas` on disk (dumped there historically, moved under
-// `configs/` so they don't get confused with unrelated top-level entries).
+// `config/` so they don't get confused with unrelated top-level entries).
 export type EntryDef = {
   name: string
   path: string[]
@@ -29,34 +29,34 @@ export const ENTRY_ORDER: EntryDef[] = [
   { name: 'animation_frame_sets', path: ['animations', 'frame_sets'] },
   { name: 'animation_frame_bases', path: ['animations', 'bases'] },
   // IndexType.CONFIG(2) — see FileType.java, SCT_# placeholders excluded.
-  { name: 'config_underlays', path: ['configs', 'underlays'], group: 'configs' },
-  { name: 'config_identikit', path: ['configs', 'identikits'], group: 'configs' },
-  { name: 'config_overlays', path: ['configs', 'overlays'], group: 'configs' },
-  { name: 'config_inventories', path: ['configs', 'inventories'], group: 'configs' },
-  { name: 'config_objects', path: ['configs', 'objects'], group: 'configs' },
-  { name: 'config_enums', path: ['configs', 'enums'], group: 'configs' },
-  { name: 'config_npcs', path: ['configs', 'npcs'], group: 'configs' },
-  { name: 'config_items', path: ['configs', 'items'], group: 'configs' },
-  { name: 'config_params', path: ['configs', 'params'], group: 'configs' },
-  { name: 'config_animations', path: ['configs', 'animations'], group: 'configs' },
-  { name: 'config_spot_anims', path: ['configs', 'spot_anims'], group: 'configs' },
-  { name: 'config_varbits', path: ['configs', 'varbits'], group: 'configs' },
-  { name: 'config_varc_string', path: ['configs', 'varc_string'], group: 'configs' },
-  { name: 'config_vars', path: ['configs', 'vars'], group: 'configs' },
-  { name: 'config_varc', path: ['configs', 'varc'], group: 'configs' },
-  { name: 'config_structs', path: ['configs', 'structs'], group: 'configs' },
-  { name: 'config_skybox', path: ['configs', 'skyboxes'], group: 'configs' },
-  { name: 'config_sun', path: ['configs', 'sun'], group: 'configs' },
-  { name: 'config_light_intensities', path: ['configs', 'light_intensities'], group: 'configs' },
-  { name: 'config_bas', path: ['configs', 'bas'], group: 'configs' },
-  { name: 'config_cursors', path: ['configs', 'cursors'], group: 'configs' },
-  { name: 'config_map_sprites', path: ['configs', 'map_sprites'], group: 'configs' },
-  { name: 'config_quests', path: ['configs', 'quests'], group: 'configs' },
-  { name: 'config_map_areas', path: ['configs', 'areas'], group: 'configs' },
-  { name: 'config_hitsplats', path: ['configs', 'hitsplats'], group: 'configs' },
-  { name: 'config_clan_var', path: ['configs', 'clan_var'], group: 'configs' },
-  { name: 'config_clan_var_settings', path: ['configs', 'clan_var_settings'], group: 'configs' },
-  { name: 'config_hitbars', path: ['configs', 'hitbars'], group: 'configs' },
+  { name: 'config_underlays', path: ['config', 'underlays'], group: 'config' },
+  { name: 'config_identikit', path: ['config', 'identikits'], group: 'config' },
+  { name: 'config_overlays', path: ['config', 'overlays'], group: 'config' },
+  { name: 'config_inventories', path: ['config', 'inventories'], group: 'config' },
+  { name: 'config_objects', path: ['config', 'objects'], group: 'config' },
+  { name: 'config_enums', path: ['config', 'enums'], group: 'config' },
+  { name: 'config_npcs', path: ['config', 'npcs'], group: 'config' },
+  { name: 'config_items', path: ['config', 'items'], group: 'config' },
+  { name: 'config_params', path: ['config', 'params'], group: 'config' },
+  { name: 'config_animations', path: ['config', 'animations'], group: 'config' },
+  { name: 'config_spot_anims', path: ['config', 'spot_anims'], group: 'config' },
+  { name: 'config_varbits', path: ['config', 'varbits'], group: 'config' },
+  { name: 'config_varc_string', path: ['config', 'varc_string'], group: 'config' },
+  { name: 'config_vars', path: ['config', 'vars'], group: 'config' },
+  { name: 'config_varc', path: ['config', 'varc'], group: 'config' },
+  { name: 'config_structs', path: ['config', 'structs'], group: 'config' },
+  { name: 'config_skybox', path: ['config', 'skyboxes'], group: 'config' },
+  { name: 'config_sun', path: ['config', 'sun'], group: 'config' },
+  { name: 'config_light_intensities', path: ['config', 'light_intensities'], group: 'config' },
+  { name: 'config_bas', path: ['config', 'bas'], group: 'config' },
+  { name: 'config_cursors', path: ['config', 'cursors'], group: 'config' },
+  { name: 'config_map_sprites', path: ['config', 'map_sprites'], group: 'config' },
+  { name: 'config_quests', path: ['config', 'quests'], group: 'config' },
+  { name: 'config_map_areas', path: ['config', 'areas'], group: 'config' },
+  { name: 'config_hitsplats', path: ['config', 'hitsplats'], group: 'config' },
+  { name: 'config_clan_var', path: ['config', 'clan_var'], group: 'config' },
+  { name: 'config_clan_var_settings', path: ['config', 'clan_var_settings'], group: 'config' },
+  { name: 'config_hitbars', path: ['config', 'hitbars'], group: 'config' },
   { name: 'interfaces', path: ['interfaces'] },
   { name: 'sound_effects', path: ['sound_effects'] },
   { name: 'maps', path: ['maps'] },

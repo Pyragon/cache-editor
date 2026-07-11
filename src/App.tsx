@@ -28,7 +28,7 @@ type SidebarRow =
   | { type: 'group'; groupName: string; members: CacheEntry[] }
 
 const GROUP_LABELS: Record<string, string> = {
-  configs: 'Config',
+  config: 'Config',
 }
 
 // Entries with a dedicated viewer component — everything else that resolves
