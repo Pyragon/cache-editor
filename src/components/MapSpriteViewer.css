@@ -1,0 +1,79 @@
+.map-sprite-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-bottom: 80px;
+}
+
+.map-sprite-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.map-sprite-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.map-sprite-id {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.map-sprite-dims {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.map-sprite-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.map-sprite-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.map-sprite-colour-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.map-sprite-colour-input {
+  width: 36px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.map-sprite-colour-hex {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.map-sprite-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.map-sprite-none {
+  margin: 0;
+  font-size: 13px;
+  color: #ff3b3b;
+}
+
+.map-sprite-preview {
+  overflow: hidden;
+}

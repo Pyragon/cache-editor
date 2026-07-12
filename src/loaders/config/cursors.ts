@@ -1,5 +1,6 @@
 import type { CacheLoader } from '../types'
 import { deleteJsonItem, nextFreeJsonId, streamJsonItems, writeJsonItem } from '../common'
+import { writeNewSprite } from '../spriteStore'
 import type { SpriteMeta } from '../sprites'
 
 export type CursorDef = {
@@ -73,35 +74,7 @@ const loader: CacheLoader = {
     // Create the new sprite first so the cursor never points at an id that
     // failed to materialise.
     if (spriteDirty && sprite && spritesDir) {
-      const newId = cursor.spriteId
-      const subHandle = await spritesDir.getDirectoryHandle(String(newId), { create: true })
-
-      const raw = {
-        id: newId,
-        width: sprite.width,
-        height: sprite.height,
-        palette: sprite.palette,
-        pixelIndices: sprite.pixelIndices,
-        alpha: sprite.alpha,
-        usesAlpha: sprite.usesAlpha,
-        isVertical: sprite.isVertical,
-        offsetsX: sprite.offsetsX,
-        offsetsY: sprite.offsetsY,
-        subWidths: sprite.subWidths,
-        subHeights: sprite.subHeights,
-      }
-
-      const jsonHandle = await subHandle.getFileHandle(`${newId}.json`, { create: true })
-      const jsonWritable = await jsonHandle.createWritable()
-      await jsonWritable.write(JSON.stringify(raw, null, 2))
-      await jsonWritable.close()
-
-      if (spritePng) {
-        const pngHandle = await subHandle.getFileHandle(`${newId}_0.png`, { create: true })
-        const pngWritable = await pngHandle.createWritable()
-        await pngWritable.write(spritePng)
-        await pngWritable.close()
-      }
+      await writeNewSprite(spritesDir, cursor.spriteId, sprite, spritePng ?? null)
     }
 
     const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)

@@ -70,7 +70,7 @@ Sub-archives of `IndexType.CONFIG(2)`, mirroring [`FileType.java`](https://githu
 | `structs` | Not started | |
 | `skyboxes` | Not started | |
 | `sun` | Not started | |
-| `map_sprites` | Not started | |
+| `map_sprites` | ✅ **Done** | Full editor — sprite preview, background colour picker, upscaling toggle, sprite download/upload (uploads allocate a new sprite id), add/remove/clone |
 | `areas` | Not started | Dumped from `FileType.MAP_AREAS` (unrelated to the top-level `map_areas` IndexType) |
 | `hitsplats` | Not started | |
 | `hitbars` | Not started | |
