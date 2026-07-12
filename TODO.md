@@ -15,9 +15,13 @@
 
 - **Look into the vertical field in sprites, should they be rotated?**
 
+## Map Sprites
+
+- **Add a 'preview' to map_sprites to show what they would look like on a proper minimap.**
+
 ## General Editor
 
-- **Add/Remove/Clone buttons** in the middle item list panel are not yet wired up.
+- **Add/Remove/Clone buttons** are wired up via optional `createItem`/`deleteItem`/`cloneItem` loader methods, but only `config_cursors` and `config_map_sprites` implement them — every other entry's buttons render disabled until its loader adds CRUD support.
 - **Huffman** — user noted it should be loaded differently eventually (current display is functional but rough).
 - **Detail viewers** for other cache types still show raw JSON: `items`, `npcs`, `objects`, `animations`, `areas`, `sprites`, `textures`, `interfaces`, `models`, `config` subfolders, etc.
 - **Open Cache button** shows `📁 folderName` — consider a cleaner label or breadcrumb.
