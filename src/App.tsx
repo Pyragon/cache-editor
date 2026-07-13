@@ -28,6 +28,8 @@ import NpcViewer from './components/NpcViewer'
 import type { NpcData } from './loaders/npcs'
 import VarbitViewer from './components/VarbitViewer'
 import type { VarbitData } from './loaders/varbits'
+import StructViewer from './components/StructViewer'
+import type { StructData } from './loaders/config/structs'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -47,7 +49,7 @@ const GROUP_LABELS: Record<string, string> = {
 // falls back to the raw-JSON `<pre>` display, which gets a distinct sidebar
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
-  'config_quests', 'config_cursors', 'config_map_sprites',
+  'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs',
   'items', 'objects', 'npcs', 'varbits', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
 ])
 
@@ -200,6 +202,10 @@ function App() {
 
   const varbitContent = selectedEntry?.name === 'varbits' && selectedItemContent != null
     ? selectedItemContent as VarbitData
+    : null
+
+  const structContent = selectedEntry?.name === 'config_structs' && selectedItemContent != null
+    ? selectedItemContent as StructData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -670,6 +676,8 @@ function App() {
                 ? <NpcViewer data={npcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : varbitContent != null
                 ? <VarbitViewer data={varbitContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : structContent != null
+                ? <StructViewer data={structContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>

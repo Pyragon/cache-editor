@@ -1,9 +1,11 @@
-import type { CacheLoader } from '../types'
-import { loadJsonItem, streamJsonItems } from '../common'
+import { makeJsonDefLoader } from '../common'
+import type { JsonDefData } from '../common'
 
-const loader: CacheLoader = {
-  streamItems: streamJsonItems,
-  loadItem: loadJsonItem,
+export type StructDef = {
+  id: number
+  values: Record<string, number | string>
 }
 
-export default loader
+export type StructData = JsonDefData<StructDef>
+
+export default makeJsonDefLoader<StructDef>((id) => ({ id, values: {} }))
