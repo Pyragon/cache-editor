@@ -158,7 +158,7 @@
 }
 
 .item-list button.done.active {
-  color: #fff;
+  color: #66d96b;
 }
 
 .item-list button.generic {
@@ -170,7 +170,7 @@
 }
 
 .item-list button.generic.active {
-  color: #fff;
+  color: #f0bb57;
 }
 
 .sidebar-group {
@@ -278,7 +278,7 @@
 
 .panel-action-btn:disabled {
   opacity: 0.4;
-  cursor: default;
+  cursor: not-allowed;
 }
 
 

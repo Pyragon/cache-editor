@@ -70,9 +70,14 @@
   transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 
-.cursor-pick-btn:hover {
+.cursor-pick-btn:hover:not(:disabled) {
   color: var(--text);
   background: rgba(255, 255, 255, 0.05);
+}
+
+.cursor-pick-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .cursor-pick-btn.active {

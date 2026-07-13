@@ -69,7 +69,7 @@ const SPECIALIZED_ENTRIES = new Set([
 // Feature-complete entries — rendered green in the sidebar. Only entries
 // the user has manually reviewed and signed off go in here.
 const DONE_ENTRIES = new Set([
-  'config_cursors', 'config_map_sprites',
+  'config_cursors', 'config_hitbars', 'config_vars', 'huffman', 'native_libraries',
 ])
 
 function entryStatusClass(entry: CacheEntry): string {
@@ -87,7 +87,10 @@ const ENTRY_LABEL_OVERRIDES: Record<string, string> = {
 }
 
 function formatEntryLabel(name: string): string {
+  // Config sub-entries are keyed `config_<name>` but display as just the
+  // sub-entry name (they already live under the "Config" group).
   return name
+    .replace(/^config_/, '')
     .split('_')
     .map((word) => ENTRY_LABEL_OVERRIDES[word.toLowerCase()] ?? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
     .join(' ')
@@ -165,6 +168,13 @@ function App() {
 
   const loadVersion = useRef(0)
   const itemListRef = useRef<HTMLUListElement>(null)
+  const contentPanelRef = useRef<HTMLDivElement>(null)
+
+  // Reset the details scroll to the top when a different item is selected,
+  // so a new item doesn't inherit the previous one's scroll position.
+  useEffect(() => {
+    contentPanelRef.current?.scrollTo({ top: 0 })
+  }, [selectedItemId, selectedEntryId])
 
   const selectedEntry = entries.find((e) => e.id === selectedEntryId) ?? null
   const selectedItem = activeItems.find((i) => i.id === selectedItemId) ?? null
@@ -261,6 +271,11 @@ function App() {
   const handleSelectItemRef = useRef<(id: number) => void>(() => {})
   handleSelectItemRef.current = handleSelectItem
 
+  // filteredItems is rebuilt every render; hold it in a ref so the
+  // selection-scroll effect can read it without depending on its identity.
+  const filteredItemsRef = useRef(filteredItems)
+  filteredItemsRef.current = filteredItems
+
   useEffect(() => {
     if (/^\d+$/.test(filter)) {
       const num = parseInt(filter, 10)
@@ -271,6 +286,16 @@ function App() {
       }
     }
   }, [filter, filteredItems, virtualizer])
+
+  // Keep the selected row in view when it's changed programmatically
+  // (Add / Clone appends off-screen, Remove auto-selects a neighbour).
+  // align 'auto' only scrolls when the row is actually out of view, so
+  // plain clicks on already-visible rows aren't disturbed.
+  useEffect(() => {
+    if (selectedItemId == null) return
+    const idx = filteredItemsRef.current.findIndex((i) => i.id === selectedItemId)
+    if (idx !== -1) virtualizer.scrollToIndex(idx, { align: 'auto' })
+  }, [selectedItemId, virtualizer])
 
   useEffect(() => {
     if (!selectedItem || !cacheHandle || !selectedEntry) {
@@ -677,7 +702,7 @@ function App() {
         )}
 
         <main id="content">
-          <div className="content-panel">
+          <div className="content-panel" ref={contentPanelRef}>
             {isLoading ? (
               <p className="loading-text">
                 {loadCount > 0
