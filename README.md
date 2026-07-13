@@ -70,7 +70,7 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 1 | `underlays` | Not dumped | |
 | 3 | `identikits` | Not started | Folder-per-id `.lnk` dump format — needs flattening + re-dump like cursors |
 | 4 | `overlays` | Not dumped | |
-| 5 | `inventories` | Editor | Slot length + default-stock pairs |
+| 5 | `inventories` | ✅ **Done** | Slot length + default-stock pairs with item-icon previews |
 | 6 | `objects` | Not dumped | Config sub-archive, distinct from the top-level `objects` index |
 | 8 | `enums` | Not dumped | Config sub-archive, distinct from the top-level `enums` index |
 | 9 | `npcs` | Not dumped | Config sub-archive, distinct from the top-level `npcs` index |
