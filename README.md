@@ -75,14 +75,14 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 8 | `enums` | Not dumped | Config sub-archive, distinct from the top-level `enums` index |
 | 9 | `npcs` | Not dumped | Config sub-archive, distinct from the top-level `npcs` index |
 | 10 | `items` | Not dumped | Config sub-archive, distinct from the top-level `items` index |
-| 11 | `params` | Editor | Type-char dropdown, default int, auto-disable |
+| 11 | `params` | ✅ **Done** | Type-char dropdown, default int, auto-disable |
 | 12 | `animations` | Not dumped | |
 | 13 | `spot_anims` | Not dumped | |
 | 14 | `varbits` | Not dumped | Config sub-archive, distinct from the top-level `varbits` index |
 | 15 | `varc_string` | Not dumped | |
 | 16 | `vars` | ✅ **Done** | Param-type dropdown + client code (verified against darkan `VarpType`: only opcodes 1/5 exist, so the sparse data is correct) |
 | 19 | `varc` | Not dumped | |
-| 26 | `structs` | Editor | Param key→value table |
+| 26 | `structs` | ✅ **Done** | Param key→value table |
 | 29 | `skyboxes` | Not started | Obfuscated fields — needs a darkan rename pass first |
 | 30 | `sun` | Not started | Empty in the current dump |
 | 31 | `light_intensities` | Not dumped | |
