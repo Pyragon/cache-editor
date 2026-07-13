@@ -24,6 +24,8 @@ import ItemViewer from './components/ItemViewer'
 import type { ItemData } from './loaders/items'
 import ObjectViewer from './components/ObjectViewer'
 import type { ObjectData } from './loaders/objects'
+import NpcViewer from './components/NpcViewer'
+import type { NpcData } from './loaders/npcs'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -44,7 +46,7 @@ const GROUP_LABELS: Record<string, string> = {
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites',
-  'items', 'objects', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
+  'items', 'objects', 'npcs', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -188,6 +190,10 @@ function App() {
 
   const objectContent = selectedEntry?.name === 'objects' && selectedItemContent != null
     ? selectedItemContent as ObjectData
+    : null
+
+  const npcContent = selectedEntry?.name === 'npcs' && selectedItemContent != null
+    ? selectedItemContent as NpcData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -654,6 +660,8 @@ function App() {
                 ? <ItemViewer data={itemContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : objectContent != null
                 ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : npcContent != null
+                ? <NpcViewer data={npcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
