@@ -277,7 +277,7 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
       <section className="item-section">
         <h3>Preview</h3>
         {hasPreview ? (
-          <div className="hit-preview">
+          <div className="hit-preview hit-preview-cell">
             <canvas
               ref={canvasRef}
               className="hit-preview-canvas"
