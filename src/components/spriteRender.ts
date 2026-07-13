@@ -1,5 +1,79 @@
 import type { SpriteMeta } from '../loaders/sprites'
 
+// Load a sprite's meta JSON from the sprites entry, or null if missing.
+export async function loadSpriteMeta(
+  spritesDir: FileSystemDirectoryHandle,
+  id: number,
+): Promise<SpriteMeta | null> {
+  try {
+    const subHandle = await spritesDir.getDirectoryHandle(String(id))
+    const fileHandle = await subHandle.getFileHandle(`${id}.json`)
+    const file = await fileHandle.getFile()
+    return JSON.parse(await file.text()) as SpriteMeta
+  } catch {
+    return null
+  }
+}
+
+// Render a sprite's first frame onto a fresh canvas, or null if empty.
+export function renderFrameToCanvas(meta: SpriteMeta): HTMLCanvasElement | null {
+  if (meta.width <= 0 || meta.height <= 0) return null
+  const canvas = document.createElement('canvas')
+  renderFrame(canvas, meta, 0)
+  return canvas
+}
+
+// Average colour of a sprite frame's opaque pixels, as a #rrggbb hex string
+// (or null if the frame has no visible pixels). Useful for tinting UI to match
+// a sprite whose name doesn't reflect its actual colour.
+export function averageSpriteColor(meta: SpriteMeta, frameIndex = 0): string | null {
+  const px = meta.pixelIndices[frameIndex]
+  if (!px) return null
+  const sw = meta.subWidths[frameIndex] ?? 0
+  const sh = meta.subHeights[frameIndex] ?? 0
+  const frameAlpha = meta.alpha?.[frameIndex]
+  const hasAlpha = meta.usesAlpha[frameIndex] && frameAlpha != null
+
+  let r = 0, g = 0, b = 0, n = 0
+  for (let x = 0; x < sw; x++) {
+    const col = px[x]
+    if (!col) continue
+    for (let y = 0; y < sh; y++) {
+      const idx = col[y] & 0xff
+      if (hasAlpha) {
+        if ((frameAlpha[y * sw + x] & 0xff) === 0) continue
+      } else if (idx === 0) {
+        continue
+      }
+      const rgb = meta.palette[idx] ?? 0
+      r += (rgb >> 16) & 0xff
+      g += (rgb >> 8) & 0xff
+      b += rgb & 0xff
+      n++
+    }
+  }
+  if (n === 0) return null
+  r = Math.round(r / n)
+  g = Math.round(g / n)
+  b = Math.round(b / n)
+  return `#${(((r << 16) | (g << 8) | b) >>> 0).toString(16).padStart(6, '0')}`
+}
+
+// Render a sprite's first frame and trigger a PNG download of it.
+export function downloadSpritePng(meta: SpriteMeta, filename: string) {
+  const canvas = document.createElement('canvas')
+  renderFrame(canvas, meta, 0)
+  canvas.toBlob((blob) => {
+    if (!blob) return
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }, 'image/png')
+}
+
 // Decode an uploaded image file to raw RGBA pixels.
 export async function imageDataFromFile(file: File): Promise<ImageData> {
   const bitmap = await createImageBitmap(file)

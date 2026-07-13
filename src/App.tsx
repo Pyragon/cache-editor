@@ -36,6 +36,8 @@ import VarViewer from './components/VarViewer'
 import type { VarData } from './loaders/config/vars'
 import InventoryViewer from './components/InventoryViewer'
 import type { InventoryData } from './loaders/config/inventories'
+import HitbarViewer from './components/HitbarViewer'
+import type { HitbarData } from './loaders/config/hitbars'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -56,6 +58,7 @@ const GROUP_LABELS: Record<string, string> = {
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars', 'config_inventories',
+  'config_hitbars',
   'items', 'objects', 'npcs', 'varbits', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
 ])
 
@@ -224,6 +227,10 @@ function App() {
 
   const inventoryContent = selectedEntry?.name === 'config_inventories' && selectedItemContent != null
     ? selectedItemContent as InventoryData
+    : null
+
+  const hitbarContent = selectedEntry?.name === 'config_hitbars' && selectedItemContent != null
+    ? selectedItemContent as HitbarData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -702,6 +709,8 @@ function App() {
                 ? <VarViewer data={varContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : inventoryContent != null
                 ? <InventoryViewer data={inventoryContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : hitbarContent != null
+                ? <HitbarViewer data={hitbarContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
