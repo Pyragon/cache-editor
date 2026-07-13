@@ -10,6 +10,8 @@ import SpriteViewer from './components/SpriteViewer'
 import type { SpriteData } from './loaders/sprites'
 import ModelViewer from './components/ModelViewer'
 import type { ModelData } from './loaders/models'
+import TextureViewer from './components/TextureViewer'
+import type { TextureData } from './loaders/textures'
 import NativeLibrariesViewer from './components/NativeLibrariesViewer'
 import type { NativeLibrariesData } from './loaders/native_libraries'
 import EnumViewer from './components/EnumViewer'
@@ -157,6 +159,10 @@ function App() {
 
   const modelContent = selectedEntry?.name === 'models' && selectedItemContent != null
     ? selectedItemContent as ModelData
+    : null
+
+  const textureContent = selectedEntry?.name === 'textures' && selectedItemContent != null
+    ? selectedItemContent as TextureData
     : null
 
   const enumContent = selectedEntry?.name === 'enums' && selectedItemContent != null
@@ -623,6 +629,8 @@ function App() {
                 ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : modelContent != null
                 ? <ModelViewer data={modelContent} />
+                : textureContent != null
+                ? <TextureViewer data={textureContent} />
                 : enumContent != null
                 ? <EnumViewer data={enumContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : cursorContent != null

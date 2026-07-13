@@ -1,0 +1,124 @@
+.texture-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.texture-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.texture-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.texture-id {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.texture-dims {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.texture-zoom-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.texture-zoom-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+
+.texture-canvas-wrap {
+  align-self: flex-start;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: repeating-conic-gradient(#2a2a3a 0% 25%, #1e1e2e 0% 50%) 0 0 / 16px 16px;
+  overflow: auto;
+  max-width: 100%;
+  max-height: 60vh;
+}
+
+.texture-image {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.texture-def {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.texture-def-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.texture-def-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.texture-def-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  min-width: 90px;
+}
+
+.texture-def-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.texture-def-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.texture-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.texture-def-flag {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.texture-def-flag.on {
+  color: #7eb8ff;
+}
