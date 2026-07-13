@@ -1,7 +1,25 @@
 // Shared building blocks for definition editors (items, objects, ...).
 // Styling comes from ItemViewer.css / QuestViewer.css / SpriteViewer.css —
 // component CSS is global in this app by convention.
+import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { ParamRow } from './defParams'
+
+// Item icon served from public/icons (fetched by scripts/download-icons.mjs).
+// Renders an empty placeholder for ids with no downloaded icon.
+export function ItemIcon({ id }: { id: number }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [id])
+  if (failed || id < 0) return <span className="item-icon item-icon-empty" />
+  return (
+    <img
+      className="item-icon"
+      src={`${import.meta.env.BASE_URL}icons/${id}.png`}
+      alt=""
+      onError={() => setFailed(true)}
+    />
+  )
+}
 
 export type NumFieldDef = [key: string, label: string]
 
@@ -77,7 +95,7 @@ export function IntListInput({ value, onChange, placeholder }: {
   )
 }
 
-export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, onRemove }: {
+export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, onRemove, srcIcon }: {
   title: string
   srcLabel: string
   dstLabel: string
@@ -86,6 +104,8 @@ export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, o
   onSet: (index: number, which: 0 | 1, value: number) => void
   onAdd: () => void
   onRemove: (index: number) => void
+  // Optional leading icon column rendered from each row's src value.
+  srcIcon?: (value: number) => ReactNode
 }) {
   return (
     <section className="item-section">
@@ -93,10 +113,11 @@ export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, o
       {src.length > 0 && (
         <div className="quest-table-wrap item-pair-wrap">
           <table className="quest-table">
-            <thead><tr><th>{srcLabel}</th><th>{dstLabel}</th><th>Remove</th></tr></thead>
+            <thead><tr>{srcIcon && <th className="pair-icon-th" />}<th>{srcLabel}</th><th>{dstLabel}</th><th>Remove</th></tr></thead>
             <tbody>
               {src.map((s, i) => (
                 <tr key={i}>
+                  {srcIcon && <td className="pair-icon-cell">{srcIcon(s)}</td>}
                   <td><input className="cell-input" type="number" value={s}
                     onChange={(e) => onSet(i, 0, parseInt(e.target.value, 10) || 0)} /></td>
                   <td><input className="cell-input" type="number" value={dst[i] ?? 0}

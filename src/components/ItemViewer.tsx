@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ItemData, ItemDef } from '../loaders/items'
-import { NumGrid, PairTable, ParamsTable } from './defFields'
+import { ItemIcon, NumGrid, PairTable, ParamsTable } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { paramRowsToRecord, toParamRows } from './defParams'
 import type { ParamRow } from './defParams'
@@ -207,11 +207,14 @@ export default function ItemViewer({ data, onSave, onDirtyChange }: Props) {
   return (
     <div className="item-viewer">
       <div className="item-header">
-        <input
-          className="quest-name-input"
-          value={String(draft.name ?? '')}
-          onChange={(e) => set('name', e.target.value)}
-        />
+        <div className="item-title-row">
+          <ItemIcon id={data.id} />
+          <input
+            className="quest-name-input"
+            value={String(draft.name ?? '')}
+            onChange={(e) => set('name', e.target.value)}
+          />
+        </div>
         <div className="item-badges">
           <span className="item-id-badge">ID {data.id}</span>
           <label className="badge-toggle">

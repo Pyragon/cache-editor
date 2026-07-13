@@ -196,3 +196,33 @@
 .item-unknown[open] summary {
   margin-bottom: 10px;
 }
+
+/* Item icon column (PairTable srcIcon / ItemIcon in defFields) */
+.pair-icon-th,
+.pair-icon-cell {
+  width: 40px;
+  text-align: center;
+}
+
+.item-icon {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  display: block;
+  margin: 0 auto;
+}
+
+.item-icon-empty {
+  visibility: hidden;
+}
+
+.item-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.item-title-row .quest-name-input {
+  flex: 1;
+}

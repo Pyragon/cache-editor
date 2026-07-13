@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { InventoryData, InventoryDef } from '../loaders/config/inventories'
-import { PairTable } from './defFields'
+import { ItemIcon, PairTable } from './defFields'
 
 type Props = {
   data: InventoryData
@@ -90,6 +90,7 @@ export default function InventoryViewer({ data, onSave, onDirtyChange }: Props) 
         title="Default Stock" srcLabel="Item ID" dstLabel="Amount"
         src={ids} dst={amounts}
         onSet={setPair} onAdd={addPair} onRemove={removePair}
+        srcIcon={(id) => <ItemIcon id={id} />}
       />
 
       {isDirty && (
