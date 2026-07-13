@@ -32,6 +32,8 @@ import StructViewer from './components/StructViewer'
 import type { StructData } from './loaders/config/structs'
 import ParamViewer from './components/ParamViewer'
 import type { ParamData } from './loaders/config/params'
+import VarViewer from './components/VarViewer'
+import type { VarData } from './loaders/config/vars'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -51,7 +53,7 @@ const GROUP_LABELS: Record<string, string> = {
 // falls back to the raw-JSON `<pre>` display, which gets a distinct sidebar
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
-  'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params',
+  'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars',
   'items', 'objects', 'npcs', 'varbits', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
 ])
 
@@ -212,6 +214,10 @@ function App() {
 
   const paramContent = selectedEntry?.name === 'config_params' && selectedItemContent != null
     ? selectedItemContent as ParamData
+    : null
+
+  const varContent = selectedEntry?.name === 'config_vars' && selectedItemContent != null
+    ? selectedItemContent as VarData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -686,6 +692,8 @@ function App() {
                 ? <StructViewer data={structContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : paramContent != null
                 ? <ParamViewer data={paramContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : varContent != null
+                ? <VarViewer data={varContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>

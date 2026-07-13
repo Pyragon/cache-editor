@@ -1,9 +1,15 @@
-import type { CacheLoader } from '../types'
-import { loadJsonItem, streamJsonItems } from '../common'
+import { makeJsonDefLoader } from '../common'
+import type { JsonDefData } from '../common'
 
-const loader: CacheLoader = {
-  streamItems: streamJsonItems,
-  loadItem: loadJsonItem,
+export type VarDef = {
+  id: number
+  paramType: string
+  // Opcode 5 — named clientCode per darkan's VarpType (cryogen previously
+  // misnamed it defaultValue).
+  clientCode: number
 }
 
-export default loader
+export type VarData = JsonDefData<VarDef>
+
+// The NUL character is the dump's "no type" value for paramType.
+export default makeJsonDefLoader<VarDef>((id) => ({ id, paramType: '\u0000', clientCode: 0 }))
