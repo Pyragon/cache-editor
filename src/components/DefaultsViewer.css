@@ -1,0 +1,91 @@
+.recolor-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 760px;
+}
+
+.recolor-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.recolor-group summary {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  user-select: none;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.recolor-group[open] summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.recolor-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.recolor-slot {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.recolor-slot-src {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.recolor-src-input {
+  width: 72px;
+}
+
+.recolor-arrow {
+  color: var(--text-dim);
+  padding-top: 5px;
+  flex-shrink: 0;
+}
+
+.recolor-slot-dst {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.recolor-swatch-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.recolor-swatch {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  flex-shrink: 0;
+}
+
+/* -1 / no colour: checkerboard so it's visibly "none" */
+.recolor-swatch-none {
+  background-image:
+    linear-gradient(45deg, #555 25%, transparent 25%, transparent 75%, #555 75%),
+    linear-gradient(45deg, #555 25%, transparent 25%, transparent 75%, #555 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 4px 4px;
+  background-color: #2a2a2a;
+}

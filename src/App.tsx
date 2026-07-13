@@ -40,6 +40,8 @@ import HitbarViewer from './components/HitbarViewer'
 import type { HitbarData } from './loaders/config/hitbars'
 import HitsplatViewer from './components/HitsplatViewer'
 import type { HitsplatData } from './loaders/config/hitsplats'
+import DefaultsViewer from './components/DefaultsViewer'
+import type { DefaultsData } from './loaders/defaults'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -61,7 +63,7 @@ const GROUP_LABELS: Record<string, string> = {
 const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars', 'config_inventories',
   'config_hitbars', 'config_hitsplats',
-  'items', 'objects', 'npcs', 'varbits', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
+  'items', 'objects', 'npcs', 'varbits', 'defaults', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -237,6 +239,10 @@ function App() {
 
   const hitsplatContent = selectedEntry?.name === 'config_hitsplats' && selectedItemContent != null
     ? selectedItemContent as HitsplatData
+    : null
+
+  const defaultsContent = selectedEntry?.name === 'defaults' && selectedItemContent != null
+    ? selectedItemContent as DefaultsData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -719,6 +725,8 @@ function App() {
                 ? <HitbarViewer data={hitbarContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : hitsplatContent != null
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : defaultsContent != null
+                ? <DefaultsViewer data={defaultsContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
