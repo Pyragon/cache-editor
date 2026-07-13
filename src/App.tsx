@@ -34,6 +34,8 @@ import ParamViewer from './components/ParamViewer'
 import type { ParamData } from './loaders/config/params'
 import VarViewer from './components/VarViewer'
 import type { VarData } from './loaders/config/vars'
+import InventoryViewer from './components/InventoryViewer'
+import type { InventoryData } from './loaders/config/inventories'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -53,7 +55,7 @@ const GROUP_LABELS: Record<string, string> = {
 // falls back to the raw-JSON `<pre>` display, which gets a distinct sidebar
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
-  'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars',
+  'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars', 'config_inventories',
   'items', 'objects', 'npcs', 'varbits', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
 ])
 
@@ -218,6 +220,10 @@ function App() {
 
   const varContent = selectedEntry?.name === 'config_vars' && selectedItemContent != null
     ? selectedItemContent as VarData
+    : null
+
+  const inventoryContent = selectedEntry?.name === 'config_inventories' && selectedItemContent != null
+    ? selectedItemContent as InventoryData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -694,6 +700,8 @@ function App() {
                 ? <ParamViewer data={paramContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : varContent != null
                 ? <VarViewer data={varContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : inventoryContent != null
+                ? <InventoryViewer data={inventoryContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>

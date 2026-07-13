@@ -1,9 +1,14 @@
-import type { CacheLoader } from '../types'
-import { loadJsonItem, streamJsonItems } from '../common'
+import { makeJsonDefLoader } from '../common'
+import type { JsonDefData } from '../common'
 
-const loader: CacheLoader = {
-  streamItems: streamJsonItems,
-  loadItem: loadJsonItem,
+// Note: the dump has no id field inside inventory JSONs — just the length
+// and (optionally) parallel default-stock arrays.
+export type InventoryDef = {
+  length: number
+  ids?: number[]
+  amounts?: number[]
 }
 
-export default loader
+export type InventoryData = JsonDefData<InventoryDef>
+
+export default makeJsonDefLoader<InventoryDef>(() => ({ length: 0 }))
