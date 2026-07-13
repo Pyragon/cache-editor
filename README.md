@@ -43,7 +43,7 @@ Entries whose cryogen dumper was field-renamed against darkan-bot-refactor this 
 | 19 | `items` | Editor | Full editable editor (needs re-dump) |
 | 20 | `animations` | Not started | |
 | 21 | `spot_animations` | Not started | |
-| 22 | `varbits` | Editor | baseVar / start-bit / end-bit editor |
+| 22 | `varbits` | ✅ **Done** | baseVar / start-bit / end-bit editor |
 | 23 | `map_areas` | Not started | Top-level map areas (46) |
 | 24 | `quick_chat_messages` | Not started | `quick_chat/messages` |
 | 25 | `quick_chat_menus` | Not started | `quick_chat/menus` |

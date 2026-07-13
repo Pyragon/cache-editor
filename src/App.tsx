@@ -69,7 +69,7 @@ const SPECIALIZED_ENTRIES = new Set([
 // Feature-complete entries — rendered green in the sidebar. Only entries
 // the user has manually reviewed and signed off go in here.
 const DONE_ENTRIES = new Set([
-  'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'huffman', 'native_libraries',
+  'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'huffman', 'native_libraries', 'varbits',
 ])
 
 function entryStatusClass(entry: CacheEntry): string {
