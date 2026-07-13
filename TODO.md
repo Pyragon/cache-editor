@@ -1,5 +1,9 @@
 # TODO
 
+## Item Icons
+
+- **Generate item icons from our own cache instead of itemdb.biz.** The current set (`public/icons/`, fetched by `scripts/download-icons.mjs`) is scraped from itemdb.biz, which renders from the *latest* RS cache — a number of icons have changed since rev 727, so ours are subtly wrong. The proper fix is rendering them ourselves the way the client builds inventory icons: render the item's model (`inventoryModelId`) with the item's 2D params (zoom2d, xan2d/yan2d/zan2d, xOffset2d/yOffset2d) into a 32×32 canvas — the Three.js model pipeline in ModelViewer already does most of the heavy lifting. Check darkan's icon/sprite rendering code for the exact camera math before porting (see CLAUDE.md reference-repo rules).
+
 ## Quests
 
 Architecture note (investigated 2026-07-12): a quest lives in **two places** — the server-side quest JSON (`config/quests/<id> - <name>.json`) and the client-facing **cache struct** (`config/structs/<structId>.json`). Link: quest id → slot id (hardcoded `QUEST_ID_TO_SLOT`) → struct id (via enum `2252`, slot→struct). The viewer's "(cache)" sections edit the struct; the plain sections edit the quest JSON. The two hold overlapping/duplicated copies of the same data, and they can drift out of sync (confirmed: "Love Story" JSON lists 2 prereqs `[48,163]` but its struct only stores 1).
