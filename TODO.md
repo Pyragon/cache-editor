@@ -33,7 +33,7 @@ Architecture note (investigated 2026-07-12): a quest lives in **two places** —
 
 ## Hitsplats
 
-- **Preview uses bold 11px Arial as a stand-in font** — once a fonts viewer/loader exists, render the damage number with the actual cache font referenced by `fontId` so the preview is pixel-accurate to the client.
+- **Preview uses bold 11px Arial as a stand-in font** — once a fonts viewer/loader exists, render the damage number with the actual cache font referenced by `fontId` so the preview is pixel-accurate to the client. This is the last blocker before hitsplats can be marked done.
 - **Verify hitsplat 24's right cap in-game** — its `rightCap` reuses the inner-left sprite (4497) un-flipped. Investigation found NO flip/rotate flag anywhere: not in the JSON, not in the client (darkan `EntityUpdating.kt` draws all caps with a plain `draw(x, y, combineMode, color, blend)` — no mirror param), and the cap sprites aren't clean horizontal flips of each other. So the preview *should* match the client. Confirm by looking at hitsplat 24 in the actual game: if in-game also shows the un-flipped right cap, this is just a data quirk and no further action is needed; if the game closes off the right side, there's a flip path we haven't found and it needs deeper investigation.
 
 ## Huffman
