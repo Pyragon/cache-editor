@@ -1,0 +1,50 @@
+.object-shapes-wrap {
+  width: 520px;
+  max-width: 100%;
+  margin-top: 10px;
+}
+
+.object-int-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.object-int-list-row .item-field-label {
+  min-width: 150px;
+}
+
+.def-int-list {
+  flex: 1;
+  min-width: 0;
+  max-width: 420px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  padding: 5px 8px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.def-int-list:focus {
+  border-color: var(--electric-blue-bright);
+}
+
+.def-int-list::placeholder {
+  color: rgba(255, 255, 255, 0.15);
+  font-family: inherit;
+}
+
+.def-toggle-field {
+  cursor: pointer;
+}
+
+/* IntListInput inside a table cell should fill it */
+.quest-table .def-int-list {
+  max-width: none;
+  width: 100%;
+}

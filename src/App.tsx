@@ -22,6 +22,8 @@ import MapSpriteViewer from './components/MapSpriteViewer'
 import type { MapSpriteData } from './loaders/config/map_sprites'
 import ItemViewer from './components/ItemViewer'
 import type { ItemData } from './loaders/items'
+import ObjectViewer from './components/ObjectViewer'
+import type { ObjectData } from './loaders/objects'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -42,7 +44,7 @@ const GROUP_LABELS: Record<string, string> = {
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites',
-  'items', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
+  'items', 'objects', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -182,6 +184,10 @@ function App() {
 
   const itemContent = selectedEntry?.name === 'items' && selectedItemContent != null
     ? selectedItemContent as ItemData
+    : null
+
+  const objectContent = selectedEntry?.name === 'objects' && selectedItemContent != null
+    ? selectedItemContent as ObjectData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -646,6 +652,8 @@ function App() {
                 ? <MapSpriteViewer data={mapSpriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : itemContent != null
                 ? <ItemViewer data={itemContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : objectContent != null
+                ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
