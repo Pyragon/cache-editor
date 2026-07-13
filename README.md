@@ -17,7 +17,7 @@ Sidebar colours: **green** = feature-complete editor (user-reviewed), white = de
 
 Status legend: **✅ Done** = complete & reviewed (green) · **Editor** = full editable editor built, pending review (some await a re-dump — see below) · **Viewer** = read-only or partial viewer · **Not started** = raw-JSON fallback only · **Not implemented upstream** = no cryogen `dumpFiles()`, never appears in a dump.
 
-Entries whose cryogen dumper was field-renamed against darkan-bot-refactor this pass need a **re-dump** before their editor shows correct data: `items`, `objects`, `npcs`, `defaults`, and config `hitsplats`.
+Entries whose cryogen dumper was field-renamed against darkan-bot-refactor this pass need a **re-dump** before their editor shows correct data: `items`, `objects`, `npcs`, and config `hitsplats`.
 
 | # | Entry | Status | Notes |
 |---|---|---|---|
@@ -49,7 +49,7 @@ Entries whose cryogen dumper was field-renamed against darkan-bot-refactor this 
 | 25 | `quick_chat_menus` | Not started | `quick_chat/menus` |
 | 26 | `texture_definitions` | Not started | |
 | 27 | `particles` | Not started | |
-| 28 | `defaults` | Editor | entity / equipment blobs (needs re-dump) |
+| 28 | `defaults` | ✅ **Done** | entity / equipment blobs |
 | 29 | `billboards` | Not started | |
 | 30 | `native_libraries` | ✅ **Done** | File browser — view/download/replace/add. `.dll`/`.exe` files can't be touched due to a browser platform restriction (see notice in the viewer) |
 | 31 | `shaders` | Not implemented upstream | |
