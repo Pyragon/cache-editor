@@ -1,9 +1,15 @@
-import type { CacheLoader } from '../types'
-import { loadJsonItem, streamJsonItems } from '../common'
+import { makeJsonDefLoader } from '../common'
+import type { JsonDefData } from '../common'
 
-const loader: CacheLoader = {
-  streamItems: streamJsonItems,
-  loadItem: loadJsonItem,
+export type ParamDef = {
+  id: number
+  type: string
+  defaultInt: number
+  autoDisable: boolean
+  typeName?: string
+  [key: string]: unknown
 }
 
-export default loader
+export type ParamData = JsonDefData<ParamDef>
+
+export default makeJsonDefLoader<ParamDef>((id) => ({ id, type: 'i', defaultInt: 0, autoDisable: true }))
