@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { EnumData, EnumValue } from '../loaders/enums'
+import { TYPE_LABELS } from './typeChars'
 import './EnumViewer.css'
 
 type Props = {
@@ -9,14 +10,6 @@ type Props = {
 }
 
 type Row = { key: string; value: string }
-
-const TYPE_LABELS: Record<string, string> = {
-  i: 'int', s: 'string', o: 'obj id', n: 'npc id', K: 'idkit id', v: 'inv id',
-  J: 'struct id', m: 'model id', d: 'graphic id', g: 'enum id', l: 'loc',
-  k: 'chat category', c: 'coord grid', x: 'texture id', A: 'anim id', M: 'midi id',
-  j: 'jingle id', '1': 'boolean', '@': 'cursor id', '«': 'sound id', '`': 'map area',
-  I: 'component', S: 'stat id', t: 'spotanim id',
-}
 
 const CUSTOM_TYPES_KEY = 'cache-editor:enum-custom-types'
 
