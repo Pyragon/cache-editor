@@ -1,9 +1,13 @@
-import type { CacheLoader } from './types'
-import { loadJsonItem, streamJsonItems } from './common'
+import { makeJsonDefLoader } from './common'
+import type { JsonDefData } from './common'
 
-const loader: CacheLoader = {
-  streamItems: streamJsonItems,
-  loadItem: loadJsonItem,
+export type VarbitDef = {
+  id: number
+  baseVar: number
+  startBit: number
+  endBit: number
 }
 
-export default loader
+export type VarbitData = JsonDefData<VarbitDef>
+
+export default makeJsonDefLoader<VarbitDef>((id) => ({ id, baseVar: 0, startBit: 0, endBit: 0 }))

@@ -26,6 +26,8 @@ import ObjectViewer from './components/ObjectViewer'
 import type { ObjectData } from './loaders/objects'
 import NpcViewer from './components/NpcViewer'
 import type { NpcData } from './loaders/npcs'
+import VarbitViewer from './components/VarbitViewer'
+import type { VarbitData } from './loaders/varbits'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -46,7 +48,7 @@ const GROUP_LABELS: Record<string, string> = {
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites',
-  'items', 'objects', 'npcs', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
+  'items', 'objects', 'npcs', 'varbits', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -194,6 +196,10 @@ function App() {
 
   const npcContent = selectedEntry?.name === 'npcs' && selectedItemContent != null
     ? selectedItemContent as NpcData
+    : null
+
+  const varbitContent = selectedEntry?.name === 'varbits' && selectedItemContent != null
+    ? selectedItemContent as VarbitData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -662,6 +668,8 @@ function App() {
                 ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : npcContent != null
                 ? <NpcViewer data={npcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : varbitContent != null
+                ? <VarbitViewer data={varbitContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
