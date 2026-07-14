@@ -17,7 +17,7 @@ Sidebar colours: **green** = feature-complete editor (user-reviewed), white = de
 
 Status legend: **✅ Done** = complete & reviewed (green) · **Editor** = full editable editor built, pending review (some await a re-dump — see below) · **Viewer** = read-only or partial viewer · **Not started** = raw-JSON fallback only · **Not implemented upstream** = no cryogen `dumpFiles()`, never appears in a dump.
 
-Entries whose cryogen dumper was field-renamed against darkan-bot-refactor and still need a **re-dump** before their editor shows correct data: `texture_definitions`, `map_areas`, config `areas`, and config `skyboxes`. (`items`, `objects`, `npcs`, `billboards`, and config `hitsplats` have been re-dumped with the new names.)
+All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_definitions`, `map_areas`, config `areas`, config `hitsplats`, config `skyboxes`) have been **re-dumped** with the darkan-aligned names; the `textures` dump also carries the alpha channel + correct isHalfSize resolutions as of 2026-07-13.
 
 | # | Entry | Status | Notes |
 |---|---|---|---|
@@ -37,17 +37,17 @@ Entries whose cryogen dumper was field-renamed against darkan-bot-refactor and s
 | 13 | `font_metrics` | Not started | `fonts/metrics` |
 | 14 | `midi_instruments` | Not started | |
 | 15 | `sound_effects_midi` | Not implemented upstream | |
-| 16 | `objects` | Editor | Full editable editor (needs re-dump) |
+| 16 | `objects` | Editor | Full editable editor |
 | 17 | `enums` | Editor | Editable key/value table with type-char dropdowns |
-| 18 | `npcs` | Editor | Full editable editor (needs re-dump) |
-| 19 | `items` | Editor | Full editable editor (needs re-dump) |
+| 18 | `npcs` | Editor | Full editable editor |
+| 19 | `items` | Editor | Full editable editor |
 | 20 | `animations` | Not started | |
 | 21 | `spot_animations` | Not started | |
 | 22 | `varbits` | ✅ **Done** | baseVar / start-bit / end-bit editor |
-| 23 | `map_areas` | Editor | world map areas — name, placement, map size, area rects table (needs re-dump) |
+| 23 | `map_areas` | Editor | world map areas — name, placement, map size, area rects table |
 | 24 | `quick_chat_messages` | ✅ **Done** | Combined quick chat editor (Edit/Preview toggle, template chips, response navigation, segment/dynamic-part sync) |
 | 25 | `quick_chat_menus` | ✅ **Done** | Same combined editor — drill into submenus/messages, saves route to the right folder |
-| 26 | `texture_definitions` | Editor | full field editor with material preview + HSL16 colour swatch (needs re-dump) |
+| 26 | `texture_definitions` | Editor | full field editor with material preview + HSL16 colour swatch |
 | 27 | `particles` | Not started | |
 | 28 | `defaults` | ✅ **Done** | entity / equipment blobs |
 | 29 | `billboards` | ✅ **Done** | material id + size + shape/blend, live material preview, used-by-models list (scripts/scan-billboard-usage.mjs) |
@@ -83,7 +83,7 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 16 | `vars` | ✅ **Done** | Param-type dropdown + client code (verified against darkan `VarpType`: only opcodes 1/5 exist, so the sparse data is correct) |
 | 19 | `varc` | Not dumped | |
 | 26 | `structs` | ✅ **Done** | Param key→value table |
-| 29 | `skyboxes` | Editor | material preview + sun ids + background mode (needs re-dump) |
+| 29 | `skyboxes` | Editor | material preview + sun ids + background mode |
 | 30 | `sun` | Not started | Empty in the current dump |
 | 31 | `light_intensities` | Not dumped | |
 | 32 | `bas` | Not dumped | |
