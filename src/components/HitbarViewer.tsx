@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { HitbarData, HitbarDef } from '../loaders/config/hitbars'
 import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, averageSpriteColor, downloadSpritePng, imageDataFromFile, loadSpriteMeta, renderFrame, renderFrameToCanvas } from './spriteRender'
-import { writeNewSprite } from '../loaders/spriteStore'
+import { nextFreeSpriteId } from '../loaders/spriteStore'
+import type { PendingSprites } from '../loaders/spriteStore'
 import { NumberInput, NumGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import './HitbarViewer.css'
@@ -72,6 +73,7 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
   const [sprites, setSprites] = useState<Sprites>({ green: null, red: null, pGreen: null, pRed: null })
   const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  const [pendingSprites, setPendingSprites] = useState<PendingSprites>({})
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -79,6 +81,8 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
 
   useEffect(() => {
     setDraft(data.hitbar)
+    setPendingSprites({})
+    setUploadError(null)
     setIsDirty(false)
   }, [data])
 
@@ -161,9 +165,9 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
     fileInputRef.current!.click()
   }
 
-  // Upload never overwrites a shared sprite: it allocates the next free
-  // sprite id, writes the new sprite immediately, and points this slot at
-  // it. (A brand-new id can't collide with anything already referenced.)
+  // Upload never overwrites a shared sprite: it allocates a fresh sprite id
+  // and points this slot at it. The sprite is only *staged* here — saveItem
+  // writes it — so Discard drops it without leaving an orphan on disk.
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     const slot = pendingSlotRef.current
@@ -178,19 +182,17 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
       }
       const meta = applyImageToMeta(imageData, 0, blank)
 
-      let maxId = -1
-      for await (const handle of data.spritesDir.values()) {
-        if (handle.kind !== 'directory') continue
-        const id = parseInt(handle.name, 10)
-        if (!isNaN(id) && id > maxId) maxId = id
-      }
-      const newId = maxId + 1
+      // Reserve an id past anything already staged this session, so two
+      // uploads before a save can't land on the same id.
+      const staged = Object.values(pendingSprites).map((p) => p.id)
+      const newId = await nextFreeSpriteId(data.spritesDir, staged)
 
       const canvas = document.createElement('canvas')
       renderFrame(canvas, meta, 0)
       const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
-      await writeNewSprite(data.spritesDir, newId, meta, png)
 
+      // Staged only — saveItem writes it, so Discard leaves no orphan behind.
+      setPendingSprites((prev) => ({ ...prev, [slot.field]: { id: newId, meta, png } }))
       setSprites((prev) => ({ ...prev, [slot.metaKey]: meta }))
       set(slot.field, newId)
       setUploadError(null)
@@ -201,8 +203,16 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
 
   async function handleSave() {
     setIsSaving(true)
-    await onSave({ ...data, hitbar: draft })
+    await onSave({ ...data, hitbar: draft, pendingSprites })
+    setPendingSprites({})
     setIsSaving(false)
+    setIsDirty(false)
+  }
+
+  function handleDiscard() {
+    setDraft(data.hitbar)
+    setPendingSprites({})
+    setUploadError(null)
     setIsDirty(false)
   }
 
@@ -324,7 +334,7 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
       {isDirty && (
         <div className="save-bar">
           <span className="save-bar-label">Unsaved changes</span>
-          <button type="button" className="save-bar-discard" onClick={() => { setDraft(data.hitbar); setIsDirty(false) }}>Discard</button>
+          <button type="button" className="save-bar-discard" onClick={handleDiscard}>Discard</button>
           <button type="button" className="save-bar-save" onClick={handleSave} disabled={isSaving}>
             {isSaving ? 'Saving…' : 'Save'}
           </button>

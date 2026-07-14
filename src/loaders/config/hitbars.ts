@@ -1,5 +1,7 @@
 import type { CacheLoader } from '../types'
 import { deleteJsonItem, nextFreeJsonId, streamJsonItems, writeJsonItem } from '../common'
+import { writePendingSprites } from '../spriteStore'
+import type { PendingSprites } from '../spriteStore'
 
 // Fields per darkan-bot-refactor HitbarType.kt (flat <id>.json dump).
 export type HitbarDef = {
@@ -21,6 +23,10 @@ export type HitbarData = {
   id: number
   hitbar: HitbarDef
   spritesDir: FileSystemDirectoryHandle | null
+  // Uploads staged by the viewer — written by saveItem, so Discard drops them.
+  // Uploads always allocate a fresh sprite id (sprites are shared, so an
+  // existing one is never overwritten).
+  pendingSprites?: PendingSprites
 }
 
 const NEW_HITBAR_DEFAULTS: Omit<HitbarDef, 'id'> = {
@@ -58,7 +64,10 @@ const loader: CacheLoader = {
   },
 
   async saveItem(dirHandle, item, data) {
-    const { hitbar } = data as HitbarData
+    const { hitbar, spritesDir, pendingSprites } = data as HitbarData
+    // Create the sprites first so the definition never points at an id that
+    // failed to materialise.
+    await writePendingSprites(spritesDir, pendingSprites)
     await writeJsonItem(dirHandle, item.id, hitbar)
   },
 

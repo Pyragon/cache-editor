@@ -1,5 +1,7 @@
 import type { CacheLoader } from '../types'
 import { deleteJsonItem, nextFreeJsonId, streamJsonItems, writeJsonItem } from '../common'
+import { writePendingSprites } from '../spriteStore'
+import type { PendingSprites } from '../spriteStore'
 
 // Fields per darkan-bot-refactor HitSplatType.kt (flat <id>.json dump).
 // Sprite names follow kt's getter semantics: A=left cap, B=inner left,
@@ -26,6 +28,13 @@ export type HitsplatData = {
   id: number
   hitsplat: HitsplatDef
   spritesDir: FileSystemDirectoryHandle | null
+  // Uploads staged by the viewer — written by saveItem, so Discard drops them.
+  // Uploads always allocate a fresh sprite id (sprites are shared, so an
+  // existing one is never overwritten).
+  pendingSprites?: PendingSprites
+  // Cache root — the preview renders the damage number with the real cache
+  // font referenced by fontId.
+  rootDir?: FileSystemDirectoryHandle | null
 }
 
 const NEW_HITSPLAT_DEFAULTS: Omit<HitsplatDef, 'id'> = {
@@ -62,11 +71,14 @@ const loader: CacheLoader = {
       }
     }
 
-    return { id: item.id, hitsplat, spritesDir } satisfies HitsplatData
+    return { id: item.id, hitsplat, spritesDir, rootDir: rootHandle ?? null } satisfies HitsplatData
   },
 
   async saveItem(dirHandle, item, data) {
-    const { hitsplat } = data as HitsplatData
+    const { hitsplat, spritesDir, pendingSprites } = data as HitsplatData
+    // Create the sprites first so the definition never points at an id that
+    // failed to materialise.
+    await writePendingSprites(spritesDir, pendingSprites)
     await writeJsonItem(dirHandle, item.id, hitsplat)
   },
 
