@@ -4,7 +4,7 @@ import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, downloadSpritePng, imageDataFromFile, loadSpriteMeta, renderFrame, renderFrameToCanvas } from './spriteRender'
 import { nextFreeSpriteId } from '../loaders/spriteStore'
 import type { PendingSprites } from '../loaders/spriteStore'
-import { cacheTextHeight, drawCacheText, loadCacheFont, measureCacheText } from './fontRender'
+import { drawCacheText, loadCacheFont, measureCacheText } from './fontRender'
 import type { CacheFont } from './fontRender'
 import { NumberInput, NumGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
@@ -202,11 +202,13 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
     const textColor = draft.hasColor ? rgbIntToHex(draft.color) : '#ffffff'
 
     if (font) {
-      // Real cache font: glyph bitmaps blitted at advance-width intervals.
-      // drawCacheText takes the TOP of the glyph line, so convert from the
-      // client's baseline anchor using the font's own glyph height.
+      // Real cache font. The client passes textDrawY to renderPlain, and
+      // renderLine starts the glyphs at `y - verticalSpacing` (darkan
+      // AbstractFontRenderer:184) — so textDrawY is the BOTTOM of the line and
+      // the top is found by subtracting the font's line height, NOT the tallest
+      // glyph bitmap.
       const left = textCenterX - textWidth / 2
-      const top = textBaselineY - cacheTextHeight(font)
+      const top = textBaselineY - (font.metrics.verticalSpacing || 12)
       drawCacheText(ctx, font, text, left + 1, top + 1, '#000')
       drawCacheText(ctx, font, text, left, top, textColor)
     } else {
@@ -332,7 +334,7 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
                   ? 'No fontId set — showing an Arial stand-in.'
                   : `Font ${draft.fontId} has no glyphs in this dump — showing an Arial stand-in.`}
             </p>
-            <div className="hit-preview-controls">
+            <div className="hit-preview-controls hit-damage-control">
               <span className="item-field-label">Damage</span>
               <NumberInput
                 className="hit-preview-number"
