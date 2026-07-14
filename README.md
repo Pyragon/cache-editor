@@ -17,7 +17,7 @@ Sidebar colours: **green** = feature-complete editor (user-reviewed), white = de
 
 Status legend: **✅ Done** = complete & reviewed (green) · **Editor** = full editable editor built, pending review (some await a re-dump — see below) · **Viewer** = read-only or partial viewer · **Not started** = raw-JSON fallback only · **Not implemented upstream** = no cryogen `dumpFiles()`, never appears in a dump.
 
-Entries whose cryogen dumper was field-renamed against darkan-bot-refactor and still need a **re-dump** before their editor shows correct data: `billboards`, `texture_definitions`, `map_areas`, config `areas`, and config `skyboxes`. (`items`, `objects`, `npcs`, and config `hitsplats` have been re-dumped with the new names.)
+Entries whose cryogen dumper was field-renamed against darkan-bot-refactor and still need a **re-dump** before their editor shows correct data: `texture_definitions`, `map_areas`, config `areas`, and config `skyboxes`. (`items`, `objects`, `npcs`, `billboards`, and config `hitsplats` have been re-dumped with the new names.)
 
 | # | Entry | Status | Notes |
 |---|---|---|---|
@@ -50,7 +50,7 @@ Entries whose cryogen dumper was field-renamed against darkan-bot-refactor and s
 | 26 | `texture_definitions` | Editor | full field editor with material preview + HSL16 colour swatch (needs re-dump) |
 | 27 | `particles` | Not started | |
 | 28 | `defaults` | ✅ **Done** | entity / equipment blobs |
-| 29 | `billboards` | Editor | material id + size + shape/blend, live material preview (needs re-dump) |
+| 29 | `billboards` | ✅ **Done** | material id + size + shape/blend, live material preview, used-by-models list (scripts/scan-billboard-usage.mjs) |
 | 30 | `native_libraries` | ✅ **Done** | File browser — view/download/replace/add. `.dll`/`.exe` files can't be touched due to a browser platform restriction (see notice in the viewer) |
 | 31 | `shaders` | Not implemented upstream | |
 | 32 | `normal_fonts` | Not implemented upstream | |
