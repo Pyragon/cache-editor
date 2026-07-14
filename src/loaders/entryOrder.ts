@@ -67,6 +67,10 @@ export const ENTRY_ORDER: EntryDef[] = [
   { name: 'huffman', path: ['huffman'] },
   { name: 'music2', path: ['music2'] },
   { name: 'cs2', path: ['cs2'] },
+  // Fonts: the metrics (IndexType 13) and the glyph bitmaps from the font
+  // sprite archives (32 normal_fonts / 34 jagex_fonts) are two halves of one
+  // font, joined by file id. They're served as a single "Fonts" entry, so
+  // those two IndexType members have no separate row here.
   { name: 'font_metrics', path: ['fonts', 'metrics'] },
   { name: 'midi_instruments', path: ['midi_instruments'] },
   { name: 'sound_effects_midi', path: ['sound_effects_midi'] },
@@ -86,9 +90,7 @@ export const ENTRY_ORDER: EntryDef[] = [
   { name: 'billboards', path: ['billboards'] },
   { name: 'native_libraries', path: ['native_libraries'] },
   { name: 'shaders', path: ['shaders'] },
-  { name: 'normal_fonts', path: ['normal_fonts'] },
   { name: 'game_tips', path: ['game_tips'] },
-  { name: 'jagex_fonts', path: ['jagex_fonts'] },
   { name: 'cutscenes', path: ['cutscenes'] },
   { name: 'vorbis', path: ['vorbis'] },
 ]

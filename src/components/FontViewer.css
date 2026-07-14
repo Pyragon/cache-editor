@@ -1,0 +1,141 @@
+.font-preview-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 52px;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  overflow: auto;
+}
+
+.font-preview-canvas {
+  image-rendering: pixelated;
+  display: block;
+}
+
+.font-preview-controls {
+  margin-top: 12px;
+  max-width: 620px;
+}
+
+.font-glyphs-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 4px;
+}
+
+.font-glyphs-header h3 {
+  margin: 0;
+}
+
+.font-glyph-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  gap: 8px;
+  max-width: 900px;
+}
+
+.font-glyph-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.font-glyph-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.font-glyph-img-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  width: 100%;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 5px;
+}
+
+.font-glyph-img {
+  image-rendering: pixelated;
+  transform-origin: center;
+}
+
+
+.font-glyph-char {
+  font-family: monospace;
+  font-size: 14px;
+  color: #7eb8ff;
+}
+
+.font-glyph-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px solid var(--border);
+  padding-top: 5px;
+}
+
+.font-glyph-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.font-glyph-meta-label {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+}
+
+.font-glyph-meta-value {
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.font-glyph-meta-row .num-input {
+  width: 52px;
+  flex: 0 0 auto;
+}
+
+.font-glyph-advance {
+  width: 100%;
+  text-align: right;
+  padding: 2px 4px;
+}
+
+/* Sample text spans the controls row so long strings stay visible; the
+   textarea wraps instead of scrolling out of sight. */
+.font-sample-field {
+  max-width: 100%;
+}
+
+.font-sample-input {
+  resize: none;
+  overflow: hidden;
+  line-height: 1.45;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  border-bottom: 1px solid transparent;
+}
+
+.font-sample-input:focus {
+  border-bottom-color: var(--electric-blue-bright);
+}

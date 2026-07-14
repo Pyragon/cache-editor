@@ -13,7 +13,9 @@ export type QuestServerData = {
 
 export type CacheLoader = {
   noPanel?: boolean
-  streamItems: (dirHandle: FileSystemDirectoryHandle) => AsyncGenerator<LoadedItem>
+  // rootHandle is passed for entries whose item list spans more than their own
+  // folder (fonts joins fonts/metrics with fonts/glyphs).
+  streamItems: (dirHandle: FileSystemDirectoryHandle, rootHandle?: FileSystemDirectoryHandle) => AsyncGenerator<LoadedItem>
   loadItem: (dirHandle: FileSystemDirectoryHandle, item: LoadedItem, rootHandle?: FileSystemDirectoryHandle) => Promise<unknown>
   saveItem?: (dirHandle: FileSystemDirectoryHandle, item: LoadedItem, data: unknown) => Promise<void>
   // Optional item-list CRUD — entries without these render the Add/Remove/
