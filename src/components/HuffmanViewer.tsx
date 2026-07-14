@@ -53,9 +53,9 @@ export default function HuffmanViewer({ data }: { data: HuffmanData }) {
           <span className="stat"><strong>{data.table.length}</strong> tree nodes</span>
         </div>
         <div className="huffman-controls">
-          <div className="huffman-viewtoggle">
-            <button type="button" className={view === 'table' ? 'active' : ''} onClick={() => setView('table')}>Table</button>
-            <button type="button" className={view === 'visual' ? 'active' : ''} onClick={() => setView('visual')}>Visual</button>
+          <div className="mode-toggle">
+            <button type="button" className={view === 'table' ? 'active' : ''} onClick={() => setView('table')}>☰ Table</button>
+            <button type="button" className={view === 'visual' ? 'active' : ''} onClick={() => setView('visual')}>▦ Visual</button>
           </div>
           {view === 'table' && (
             <button type="button" className="huffman-toggle" onClick={() => setShowUnused((v) => !v)}>
@@ -66,22 +66,24 @@ export default function HuffmanViewer({ data }: { data: HuffmanData }) {
       </div>
 
       {view === 'table' ? (
-        <div className="huffman-table-scroll">
-          <table className="huffman-table">
-            <thead>
-              <tr><th>Byte</th><th>Char</th><th>Bits</th><th>Code</th></tr>
-            </thead>
-            <tbody>
-              {displayed.map((entry) => (
-                <tr key={entry.byte} className={entry.length === UNUSED_LENGTH ? 'unused' : ''}>
-                  <td className="cell-byte">{entry.byte}</td>
-                  <td className="cell-char">{entry.char}</td>
-                  <td className="cell-bits">{entry.length}</td>
-                  <td className="cell-code">{entry.code || '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="huffman-table-shell">
+          <div className="huffman-table-scroll">
+            <table className="huffman-table">
+              <thead>
+                <tr><th>Byte</th><th>Char</th><th>Bits</th><th>Code</th></tr>
+              </thead>
+              <tbody>
+                {displayed.map((entry) => (
+                  <tr key={entry.byte} className={entry.length === UNUSED_LENGTH ? 'unused' : ''}>
+                    <td className="cell-byte">{entry.byte}</td>
+                    <td className="cell-char">{entry.char}</td>
+                    <td className="cell-bits">{entry.length}</td>
+                    <td className="cell-code">{entry.code || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <VisualView active={active} />
@@ -102,12 +104,15 @@ function VisualView({ active }: { active: Entry[] }) {
   const min = Math.min(...lengths)
   const max = Math.max(...lengths)
 
-  // Histogram: count of symbols per code length across the full range.
+  // Histogram: count (and members) of symbols per code length across the full range.
   const histogram = useMemo(() => {
-    const counts = new Map<number, number>()
-    for (const e of active) counts.set(e.length, (counts.get(e.length) ?? 0) + 1)
-    const rows: { length: number; count: number }[] = []
-    for (let l = min; l <= max; l++) rows.push({ length: l, count: counts.get(l) ?? 0 })
+    const byLength = new Map<number, string[]>()
+    for (const e of active) {
+      if (!byLength.has(e.length)) byLength.set(e.length, [])
+      byLength.get(e.length)!.push(e.char)
+    }
+    const rows: { length: number; count: number; chars: string[] }[] = []
+    for (let l = min; l <= max; l++) rows.push({ length: l, count: byLength.get(l)?.length ?? 0, chars: byLength.get(l) ?? [] })
     return rows
   }, [active, min, max])
   const peak = Math.max(...histogram.map((h) => h.count), 1)
@@ -120,6 +125,12 @@ function VisualView({ active }: { active: Entry[] }) {
         <div className="huffman-histogram">
           {histogram.map((h) => (
             <div key={h.length} className="huffman-histo-col">
+              {h.count > 0 && (
+                <div className="huffman-histo-tooltip">
+                  <strong>{h.length} bits</strong> · {h.count} char{h.count === 1 ? '' : 's'}
+                  <div className="huffman-histo-tooltip-chars">{h.chars.join(' ')}</div>
+                </div>
+              )}
               <span className="huffman-histo-count">{h.count || ''}</span>
               <div
                 className="huffman-histo-bar"

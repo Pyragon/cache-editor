@@ -6,18 +6,71 @@
   overflow: hidden;
 }
 
+/* Outer shell owns the visible border/radius; the inner scroll div is an
+   inset child so its scrollbar sits a bit off the shell's corners instead
+   of flush against them (padding on the scrolling element itself never
+   moves its own scrollbar away from its own edge). */
+.huffman-table-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  padding: 6px;
+}
+
 .huffman-table-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  border-radius: 8px;
-  border: 1px solid var(--border);
+  /* Slightly smaller than the shell's 8px radius since this box is already
+     inset by the shell's padding. overflow:auto clips content (including
+     the sticky header) to this rounded shape, giving the header's top
+     corners a matching curve without touching border-collapse/th radius
+     (which browsers ignore in the collapsed border model anyway). */
+  border-radius: 6px;
+
+  scrollbar-width: thin;
+  scrollbar-color: var(--grey-light) transparent;
+}
+
+.huffman-table-scroll::-webkit-scrollbar,
+.huffman-visual-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.huffman-table-scroll::-webkit-scrollbar-button,
+.huffman-visual-scroll::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.huffman-table-scroll::-webkit-scrollbar-track,
+.huffman-visual-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.huffman-table-scroll::-webkit-scrollbar-thumb,
+.huffman-visual-scroll::-webkit-scrollbar-thumb {
+  background: var(--grey-light);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+.huffman-table-scroll::-webkit-scrollbar-thumb:hover,
+.huffman-visual-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--electric-blue);
+  background-clip: padding-box;
 }
 
 .huffman-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
   flex-shrink: 0;
 }
 
@@ -59,42 +112,21 @@
   color: var(--text);
 }
 
-.huffman-viewtoggle {
-  display: flex;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.huffman-viewtoggle button {
-  padding: 5px 12px;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.huffman-viewtoggle button.active {
-  background: rgba(0, 102, 255, 0.18);
-  color: #7eb8ff;
-}
-
-.huffman-viewtoggle button:not(.active):hover {
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text);
-}
+/* View toggle uses the shared .mode-toggle pill (QuickChatViewer.css). */
 
 /* --- Visual view --- */
 .huffman-visual-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 28px;
   padding-right: 6px;
+
+  scrollbar-width: thin;
+  scrollbar-color: var(--grey-light) transparent;
 }
 
 .huffman-visual-section h3 {
@@ -120,12 +152,61 @@
 }
 
 .huffman-histo-col {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
   flex: 1;
   min-width: 22px;
+}
+
+.huffman-histo-tooltip {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translate(-50%, -6px);
+  z-index: 10;
+  width: max-content;
+  max-width: 260px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated, #1c1f26);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
+.huffman-histo-col:hover .huffman-histo-tooltip {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* Anchor edge tooltips to the column's inner side so they clip against the
+   container (overflow-x: hidden on .huffman-visual-scroll) less often. */
+.huffman-histo-col:first-child .huffman-histo-tooltip {
+  left: 0;
+  transform: translateY(-6px);
+}
+
+.huffman-histo-col:last-child .huffman-histo-tooltip {
+  left: auto;
+  right: 0;
+  transform: translateY(-6px);
+}
+
+.huffman-histo-tooltip-chars {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-family: monospace;
+  word-break: break-all;
+  white-space: pre-wrap;
 }
 
 .huffman-histo-count {
