@@ -137,16 +137,19 @@ export default function MapAreaViewer({ data, onSave, onDirtyChange }: Props) {
       </section>
 
       <section className="item-section">
-        <h3>Map Bounds (derived from rects on save)</h3>
+        <h3>Map Bounds (derived from the rects below, saved with the file)</h3>
         <p className="map-sprite-none">
-          X {draft.boundsMinX} – {draft.boundsMaxX}, Y {draft.boundsMinY} – {draft.boundsMaxY}
+          {rects.length === 0
+            ? 'No rects — bounds are undefined.'
+            : `X ${Math.min(...rects.map((r) => r.mapMinX))} – ${Math.max(...rects.map((r) => r.mapMaxX))}, ` +
+              `Y ${Math.min(...rects.map((r) => r.mapMinY))} – ${Math.max(...rects.map((r) => r.mapMaxY))}`}
         </p>
       </section>
 
       <section className="item-section">
         <h3>Area Rects</h3>
         {rects.length > 0 && (
-          <div className="quest-table-wrap item-pair-wrap">
+          <div className="quest-table-wrap item-params-wrap map-area-rects">
             <table className="quest-table">
               <thead>
                 <tr>

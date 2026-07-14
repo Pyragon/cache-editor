@@ -209,8 +209,8 @@ export default function SpriteViewer({ data, onSave, onDirtyChange }: Props) {
                   />
                 </div>
               ))}
-              <div className="sprite-meta-card">
-                <span className="sprite-meta-label">Vertical</span>
+              <div className="sprite-meta-card" title="Cache storage order only (column-major pixel packing) — does not rotate or change how the sprite renders. Kept so repacking can write the original byte order.">
+                <span className="sprite-meta-label">Vertical Storage</span>
                 <label className="sprite-toggle">
                   <input
                     type="checkbox"
