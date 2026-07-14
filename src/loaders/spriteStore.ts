@@ -26,6 +26,28 @@ export async function nextFreeSpriteId(
   return maxId + 1
 }
 
+// Writes a sprite archive with a PNG per frame (`<id>_<frame>.png`), which is
+// the layout the dump uses and what the fonts loader reads glyphs from —
+// writeNewSprite only emits frame 0, so it can't represent a 256-glyph font.
+export async function writeSpriteFrames(
+  spritesDir: FileSystemDirectoryHandle,
+  id: number,
+  meta: SpriteMeta,
+  frames: (Blob | null)[],
+): Promise<void> {
+  await writeNewSprite(spritesDir, id, meta, null)
+
+  const subHandle = await spritesDir.getDirectoryHandle(String(id), { create: true })
+  for (let frame = 0; frame < frames.length; frame++) {
+    const png = frames[frame]
+    if (!png) continue
+    const pngHandle = await subHandle.getFileHandle(`${id}_${frame}.png`, { create: true })
+    const writable = await pngHandle.createWritable()
+    await writable.write(png)
+    await writable.close()
+  }
+}
+
 // Writes every staged upload. Called from saveItem, never from an upload handler.
 export async function writePendingSprites(
   spritesDir: FileSystemDirectoryHandle | null,

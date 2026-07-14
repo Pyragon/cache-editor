@@ -1,4 +1,6 @@
 import type { CacheLoader, LoadedItem } from './types'
+import type { SpriteMeta } from './sprites'
+import { writeSpriteFrames } from './spriteStore'
 
 // A font is two halves sharing a file id (darkan FontCombo/BasicFontProvider):
 //   fonts/metrics/<id>.json          — advance widths, line height, padding
@@ -28,6 +30,11 @@ export type FontData = {
   // Where the glyphs came from: the dedicated font index, the sprites index
   // (the client reads from either — see loadGlyphsFromSprites), or nowhere.
   glyphSource: 'fonts' | 'sprites' | 'none'
+  // Cache root, so the viewer can write an imported font's sprite archive.
+  rootDir?: FileSystemDirectoryHandle | null
+  // A font imported from a TTF/OTF, staged by the viewer. saveItem writes the
+  // sprite archive and the metrics together, so Discard leaves nothing behind.
+  pendingImport?: { spriteId: number; meta: SpriteMeta; frames: (Blob | null)[] } | null
 }
 
 type GlyphIndex = { id: number; glyphCount: number; chars: number[] }
@@ -180,15 +187,22 @@ const loader: CacheLoader = {
 
     // The real font id, not the offset list id — it's what's displayed and
     // what the metrics file is named.
-    return { id, kind, metrics, glyphs, glyphSource } satisfies FontData
+    return { id, kind, metrics, glyphs, glyphSource, rootDir: rootHandle ?? null } satisfies FontData
   },
 
-  // Only the metrics half is editable; glyph bitmaps come from the sprite
-  // archives and aren't repackable yet.
+  // Writes the metrics, plus the sprite archive when a TTF/OTF import is
+  // staged. The sprite goes first so the metrics never name a font whose
+  // glyphs failed to materialise.
   async saveItem(dirHandle, item, data) {
-    const { metrics } = data as FontData
+    const { metrics, pendingImport, rootDir } = data as FontData
     if (!metrics) return
     const { id } = realId(item.id)
+
+    if (pendingImport && rootDir) {
+      const spritesDir = await rootDir.getDirectoryHandle('sprites', { create: true })
+      await writeSpriteFrames(spritesDir, pendingImport.spriteId, pendingImport.meta, pendingImport.frames)
+    }
+
     const fileHandle = await dirHandle.getFileHandle(`${id}.json`, { create: true })
     const writable = await fileHandle.createWritable()
     await writable.write(JSON.stringify(metrics, null, 2))

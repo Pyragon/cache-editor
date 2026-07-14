@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FontData, FontMetricsDef } from '../loaders/font_metrics'
 import { NumberInput } from './defFields'
+import { DEFAULT_IMPORT, frameToCanvas, loadFontFace, rasteriseFont } from './fontImport'
+import type { ImportOptions, ImportedFont } from './fontImport'
+import { nextFreeSpriteId } from '../loaders/spriteStore'
 import './FontViewer.css'
 
 type Props = {
@@ -8,6 +11,10 @@ type Props = {
   onSave: (data: FontData) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
 }
+
+// The sample survives switching fonts (handy for comparing them), so there's
+// a Reset button to get back to this.
+const DEFAULT_SAMPLE = 'The quick brown fox 0123456789'
 
 function charLabel(code: number): string {
   if (code === 32) return 'SP'
@@ -108,6 +115,84 @@ function autoGrow(el: HTMLTextAreaElement | null) {
   el.style.height = `${el.scrollHeight}px`
 }
 
+// Live preview of a rasterised TTF/OTF, before it's applied: the sample text
+// laid out with the imported advance widths, plus a strip of the glyphs.
+// Draws straight from the SpriteMeta frames, so it shows exactly what would be
+// written to the cache — not the browser's own rendering of the font.
+function ImportPreview({ imported, sample, zoom }: {
+  imported: ImportedFont
+  sample: string
+  zoom: number
+}) {
+  const textRef = useRef<HTMLCanvasElement>(null)
+  const atlasRef = useRef<HTMLCanvasElement>(null)
+
+  useEffect(() => {
+    const { meta, metrics } = imported
+    const widths = metrics.glyphWidths ?? []
+    const lineHeight = metrics.verticalSpacing || 12
+
+    // --- sample text ---
+    const canvas = textRef.current
+    if (canvas) {
+      let textWidth = 1
+      for (const ch of sample) textWidth += widths[ch.charCodeAt(0)] ?? 0
+
+      canvas.width = textWidth * zoom
+      canvas.height = lineHeight * zoom
+      const ctx = canvas.getContext('2d')!
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.imageSmoothingEnabled = false
+      ctx.scale(zoom, zoom)
+
+      let penX = 0
+      for (const ch of sample) {
+        const code = ch.charCodeAt(0)
+        const glyph = frameToCanvas(meta, code)
+        if (glyph) ctx.drawImage(glyph, penX, 0)
+        penX += widths[code] ?? 0
+      }
+    }
+
+    // --- glyph strip (A–Z a–z 0–9) ---
+    const atlas = atlasRef.current
+    if (atlas) {
+      const codes = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789']
+        .map((c) => c.charCodeAt(0))
+
+      let stripWidth = 1
+      for (const code of codes) stripWidth += (widths[code] ?? 0) + 1
+
+      atlas.width = stripWidth * zoom
+      atlas.height = lineHeight * zoom
+      const ctx = atlas.getContext('2d')!
+      ctx.clearRect(0, 0, atlas.width, atlas.height)
+      ctx.imageSmoothingEnabled = false
+      ctx.scale(zoom, zoom)
+
+      let penX = 0
+      for (const code of codes) {
+        const glyph = frameToCanvas(meta, code)
+        if (glyph) ctx.drawImage(glyph, penX, 0)
+        penX += (widths[code] ?? 0) + 1
+      }
+    }
+  }, [imported, sample, zoom])
+
+  return (
+    <div className="font-import-preview">
+      <span className="item-field-label">Sample</span>
+      <div className="font-preview-wrap">
+        <canvas ref={textRef} className="font-preview-canvas" />
+      </div>
+      <span className="item-field-label">Glyphs</span>
+      <div className="font-preview-wrap font-import-strip">
+        <canvas ref={atlasRef} className="font-preview-canvas" />
+      </div>
+    </div>
+  )
+}
+
 function GlyphCell({ code, blob, zoom }: { code: number; blob: Blob; zoom: number }) {
   const [url, setUrl] = useState<string | null>(null)
 
@@ -133,14 +218,114 @@ export default function FontViewer({ data, onSave, onDirtyChange }: Props) {
   const [draft, setDraft] = useState<FontMetricsDef | null>(data.metrics)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
-  const [sample, setSample] = useState('The quick brown fox 0123456789')
+  const [sample, setSample] = useState(DEFAULT_SAMPLE)
   const [color, setColor] = useState('#ffffff')
   const [zoom, setZoom] = useState(1)
   const [showAll, setShowAll] = useState(false)
   const [bitmaps, setBitmaps] = useState<Map<number, ImageBitmap>>(new Map())
+  const sampleRef = useRef<HTMLTextAreaElement>(null)
+
+  // --- TTF/OTF import ---
+  const [importFamily, setImportFamily] = useState<string | null>(null)
+  const [importOpts, setImportOpts] = useState<ImportOptions>(DEFAULT_IMPORT)
+  const [importResult, setImportResult] = useState<ImportedFont | null>(null)
+  const [importSpriteId, setImportSpriteId] = useState<number | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [pendingImport, setPendingImport] = useState<FontData['pendingImport']>(null)
+  const fontFileRef = useRef<HTMLInputElement>(null)
+  const releaseFontRef = useRef<(() => void) | null>(null)
+
+  // Drop the loaded FontFace when leaving the page or swapping fonts.
+  useEffect(() => () => releaseFontRef.current?.(), [])
+
+  // SECURITY: the file is read as bytes and handed to the browser's font
+  // rasteriser only — never executed, evaluated, or written to disk. The input
+  // is cleared immediately so no reference to the file survives.
+  async function handleFontFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    setImportError(null)
+    setImportResult(null)
+    if (file.size > 20 * 1024 * 1024) {
+      setImportError('File too large — max 20 MB.')
+      return
+    }
+    if (!/\.(ttf|otf)$/i.test(file.name)) {
+      setImportError('Not a .ttf or .otf file.')
+      return
+    }
+
+    try {
+      releaseFontRef.current?.()
+      const { family, release } = await loadFontFace(file)
+      releaseFontRef.current = release
+      setImportFamily(family)
+      if (data.rootDir) {
+        setImportSpriteId(await nextFreeSpriteId(await data.rootDir.getDirectoryHandle('sprites')))
+      }
+    } catch {
+      setImportError("Couldn't read that font — is it a valid TTF/OTF?")
+    }
+  }
+
+  // Re-rasterise whenever the font or its options change, so the preview is live.
+  useEffect(() => {
+    if (!importFamily) return
+    try {
+      setImportResult(rasteriseFont(importFamily, importOpts, data.id))
+      setImportError(null)
+    } catch {
+      setImportError('Rasterising failed at these settings.')
+    }
+  }, [importFamily, importOpts, data.id])
+
+  // Stage the import: preview it in the editor, but nothing is written until Save.
+  async function applyImport() {
+    if (!importResult || importSpriteId == null) return
+
+    const frames = await Promise.all(
+      Array.from({ length: 256 }, async (_, code) => {
+        const canvas = frameToCanvas(importResult.meta, code)
+        if (!canvas) return null
+        return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+      }),
+    )
+
+    setPendingImport({ spriteId: importSpriteId, meta: importResult.meta, frames })
+    setDraft(importResult.metrics)
+
+    // Preview the imported glyphs immediately.
+    const decoded = new Map<number, ImageBitmap>()
+    await Promise.all(frames.map(async (png, code) => {
+      if (png) decoded.set(code, await createImageBitmap(png))
+    }))
+    setBitmaps(decoded)
+
+    setIsDirty(true)
+    setImportResult(null)
+    setImportFamily(null)
+    releaseFontRef.current?.()
+  }
+
+  function cancelImport() {
+    setImportResult(null)
+    setImportFamily(null)
+    setImportError(null)
+    releaseFontRef.current?.()
+  }
+
+  // Resize on the VALUE, not in the change handler: Reset (and any other
+  // programmatic set) never goes through onChange, so the box kept its old
+  // height and stopped wrapping to fit.
+  useEffect(() => {
+    autoGrow(sampleRef.current)
+  }, [sample])
 
   useEffect(() => {
     setDraft(data.metrics)
+    setPendingImport(null)
     // Drop the previous font's bitmaps right away — otherwise the preview
     // renders one frame with the old glyphs before the new ones decode.
     setBitmaps(new Map())
@@ -192,8 +377,15 @@ export default function FontViewer({ data, onSave, onDirtyChange }: Props) {
   async function handleSave() {
     if (!draft) return
     setIsSaving(true)
-    await onSave({ ...data, metrics: draft })
+    await onSave({ ...data, metrics: draft, pendingImport })
+    setPendingImport(null)
     setIsSaving(false)
+    setIsDirty(false)
+  }
+
+  function handleDiscard() {
+    setDraft(data.metrics)
+    setPendingImport(null)
     setIsDirty(false)
   }
 
@@ -242,13 +434,25 @@ export default function FontViewer({ data, onSave, onDirtyChange }: Props) {
             </div>
             <div className="item-grid font-preview-controls">
               <label className="item-field font-sample-field">
-                <span className="item-field-label">Sample Text · {sample.length} chars</span>
+                <span className="item-field-label font-sample-label">
+                  <span>Sample Text · {sample.length} chars</span>
+                  {sample !== DEFAULT_SAMPLE && (
+                    <button
+                      type="button"
+                      className="font-sample-reset"
+                      title="Restore the default sample text"
+                      onClick={() => setSample(DEFAULT_SAMPLE)}
+                    >
+                      Reset
+                    </button>
+                  )}
+                </span>
                 <textarea
                   className="item-field-input font-sample-input"
                   rows={1}
                   value={sample}
-                  ref={autoGrow}
-                  onChange={(e) => { setSample(e.target.value); autoGrow(e.target) }}
+                  ref={sampleRef}
+                  onChange={(e) => setSample(e.target.value)}
                 />
               </label>
               <label className="item-field">
@@ -267,6 +471,93 @@ export default function FontViewer({ data, onSave, onDirtyChange }: Props) {
           </>
         )}
       </section>
+
+      <details className="huffman-regen" open={importResult != null}>
+        <summary>Import a TTF/OTF font…</summary>
+        <div className="huffman-regen-body">
+          <ul className="huffman-regen-disclaimers">
+            <li>
+              The font is rasterised in your browser at the pixel size you pick, producing a
+              <strong> 256-frame sprite archive</strong> (one bitmap per cp1252 character) and a
+              <strong> metrics file</strong> (advance widths + line height). Only the 256 byte codes
+              are addressable, so glyphs outside cp1252 can't be represented.
+            </li>
+            <li>
+              The file is read as bytes and handed to the browser's font rasteriser — never executed,
+              and never written anywhere. Nothing touches disk until you press Save.
+            </li>
+            <li>
+              Cache fonts are small and hand-pixelled. Antialiasing is off by default so glyphs stay
+              crisp; raise the threshold if strokes look too heavy.
+            </li>
+          </ul>
+
+          <input
+            ref={fontFileRef}
+            type="file"
+            accept=".ttf,.otf,font/ttf,font/otf"
+            style={{ display: 'none' }}
+            onChange={handleFontFile}
+          />
+          <button type="button" className="huffman-regen-upload" onClick={() => fontFileRef.current?.click()}>
+            🅵 Choose a .ttf / .otf file…
+          </button>
+
+          {importError && <p className="huffman-regen-error">{importError}</p>}
+
+          {importFamily && (
+            <>
+              <div className="item-grid font-import-options">
+                <label className="item-field">
+                  <span className="item-field-label">Pixel Size</span>
+                  <NumberInput value={importOpts.pixelSize} min={4} max={64}
+                    onChange={(v) => setImportOpts((o) => ({ ...o, pixelSize: v }))} />
+                </label>
+                <label className="item-field">
+                  <span className="item-field-label">Threshold (0–255)</span>
+                  <NumberInput value={importOpts.threshold} min={1} max={254}
+                    onChange={(v) => setImportOpts((o) => ({ ...o, threshold: v }))} />
+                </label>
+                <label className="item-field def-toggle-field">
+                  <span className="item-field-label">Bold</span>
+                  <span className="sprite-toggle">
+                    <input type="checkbox" checked={importOpts.bold}
+                      onChange={(e) => setImportOpts((o) => ({ ...o, bold: e.target.checked }))} />
+                    <span className="sprite-toggle-track" />
+                  </span>
+                </label>
+                <label className="item-field def-toggle-field">
+                  <span className="item-field-label">Antialias</span>
+                  <span className="sprite-toggle">
+                    <input type="checkbox" checked={importOpts.antialias}
+                      onChange={(e) => setImportOpts((o) => ({ ...o, antialias: e.target.checked }))} />
+                    <span className="sprite-toggle-track" />
+                  </span>
+                </label>
+              </div>
+
+              {importResult && (
+                <div className="huffman-regen-result">
+                  <ImportPreview imported={importResult} sample={sample} zoom={zoom} />
+                  <p>
+                    <strong>{importResult.glyphCount}</strong> glyphs rasterised at{' '}
+                    <strong>{importOpts.pixelSize}px</strong> · line height{' '}
+                    <strong>{importResult.metrics.verticalSpacing}</strong>
+                  </p>
+                  <p className="qc-hint">
+                    Saving creates sprite <strong>{importSpriteId}</strong> and writes
+                    fonts/metrics/{data.id}.json — replacing this font's glyphs and metrics.
+                  </p>
+                  <div className="huffman-regen-actions">
+                    <button type="button" className="save-bar-discard" onClick={cancelImport}>Discard</button>
+                    <button type="button" className="save-bar-save" onClick={applyImport}>Apply</button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </details>
 
       {draft ? (
         <section className="item-section">
@@ -337,7 +628,7 @@ export default function FontViewer({ data, onSave, onDirtyChange }: Props) {
       {isDirty && (
         <div className="save-bar">
           <span className="save-bar-label">Unsaved changes — saves to fonts/metrics/{data.id}.json</span>
-          <button type="button" className="save-bar-discard" onClick={() => { setDraft(data.metrics); setIsDirty(false) }}>Discard</button>
+          <button type="button" className="save-bar-discard" onClick={handleDiscard}>Discard</button>
           <button type="button" className="save-bar-save" onClick={handleSave} disabled={isSaving}>
             {isSaving ? 'Saving…' : 'Save'}
           </button>

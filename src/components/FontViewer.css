@@ -18,6 +18,9 @@
 }
 
 .font-preview-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-top: 12px;
   max-width: 620px;
 }
@@ -35,7 +38,7 @@
 
 .font-glyph-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   gap: 8px;
   max-width: 900px;
 }
@@ -110,7 +113,7 @@
 }
 
 .font-glyph-meta-row .num-input {
-  width: 52px;
+  width: 74px;
   flex: 0 0 auto;
 }
 
@@ -123,7 +126,9 @@
 /* Sample text spans the controls row so long strings stay visible; the
    textarea wraps instead of scrolling out of sight. */
 .font-sample-field {
-  max-width: 100%;
+  /* Fits "Sample Text · N chars" + the Reset button, and no wider. */
+  flex: 0 0 230px;
+  min-width: 0;
 }
 
 .font-sample-input {
@@ -138,4 +143,64 @@
 
 .font-sample-input:focus {
   border-bottom-color: var(--electric-blue-bright);
+}
+
+.font-sample-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  /* .item-field-label truncates (nowrap + overflow hidden); allow the label to
+     use the extra width, and to wrap instead of clipping if space runs out. */
+  overflow: visible;
+  white-space: normal;
+}
+
+.font-sample-label > span {
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.35;
+}
+
+.font-sample-reset {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.font-sample-reset:hover {
+  background: rgba(0, 102, 255, 0.18);
+  border-color: rgba(126, 184, 255, 0.45);
+  color: #7eb8ff;
+}
+
+/* --- TTF/OTF import preview --- */
+.font-import-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.font-import-preview .font-preview-wrap {
+  padding: 10px 12px;
+}
+
+.font-import-strip {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.font-import-options {
+  max-width: 620px;
+  margin-bottom: 4px;
 }
