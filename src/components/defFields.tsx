@@ -21,6 +21,62 @@ export function ItemIcon({ id }: { id: number }) {
   )
 }
 
+// Number input with styled −/+ steppers instead of the browser's tiny
+// unstyled spinner arrows (hidden via .num-input in ItemViewer.css).
+// `className` picks the surrounding field style (item-field-input in grids,
+// cell-input in tables) so it drops into either context.
+export function NumberInput({ value, onChange, className = 'item-field-input', step = 1, min, max, title, placeholder }: {
+  value: number
+  onChange: (value: number) => void
+  className?: string
+  step?: number
+  min?: number
+  max?: number
+  title?: string
+  placeholder?: string
+}) {
+  function clamp(next: number): number {
+    if (min != null && next < min) return min
+    if (max != null && next > max) return max
+    return next
+  }
+
+  return (
+    <span className="num-input" title={title}>
+      <input
+        className={`${className} num-input-field`}
+        type="number"
+        value={Number.isFinite(value) ? value : 0}
+        placeholder={placeholder}
+        onChange={(e) => {
+          const parsed = parseInt(e.target.value, 10)
+          onChange(clamp(Number.isNaN(parsed) ? 0 : parsed))
+        }}
+      />
+      <span className="num-input-steps">
+        <button
+          type="button"
+          className="num-input-step"
+          tabIndex={-1}
+          disabled={min != null && value <= min}
+          onClick={() => onChange(clamp(value - step))}
+        >
+          −
+        </button>
+        <button
+          type="button"
+          className="num-input-step"
+          tabIndex={-1}
+          disabled={max != null && value >= max}
+          onClick={() => onChange(clamp(value + step))}
+        >
+          +
+        </button>
+      </span>
+    </span>
+  )
+}
+
 export type NumFieldDef = [key: string, label: string]
 
 export function NumGrid({ fields, values, onChange }: {
@@ -33,12 +89,7 @@ export function NumGrid({ fields, values, onChange }: {
       {fields.map(([key, label]) => (
         <label key={key} className="item-field">
           <span className="item-field-label" title={label}>{label}</span>
-          <input
-            className="item-field-input"
-            type="number"
-            value={Number(values[key] ?? 0)}
-            onChange={(e) => onChange(key, parseInt(e.target.value, 10) || 0)}
-          />
+          <NumberInput value={Number(values[key] ?? 0)} onChange={(v) => onChange(key, v)} />
         </label>
       ))}
     </div>
@@ -118,10 +169,8 @@ export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, o
               {src.map((s, i) => (
                 <tr key={i}>
                   {srcIcon && <td className="pair-icon-cell">{srcIcon(s)}</td>}
-                  <td><input className="cell-input" type="number" value={s}
-                    onChange={(e) => onSet(i, 0, parseInt(e.target.value, 10) || 0)} /></td>
-                  <td><input className="cell-input" type="number" value={dst[i] ?? 0}
-                    onChange={(e) => onSet(i, 1, parseInt(e.target.value, 10) || 0)} /></td>
+                  <td><NumberInput className="cell-input" value={s} onChange={(v) => onSet(i, 0, v)} /></td>
+                  <td><NumberInput className="cell-input" value={dst[i] ?? 0} onChange={(v) => onSet(i, 1, v)} /></td>
                   <td><button type="button" className="row-remove-btn" onClick={() => onRemove(i)}>×</button></td>
                 </tr>
               ))}

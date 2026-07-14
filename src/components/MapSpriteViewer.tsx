@@ -1,3 +1,4 @@
+import { NumberInput } from './defFields'
 import { useEffect, useRef, useState } from 'react'
 import type { MapSpriteData, MapSpriteDef } from '../loaders/config/map_sprites'
 import type { SpriteMeta } from '../loaders/sprites'
@@ -234,14 +235,10 @@ export default function MapSpriteViewer({ data, onSave, onDirtyChange }: Props) 
       <div className="map-sprite-stats">
         <div className="stat-card">
           <span className="stat-label">Sprite ID</span>
-          <input
+          <NumberInput
             className="stat-input"
-            type="number"
             value={draft.spriteId}
-            onChange={(e) => {
-              const v = parseInt(e.target.value, 10)
-              setSpriteId(Number.isNaN(v) ? -1 : v)
-            }}
+            onChange={setSpriteId}
           />
           {isSpriteDirty && <span className="map-sprite-hint">new — created on save</span>}
         </div>

@@ -3,7 +3,7 @@ import type { HitsplatData, HitsplatDef } from '../loaders/config/hitsplats'
 import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, downloadSpritePng, imageDataFromFile, loadSpriteMeta, renderFrame, renderFrameToCanvas } from './spriteRender'
 import { writeNewSprite } from '../loaders/spriteStore'
-import { NumGrid } from './defFields'
+import { NumberInput, NumGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import './HitbarViewer.css'
 
@@ -285,12 +285,11 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
             />
             <div className="hit-preview-controls">
               <span className="item-field-label">Damage</span>
-              <input
+              <NumberInput
                 className="hit-preview-number"
-                type="number"
-                min={0}
                 value={damage}
-                onChange={(e) => setDamage(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                min={0}
+                onChange={setDamage}
               />
             </div>
           </div>
@@ -356,12 +355,7 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
             return (
               <div key={key} className="hit-sprite-cell">
                 <span className="item-field-label" title={label}>{label}</span>
-                <input
-                  className="item-field-input"
-                  type="number"
-                  value={Number(draft[key as keyof HitsplatDef] ?? -1)}
-                  onChange={(e) => set(key, parseInt(e.target.value, 10) || 0)}
-                />
+                <NumberInput className="item-field-input" value={Number(draft[key as keyof HitsplatDef] ?? -1)} onChange={(v) => set(key,v)} />
                 <div className="hit-sprite-preview">
                   <SpritePreview meta={meta} zoom={zoom} />
                 </div>

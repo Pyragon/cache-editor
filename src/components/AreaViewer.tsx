@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AreaData, AreaDef } from '../loaders/config/map_areas'
 import type { SpriteMeta } from '../loaders/sprites'
 import { loadSpriteMeta, renderFrame } from './spriteRender'
-import { IntListInput, NumGrid, ToggleGrid, ParamsTable } from './defFields'
+import { NumberInput, IntListInput, NumGrid, ToggleGrid, ParamsTable  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { paramRowsToRecord, toParamRows } from './defParams'
 import type { ParamRow } from './defParams'
@@ -228,12 +228,7 @@ export default function AreaViewer({ data, onSave, onDirtyChange }: Props) {
           {SPRITE_FIELDS.map(([key, label]) => (
             <div key={key} className="hit-sprite-cell">
               <span className="item-field-label" title={label}>{label}</span>
-              <input
-                className="item-field-input"
-                type="number"
-                value={Number(draft[key as keyof AreaDef] ?? -1)}
-                onChange={(e) => set(key, parseInt(e.target.value, 10) || 0)}
-              />
+              <NumberInput className="item-field-input" value={Number(draft[key as keyof AreaDef] ?? -1)} onChange={(v) => set(key,v)} />
               <div className="hit-sprite-preview">
                 <SpritePreview meta={sprites[key] ?? null} />
               </div>

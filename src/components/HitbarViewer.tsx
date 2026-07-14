@@ -3,7 +3,7 @@ import type { HitbarData, HitbarDef } from '../loaders/config/hitbars'
 import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, averageSpriteColor, downloadSpritePng, imageDataFromFile, loadSpriteMeta, renderFrame, renderFrameToCanvas } from './spriteRender'
 import { writeNewSprite } from '../loaders/spriteStore'
-import { NumGrid } from './defFields'
+import { NumberInput, NumGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import './HitbarViewer.css'
 
@@ -291,12 +291,7 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
             return (
               <div key={key} className="hit-sprite-cell">
                 <span className="item-field-label" title={label}>{label}</span>
-                <input
-                  className="item-field-input"
-                  type="number"
-                  value={Number(draft[key as keyof HitbarDef] ?? -1)}
-                  onChange={(e) => set(key, parseInt(e.target.value, 10) || 0)}
-                />
+                <NumberInput className="item-field-input" value={Number(draft[key as keyof HitbarDef] ?? -1)} onChange={(v) => set(key,v)} />
                 <div className="hit-sprite-preview">
                   <SpritePreview meta={meta} zoom={zoom} />
                 </div>

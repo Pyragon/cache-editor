@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { InventoryData, InventoryDef } from '../loaders/config/inventories'
-import { ItemIcon, PairTable } from './defFields'
+import { ItemIcon, NumberInput, PairTable } from './defFields'
 
 type Props = {
   data: InventoryData
@@ -76,11 +76,10 @@ export default function InventoryViewer({ data, onSave, onDirtyChange }: Props) 
         <div className="item-grid">
           <label className="item-field">
             <span className="item-field-label">Length (slots)</span>
-            <input
-              className="item-field-input"
-              type="number"
+            <NumberInput
               value={Number(draft.length ?? 0)}
-              onChange={(e) => { setDraft((prev) => ({ ...prev, length: parseInt(e.target.value, 10) || 0 })); setIsDirty(true) }}
+              min={0}
+              onChange={(v) => { setDraft((prev) => ({ ...prev, length: v })); setIsDirty(true) }}
             />
           </label>
         </div>

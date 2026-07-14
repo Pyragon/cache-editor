@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { NumberInput } from './defFields'
 import type { VarData, VarDef } from '../loaders/config/vars'
 import { TYPE_LABELS, typeLabel } from './typeChars'
 
@@ -67,12 +68,7 @@ export default function VarViewer({ data, onSave, onDirtyChange }: Props) {
           </label>
           <label className="item-field">
             <span className="item-field-label">Client Code</span>
-            <input
-              className="item-field-input"
-              type="number"
-              value={Number(draft.clientCode ?? 0)}
-              onChange={(e) => set('clientCode', parseInt(e.target.value, 10) || 0)}
-            />
+            <NumberInput className="item-field-input" value={Number(draft.clientCode ?? 0)} onChange={(v) => set('clientCode',v)} />
           </label>
         </div>
       </section>

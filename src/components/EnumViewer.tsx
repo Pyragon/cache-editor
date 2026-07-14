@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { EnumData, EnumValue } from '../loaders/enums'
+import { NumberInput } from './defFields'
 import { TYPE_LABELS } from './typeChars'
 import './EnumViewer.css'
 
@@ -253,11 +254,10 @@ export default function EnumViewer({ data, onSave, onDirtyChange }: Props) {
         </div>
         <div className="stat-card">
           <span className="stat-label">Default int value</span>
-          <input
+          <NumberInput
             className="stat-input"
-            type="number"
             value={defaultIntValue}
-            onChange={(e) => { setDefaultIntValue(parseInt(e.target.value, 10) || 0); markDirty() }}
+            onChange={(v) => { setDefaultIntValue(v); markDirty() }}
           />
         </div>
         <div className="stat-card">

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { MapAreaData, MapAreaDef, MapAreaRect } from '../loaders/map_areas'
-import { NumGrid } from './defFields'
+import { NumberInput, NumGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 
 type Props = {
@@ -162,12 +162,7 @@ export default function MapAreaViewer({ data, onSave, onDirtyChange }: Props) {
                   <tr key={i}>
                     {RECT_COLUMNS.map(([key]) => (
                       <td key={key}>
-                        <input
-                          className="cell-input"
-                          type="number"
-                          value={Number(rect[key] ?? 0)}
-                          onChange={(e) => setRect(i, key, parseInt(e.target.value, 10) || 0)}
-                        />
+                        <NumberInput className="cell-input" value={Number(rect[key] ?? 0)} onChange={(v) => setRect(i, key,v)} />
                       </td>
                     ))}
                     <td><button type="button" className="row-remove-btn" onClick={() => removeRect(i)}>×</button></td>

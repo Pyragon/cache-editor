@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ItemData, ItemDef } from '../loaders/items'
-import { ItemIcon, NumGrid, PairTable, ParamsTable } from './defFields'
+import { NumberInput, ItemIcon, NumGrid, PairTable, ParamsTable  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { paramRowsToRecord, toParamRows } from './defParams'
 import type { ParamRow } from './defParams'
@@ -319,10 +319,8 @@ export default function ItemViewer({ data, onSave, onDirtyChange }: Props) {
                 {Array.from({ length: 10 }, (_, i) => (
                   <tr key={i}>
                     <td className="item-stack-index">{i}</td>
-                    <td><input className="cell-input" type="number" value={(draft.stackIds as number[])[i] ?? 0}
-                      onChange={(e) => setStack(i, 0, parseInt(e.target.value, 10) || 0)} /></td>
-                    <td><input className="cell-input" type="number" value={(draft.stackTriggerAmount as number[] | undefined)?.[i] ?? 0}
-                      onChange={(e) => setStack(i, 1, parseInt(e.target.value, 10) || 0)} /></td>
+                    <td><NumberInput className="cell-input" value={(draft.stackIds as number[])[i] ?? 0} onChange={(v) => setStack(i, 0,v)} /></td>
+                    <td><NumberInput className="cell-input" value={(draft.stackTriggerAmount as number[] | undefined)?.[i] ?? 0} onChange={(v) => setStack(i, 1,v)} /></td>
                   </tr>
                 ))}
               </tbody>

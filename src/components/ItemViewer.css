@@ -238,10 +238,10 @@
 }
 
 .map-area-rects .cell-input {
-  /* Coordinates cap at 12800 — size for 5 digits plus the input's own
-     6px side padding + 1px borders (box-sizing includes them). The number
-     spinner is hidden below; Chromium otherwise reserves ~2ch for it. */
-  width: calc(6ch + 14px);
+  /* Coordinates cap at 12800 — size for 5 digits plus the input's own side
+     padding/borders, plus the 36px reserved for the −/+ steppers so the
+     digits aren't squeezed under them. */
+  width: calc(6ch + 14px + 36px);
   box-sizing: border-box;
   appearance: textfield;
   -moz-appearance: textfield;
@@ -251,4 +251,121 @@
 .map-area-rects .cell-input::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+}
+
+/* ---- Number inputs (NumberInput in defFields) -----------------------------
+   Native spinner arrows are tiny, unstyled, and only appear on hover. Hide
+   them everywhere and use the styled −/+ steppers instead; inputs that aren't
+   wrapped in NumberInput still lose the ugly arrows. */
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* The steppers overlay the right edge of the field rather than sitting in the
+   flow — an inline stepper column would widen every numeric cell (QP Required,
+   start-location coords, …) just to hold two tiny buttons. */
+.num-input {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+/* A number input reports a fat intrinsic width (~150px in Chromium; the `size`
+   attribute does NOT apply to type=number), and content-sized cards inherit it,
+   so a two-digit field ends up hundreds of pixels wide. Cap every card-style
+   container that holds one. Cards showing text (stat-value spans) are untouched,
+   and grid-based cells (.item-field, .hit-sprite-cell) already size uniformly
+   from their track definition, so they need no cap. */
+.stat-card:has(.num-input),
+.sprite-meta-card:has(.num-input),
+.tile-field:has(.num-input) {
+  max-width: 132px;
+}
+
+/* Inputs inside a flex row (e.g. the defaults recolour slots) shouldn't claim
+   their intrinsic width either. */
+.recolor-slot-src .num-input,
+.recolor-slot-src .num-input-field {
+  width: 88px;
+}
+
+.num-input-field {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  /* room for the steppers, only while they're visible (see :hover below) */
+  padding-right: 0;
+  transition: padding-right 0.12s;
+}
+
+.num-input-steps {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
+/* Steppers appear on hover/focus; the field gains matching padding at the
+   same moment so the digits never slide under the buttons. */
+.num-input:hover .num-input-steps,
+.num-input:focus-within .num-input-steps {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.num-input:hover .num-input-field,
+.num-input:focus-within .num-input-field {
+  padding-right: 36px;
+}
+
+/* Table columns size to their content, so growing the padding on hover would
+   resize the whole column. Reserve the stepper space permanently in cells —
+   the width then never changes, hovered or not. */
+.quest-table .num-input-field,
+.quest-table .num-input:hover .num-input-field,
+.quest-table .num-input:focus-within .num-input-field {
+  padding-right: 36px;
+  transition: none;
+}
+
+.num-input-step {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.num-input-step:hover:not(:disabled) {
+  background: rgba(0, 102, 255, 0.25);
+  border-color: rgba(126, 184, 255, 0.5);
+  color: #7eb8ff;
+}
+
+.num-input-step:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }

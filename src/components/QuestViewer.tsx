@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { NumberInput } from './defFields'
 import type { QuestServerData } from '../loaders/types'
 import './QuestViewer.css'
 
@@ -329,12 +330,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
         ] as const).map(([label, key]) => (
           <div key={key} className="stat-card">
             <span className="stat-label">{label}</span>
-            <input
-              className="stat-input"
-              type="number"
-              value={draft[key]}
-              onChange={(e) => set(key, parseInt(e.target.value, 10) || 0)}
-            />
+            <NumberInput className="stat-input" value={draft[key]} onChange={(v) => set(key,v)} />
           </div>
         ))}
         <div className="stat-card">
@@ -343,21 +339,11 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
         </div>
         <div className="stat-card">
           <span className="stat-label">Slot ID</span>
-          <input
-            className="stat-input"
-            type="number"
-            value={serverDraft.slotId}
-            onChange={(e) => setServer('slotId', parseInt(e.target.value, 10) || 0)}
-          />
+          <NumberInput className="stat-input" value={serverDraft.slotId} onChange={(v) => setServer('slotId',v)} />
         </div>
         <div className="stat-card">
           <span className="stat-label">Start NPC</span>
-          <input
-            className="stat-input"
-            type="number"
-            value={serverDraft.startNpc}
-            onChange={(e) => setServer('startNpc', parseInt(e.target.value, 10) || 0)}
-          />
+          <NumberInput className="stat-input" value={serverDraft.startNpc} onChange={(v) => setServer('startNpc',v)} />
         </div>
       </div>
 
@@ -377,8 +363,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
                     />
                   </td>
                   <td style={{ minWidth: 70 }}>
-                    <input className="cell-input" type="number" value={level}
-                      onChange={(e) => setLevelReq(i, 1, parseInt(e.target.value, 10) || 0)} />
+                    <NumberInput className="cell-input" value={level} onChange={(v) => setLevelReq(i, 1,v)} />
                   </td>
                   <td><button type="button" className="row-remove-btn" onClick={() => removeLevelReq(i)}>×</button></td>
                 </tr>
@@ -437,8 +422,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
                 <tr key={i}>
                   {row.map((val, j) => (
                     <td key={j}>
-                      <input className="cell-input" type="number" value={val}
-                        onChange={(e) => setVar(i, j, parseInt(e.target.value, 10) || 0)} />
+                      <NumberInput className="cell-input" value={val} onChange={(v) => setVar(i, j,v)} />
                     </td>
                   ))}
                   <td><button type="button" className="row-remove-btn" onClick={() => removeVar(i)}>×</button></td>
@@ -456,9 +440,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
           {(['x', 'y', 'plane'] as const).map((field) => (
             <div key={field} className="tile-field">
               <label className="tile-label">{field.toUpperCase()}</label>
-              <input className="cell-input" type="number"
-                value={serverDraft.startLocation[field]}
-                onChange={(e) => setTile(field, parseInt(e.target.value, 10) || 0)} />
+              <NumberInput className="cell-input" value={serverDraft.startLocation[field]} onChange={(v) => setTile(field,v)} />
             </div>
           ))}
         </div>
@@ -480,8 +462,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
                     />
                   </td>
                   <td style={{ minWidth: 70 }}>
-                    <input className="cell-input" type="number" value={level}
-                      onChange={(e) => setSkillReq(i, 1, parseInt(e.target.value, 10) || 0)} />
+                    <NumberInput className="cell-input" value={level} onChange={(v) => setSkillReq(i, 1,v)} />
                   </td>
                   <td><button type="button" className="row-remove-btn" onClick={() => removeSkillReq(i)}>×</button></td>
                 </tr>

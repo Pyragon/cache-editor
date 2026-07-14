@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { DefaultsData, EntityDefaultsDef, EquipmentDefaultsDef } from '../loaders/defaults'
-import { IntListInput, NumGrid, ToggleGrid } from './defFields'
+import { NumberInput, IntListInput, NumGrid, ToggleGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { hslToHex } from './rsColor'
 import './DefaultsViewer.css'
@@ -188,12 +188,7 @@ function RecolorPalette({ src, dst, onChange }: {
                   <div className="recolor-slot-src">
                     <span className="item-field-label">Src {slot}</span>
                     <Swatch hsl={sourceHsl} />
-                    <input
-                      className="cell-input recolor-src-input"
-                      type="number"
-                      value={sourceHsl}
-                      onChange={(e) => setSrc(group, slot, parseInt(e.target.value, 10) || 0)}
-                    />
+                    <NumberInput className="cell-input recolor-src-input" value={sourceHsl} onChange={(v) => setSrc(group, slot,v)} />
                   </div>
                   <span className="recolor-arrow">→</span>
                   <div className="recolor-slot-dst">

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { NumberInput } from './defFields'
 import type { SpriteData, SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, imageDataFromFile, renderFrame } from './spriteRender'
 import './SpriteViewer.css'
@@ -201,12 +202,7 @@ export default function SpriteViewer({ data, onSave, onDirtyChange }: Props) {
               ] as [string, 'subWidths' | 'subHeights' | 'offsetsX' | 'offsetsY'][]).map(([label, key]) => (
                 <div key={key} className="sprite-meta-card">
                   <span className="sprite-meta-label">{label}</span>
-                  <input
-                    className="stat-input"
-                    type="number"
-                    value={draft[key][i] ?? 0}
-                    onChange={(e) => setFrameField(key, i, parseInt(e.target.value, 10) || 0)}
-                  />
+                  <NumberInput className="stat-input" value={draft[key][i] ?? 0} onChange={(v) => setFrameField(key, i,v)} />
                 </div>
               ))}
               <div className="sprite-meta-card" title="Cache storage order only (column-major pixel packing) — does not rotate or change how the sprite renders. Kept so repacking can write the original byte order.">

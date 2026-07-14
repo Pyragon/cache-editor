@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { NumberInput } from './defFields'
 import type { ParamData, ParamDef } from '../loaders/config/params'
 import { TYPE_LABELS, typeLabel } from './typeChars'
 
@@ -65,12 +66,7 @@ export default function ParamViewer({ data, onSave, onDirtyChange }: Props) {
           </label>
           <label className="item-field">
             <span className="item-field-label">Default Int</span>
-            <input
-              className="item-field-input"
-              type="number"
-              value={Number(draft.defaultInt ?? 0)}
-              onChange={(e) => set('defaultInt', parseInt(e.target.value, 10) || 0)}
-            />
+            <NumberInput className="item-field-input" value={Number(draft.defaultInt ?? 0)} onChange={(v) => set('defaultInt',v)} />
           </label>
           <label className="item-field">
             <span className="item-field-label">Type Name (optional)</span>

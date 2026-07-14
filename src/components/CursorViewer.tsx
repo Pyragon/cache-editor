@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { NumberInput } from './defFields'
 import type { CursorData, CursorDef } from '../loaders/config/cursors'
 import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, imageDataFromFile, renderFrame } from './spriteRender'
@@ -289,31 +290,16 @@ export default function CursorViewer({ data, onSave, onDirtyChange }: Props) {
       <div className="cursor-stats">
         <div className="stat-card">
           <span className="stat-label">Sprite ID</span>
-          <input
-            className="stat-input"
-            type="number"
-            value={draft.spriteId}
-            onChange={(e) => setSpriteId(parseInt(e.target.value, 10) || 0)}
-          />
+          <NumberInput className="stat-input" value={draft.spriteId} onChange={(v) => setSpriteId(v)} />
           {isSpriteDirty && <span className="cursor-hint">new — created on save</span>}
         </div>
         <div className="stat-card">
           <span className="stat-label">Hotspot X</span>
-          <input
-            className="stat-input"
-            type="number"
-            value={draft.hotspotPointX}
-            onChange={(e) => set('hotspotPointX', parseInt(e.target.value, 10) || 0)}
-          />
+          <NumberInput className="stat-input" value={draft.hotspotPointX} onChange={(v) => set('hotspotPointX',v)} />
         </div>
         <div className="stat-card">
           <span className="stat-label">Hotspot Y</span>
-          <input
-            className="stat-input"
-            type="number"
-            value={draft.hotspotPointY}
-            onChange={(e) => set('hotspotPointY', parseInt(e.target.value, 10) || 0)}
-          />
+          <NumberInput className="stat-input" value={draft.hotspotPointY} onChange={(v) => set('hotspotPointY',v)} />
         </div>
       </div>
 

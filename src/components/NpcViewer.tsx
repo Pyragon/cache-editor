@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { NpcData, NpcDef } from '../loaders/npcs'
-import { IntListInput, NumGrid, PairTable, ParamsTable, ToggleGrid } from './defFields'
+import { NumberInput, IntListInput, NumGrid, PairTable, ParamsTable, ToggleGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { paramRowsToRecord, toParamRows } from './defParams'
 import type { ParamRow } from './defParams'
@@ -275,8 +275,7 @@ export default function NpcViewer({ data, onSave, onDirtyChange }: Props) {
                         <>
                           {([0, 1, 2] as const).map((axis) => (
                             <td key={axis}>
-                              <input className="cell-input" type="number" value={triple[axis] ?? 0}
-                                onChange={(e) => setTranslation(i, axis, parseInt(e.target.value, 10) || 0)} />
+                              <NumberInput className="cell-input" value={triple[axis] ?? 0} onChange={(v) => setTranslation(i, axis,v)} />
                             </td>
                           ))}
                           <td><button type="button" className="row-remove-btn" title="Remove translation" onClick={() => clearTranslation(i)}>×</button></td>

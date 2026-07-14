@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ObjectData, ObjectDef } from '../loaders/objects'
-import { IntListInput, NumGrid, PairTable, ParamsTable, ToggleGrid } from './defFields'
+import { NumberInput, IntListInput, NumGrid, PairTable, ParamsTable, ToggleGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { paramRowsToRecord, toParamRows } from './defParams'
 import type { ParamRow } from './defParams'
@@ -278,8 +278,7 @@ export default function ObjectViewer({ data, onSave, onDirtyChange }: Props) {
                 {shapes.map((shape, i) => (
                   <tr key={i}>
                     <td style={{ width: 90 }}>
-                      <input className="cell-input" type="number" value={shape}
-                        onChange={(e) => setShape(i, parseInt(e.target.value, 10) || 0)} />
+                      <NumberInput className="cell-input" value={shape} onChange={(v) => setShape(i,v)} />
                     </td>
                     <td>
                       <IntListInput
