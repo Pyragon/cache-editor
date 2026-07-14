@@ -98,9 +98,9 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
         </div>
       </div>
 
-      <section className="item-section">
-        <div className="texture-zoom-row">
-          <span className="texture-zoom-label">Zoom</span>
+      <div className="hit-zoom-bar">
+        <span className="hit-zoom-label">Zoom</span>
+        <div className="hit-zoom-buttons">
           {ZOOM_LEVELS.map((z) => (
             <button
               key={z}
@@ -111,11 +111,11 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
               {z}×
             </button>
           ))}
-          <button type="button" className="replace-btn" disabled={!url} onClick={handleDownload}>
-            Download
-          </button>
         </div>
+      </div>
 
+      <section className="item-section">
+        <h3>Preview</h3>
         <div className="texture-canvas-wrap">
           {url ? (
             <img
@@ -131,6 +131,11 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
           ) : (
             <p className="map-sprite-none">No rendered material image for this id.</p>
           )}
+        </div>
+        <div className="texture-actions">
+          <button type="button" className="replace-btn" disabled={!url} onClick={handleDownload}>
+            Download
+          </button>
         </div>
       </section>
 

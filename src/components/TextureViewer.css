@@ -44,14 +44,23 @@
   margin-right: 2px;
 }
 
+/* width: fit-content, not align-self — this now sits inside a plain
+   .item-section (a block), where align-self does nothing and the box would
+   stretch to the full page width. */
 .texture-canvas-wrap {
-  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  max-height: 60vh;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: repeating-conic-gradient(#2a2a3a 0% 25%, #1e1e2e 0% 50%) 0 0 / 16px 16px;
   overflow: auto;
-  max-width: 100%;
-  max-height: 60vh;
+}
+
+.texture-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .texture-image {

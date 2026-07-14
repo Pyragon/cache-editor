@@ -50,6 +50,8 @@ import MapAreaViewer from './components/MapAreaViewer'
 import type { MapAreaData } from './loaders/map_areas'
 import AreaViewer from './components/AreaViewer'
 import type { AreaData } from './loaders/config/map_areas'
+import FontViewer from './components/FontViewer'
+import type { FontData } from './loaders/font_metrics'
 import QuickChatViewer from './components/QuickChatViewer'
 import type { QuickChatData } from './loaders/quick_chat'
 import { useConfirm } from './components/useConfirm'
@@ -74,7 +76,7 @@ const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars', 'config_inventories',
   'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
-  'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries',
+  'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -98,7 +100,17 @@ const ENTRY_LABEL_OVERRIDES: Record<string, string> = {
   npcs: 'NPCs',
 }
 
+// Entries whose sidebar label differs from their key. font_metrics is now a
+// full Fonts page (metrics + glyphs from the font sprite archives), so the
+// old metrics-only name would undersell it.
+const ENTRY_NAME_OVERRIDES: Record<string, string> = {
+  font_metrics: 'Fonts',
+}
+
 function formatEntryLabel(name: string): string {
+  const override = ENTRY_NAME_OVERRIDES[name]
+  if (override) return override
+
   // Config sub-entries are keyed `config_<name>` but display as just the
   // sub-entry name (they already live under the "Config" group).
   return name
@@ -281,6 +293,10 @@ function App() {
 
   const areaContent = selectedEntry?.name === 'config_map_areas' && selectedItemContent != null
     ? selectedItemContent as AreaData
+    : null
+
+  const fontContent = selectedEntry?.name === 'font_metrics' && selectedItemContent != null
+    ? selectedItemContent as FontData
     : null
 
   const quickChatContent = (selectedEntry?.name === 'quick_chat_messages' || selectedEntry?.name === 'quick_chat_menus') && selectedItemContent != null
@@ -497,7 +513,7 @@ function App() {
 
     const buffer: LoadedItem[] = []
 
-    for await (const item of loader.streamItems(entryHandle)) {
+    for await (const item of loader.streamItems(entryHandle, handle)) {
       if (loadVersion.current !== version) return
       buffer.push(item)
       if (buffer.length % 5000 === 0) setLoadCount(buffer.length)
@@ -804,6 +820,8 @@ function App() {
                 ? <MapAreaViewer data={mapAreaContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : areaContent != null
                 ? <AreaViewer data={areaContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : fontContent != null
+                ? <FontViewer data={fontContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : quickChatContent != null
                 ? <QuickChatViewer data={quickChatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
