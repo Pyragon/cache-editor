@@ -132,6 +132,8 @@ export default function EnumViewer({ data, onSave, onDirtyChange }: Props) {
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [customTypes, setCustomTypes] = useState<Record<string, string>>(() => loadCustomTypes())
+  // Key of the row Add just created, so its value field can be focused once rendered.
+  const focusValueKeyRef = useRef<string | null>(null)
 
   const typeOptions = useMemo(() => {
     const merged = { ...TYPE_LABELS, ...customTypes }
@@ -183,8 +185,20 @@ export default function EnumViewer({ data, onSave, onDirtyChange }: Props) {
     markDirty()
   }
 
+  // New entries get the next free key (highest numeric key + 1, or 0 when the
+  // enum is empty), and the value field is focused so you can type straight
+  // away — the key is nearly always just the next id.
   function addRow() {
-    setRows((prev) => [...prev, { key: '', value: '' }])
+    let nextKey = 0
+    for (const row of rows) {
+      const key = parseInt(row.key, 10)
+      if (!isNaN(key) && key >= nextKey) nextKey = key + 1
+    }
+    setRows((prev) => [...prev, { key: String(nextKey), value: '' }])
+    focusValueKeyRef.current = String(nextKey)
+    // Clear any active search so the new row is actually visible (and can be
+    // focused) — a filter would otherwise hide the row that was just added.
+    setFilter('')
     markDirty()
   }
 
@@ -278,7 +292,6 @@ export default function EnumViewer({ data, onSave, onDirtyChange }: Props) {
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
-        <button type="button" className="add-row-btn" onClick={addRow}>+ Add entry</button>
       </div>
 
       <div className="quest-table-wrap enum-table-wrap">
@@ -306,6 +319,14 @@ export default function EnumViewer({ data, onSave, onDirtyChange }: Props) {
                     className="cell-input"
                     type={valueIsNumeric ? 'number' : 'text'}
                     value={row.value}
+                    ref={(el) => {
+                      // Focus the value field of the row that Add just created.
+                      if (el && focusValueKeyRef.current != null && row.key === focusValueKeyRef.current) {
+                        focusValueKeyRef.current = null
+                        el.focus()
+                        el.scrollIntoView({ block: 'nearest' })
+                      }
+                    }}
                     onChange={(e) => setRowValue(index, e.target.value)}
                   />
                 </td>
@@ -315,6 +336,8 @@ export default function EnumViewer({ data, onSave, onDirtyChange }: Props) {
           </tbody>
         </table>
       </div>
+
+      <button type="button" className="add-row-btn" onClick={addRow}>+ Add entry</button>
 
       {isDirty && (
         <div className="save-bar">

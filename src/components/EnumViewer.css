@@ -194,3 +194,11 @@
   z-index: 1;
   background: #14161d;
 }
+
+/* .enum-viewer is a flex column, so a bare button stretches to the full width
+   and inherits the 20px column gap. In QuestViewer the equivalent button sits
+   in a plain block section — match that: content-width, tucked under the table. */
+.enum-viewer > .add-row-btn {
+  align-self: flex-start;
+  margin-top: -12px;
+}
