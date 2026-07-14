@@ -11,6 +11,13 @@ const loader: CacheLoader = {
     const file = await fileHandle.getFile()
     return JSON.parse(await file.text())
   },
+
+  async saveItem(dirHandle, _item, data) {
+    const fileHandle = await dirHandle.getFileHandle('huffman.json', { create: true })
+    const writable = await fileHandle.createWritable()
+    await writable.write(JSON.stringify(data))
+    await writable.close()
+  },
 }
 
 export default loader

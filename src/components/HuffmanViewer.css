@@ -350,3 +350,101 @@
   color: var(--text);
   word-break: break-all;
 }
+
+/* --- Regenerate-from-corpus panel --- */
+.huffman-regen {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.huffman-regen summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.huffman-regen[open] summary {
+  margin-bottom: 10px;
+}
+
+.huffman-regen-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.huffman-regen-disclaimers {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  max-width: 760px;
+}
+
+.huffman-regen-disclaimers strong {
+  color: var(--text);
+}
+
+.huffman-regen-error {
+  margin: 0;
+  color: #ff6b6b;
+}
+
+.huffman-regen-result p {
+  margin: 0 0 6px;
+  color: var(--text-dim);
+}
+
+.huffman-regen-result strong {
+  color: var(--text);
+}
+
+.huffman-regen-pass {
+  color: #66d96b !important;
+}
+
+.huffman-regen-fail {
+  color: #ff6b6b !important;
+}
+
+.huffman-regen-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.huffman-regen-upload {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(126, 184, 255, 0.35);
+  background: rgba(0, 102, 255, 0.12);
+  color: #7eb8ff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.huffman-regen-upload:hover {
+  background: rgba(0, 102, 255, 0.22);
+  border-color: rgba(126, 184, 255, 0.55);
+}
+
+.huffman-verify-list {
+  margin: 0;
+  padding-left: 4px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
