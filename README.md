@@ -30,21 +30,21 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 6 | `music` | Not implemented upstream | |
 | 7 | `models` | Viewer | Read-only 3D viewer (Three.js) with wireframe toggle |
 | 8 | `sprites` | Viewer | Displays PNG frames with zoom, upload/download per frame |
-| 9 | `textures` | Viewer | Renders textures with definition metadata |
-| 10 | `huffman` | ✅ **Done** | Read-only frequency table viewer |
+| 9 | `textures` | Viewer | Renders textures (alpha-aware dump) with definition metadata — user-verified 2026-07-13 |
+| 10 | `huffman` | ✅ **Done** | Frequency table viewer (Table/Visual) + regenerate-from-corpus editor with round-trip self-test |
 | 11 | `music2` | Not implemented upstream | |
 | 12 | `cs2` | Not started | |
 | 13 | `font_metrics` | Not started | `fonts/metrics` |
 | 14 | `midi_instruments` | Not started | |
 | 15 | `sound_effects_midi` | Not implemented upstream | |
-| 16 | `objects` | Editor | Full editable editor |
+| 16 | `objects` | Editor | Full editable editor — user-verified 2026-07-13 |
 | 17 | `enums` | Editor | Editable key/value table with type-char dropdowns |
-| 18 | `npcs` | Editor | Full editable editor |
-| 19 | `items` | Editor | Full editable editor |
+| 18 | `npcs` | Editor | Full editable editor — user-verified 2026-07-13 (model-translations desync hardening still in TODO) |
+| 19 | `items` | Editor | Full editable editor with itemdb icon previews — user-verified 2026-07-13 |
 | 20 | `animations` | Not started | |
 | 21 | `spot_animations` | Not started | |
 | 22 | `varbits` | ✅ **Done** | baseVar / start-bit / end-bit editor |
-| 23 | `map_areas` | Editor | world map areas — name, placement, map size, area rects table |
+| 23 | `map_areas` | ✅ **Done** | world map areas — name, placement, map size, area rects table, live-derived bounds (map preview idea in TODO) |
 | 24 | `quick_chat_messages` | ✅ **Done** | Combined quick chat editor (Edit/Preview toggle, template chips, response navigation, segment/dynamic-part sync) |
 | 25 | `quick_chat_menus` | ✅ **Done** | Same combined editor — drill into submenus/messages, saves route to the right folder |
 | 26 | `texture_definitions` | Editor | full field editor with material preview + HSL16 colour swatch |
@@ -83,14 +83,14 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 16 | `vars` | ✅ **Done** | Param-type dropdown + client code (verified against darkan `VarpType`: only opcodes 1/5 exist, so the sparse data is correct) |
 | 19 | `varc` | Not dumped | |
 | 26 | `structs` | ✅ **Done** | Param key→value table |
-| 29 | `skyboxes` | Editor | material preview + sun ids + background mode |
+| 29 | `skyboxes` | ✅ **Done** | material preview + sun ids + background mode (sun fields unused in this cache — sun table is empty at rev 727) |
 | 30 | `sun` | Not started | Empty in the current dump |
 | 31 | `light_intensities` | Not dumped | |
 | 32 | `bas` | Not dumped | |
 | 33 | `cursors` | ✅ **Done** | Full editor — hotspot picking on the sprite preview, live "your mouse becomes the cursor" test area with RS-style click crosses, sprite download/upload (uploads allocate a new sprite id), add/remove/clone, save validation |
 | 34 | `map_sprites` | Editor | Sprite preview, background colour picker, upscaling toggle, sprite download/upload, add/remove/clone. (Held from Done pending a minimap-render preview — see TODO) |
 | 35 | `quests` | Editor | Reads/writes quest JSON and cache structs (start NPC, start location, slot ID, prereq quests, skill requirements) |
-| 36 | `areas` | Editor | map element config (MECType) — sprites, colours, menu actions, visibility vars, params (73,896 entries) |
+| 36 | `areas` | ✅ **Done** | map element config (MECType) — sprites, colours, menu actions, visibility vars, params, static-element Placed At list (73,896 entries) |
 | 46 | `hitsplats` | Editor | Field editor with a live damage-number splat preview (held from Done pending cache-font rendering — see TODO) |
 | 47 | `clan_var` | Not dumped | |
 | 54 | `clan_var_settings` | Not dumped | |

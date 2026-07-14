@@ -83,7 +83,7 @@ const SPECIALIZED_ENTRIES = new Set([
 // the user has manually reviewed and signed off go in here.
 const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
-  'quick_chat_messages', 'quick_chat_menus', 'billboards',
+  'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox',
 ])
 
 function entryStatusClass(entry: CacheEntry): string {
@@ -369,6 +369,17 @@ function App() {
     if (pendingNewRef.current?.item.id === selectedItem.id && pendingNewRef.current.entryName === selectedEntry.name) {
       pendingNewRef.current = null
     }
+  }
+
+  // Save path for noPanel entries (single-blob, no item list — e.g. huffman).
+  async function handleSaveNoPanel(data: unknown) {
+    if (!cacheHandle || !selectedEntry) return
+    const loader = getLoader(selectedEntry.name)
+    if (!loader?.saveItem) return
+    const entryHandle = await resolveEntryHandle(cacheHandle, getEntryPath(selectedEntry.name))
+    if (!entryHandle) return
+    await loader.saveItem(entryHandle, { id: 0, name: selectedEntry.name }, data)
+    setActiveContent(data)
   }
 
   async function currentEntryHandle(): Promise<FileSystemDirectoryHandle | null> {
@@ -750,7 +761,7 @@ function App() {
               </p>
             ) : activeContent != null ? (
               selectedEntry?.name === 'huffman'
-                ? <HuffmanViewer data={activeContent as HuffmanData} />
+                ? <HuffmanViewer data={activeContent as HuffmanData} onSave={handleSaveNoPanel} />
                 : selectedEntry?.name === 'native_libraries'
                 ? <NativeLibrariesViewer data={activeContent as NativeLibrariesData} />
                 : <pre className="content-json">{JSON.stringify(activeContent, null, 2)}</pre>
