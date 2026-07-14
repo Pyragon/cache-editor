@@ -23,6 +23,11 @@ const QUEST_ID_TO_SLOT: Record<number, number> = {
   201: 190, 199: 191, 202: 192,
 }
 
+// Skill reqs occupy contiguous key pairs from 871. The next known field sits
+// at 895, so 12 pairs (871-894) is the hard ceiling before a write would
+// clobber a neighbouring key; the dump's real maximum is 10 pairs.
+const MAX_SKILL_REQ_PAIRS = 12
+
 const SLOT_TO_QUEST_ID: Record<number, number> = Object.fromEntries(
   Object.entries(QUEST_ID_TO_SLOT).map(([questId, slotId]) => [slotId, Number(questId)])
 )
@@ -135,12 +140,20 @@ async function writeStruct(
     .filter((slot): slot is number => slot != null)
     .forEach((slot, i) => { values[String(859 + i)] = slot })
 
-  // Skill reqs → keys 871/872, 873/874, ...
-  for (let i = 0; i < 7; i++) {
-    delete values[String(871 + i * 2)]
-    delete values[String(872 + i * 2)]
+  // Skill reqs → contiguous key pairs 871/872, 873/874, … Clearing a fixed 7
+  // pairs left keys 885+ orphaned on the structs that carry more (the dump
+  // goes up to 10 pairs / key 890 — struct 578), so clear the run that's
+  // actually there. It stops at the first absent pair, which keeps the
+  // unrelated fields just past the run (895, 898, …) untouched — verified
+  // against the dump: every struct's pairs are contiguous with no gaps.
+  for (let i = 0; i < MAX_SKILL_REQ_PAIRS; i++) {
+    const skillKey = String(871 + i * 2)
+    const levelKey = String(872 + i * 2)
+    if (values[skillKey] === undefined && values[levelKey] === undefined) break
+    delete values[skillKey]
+    delete values[levelKey]
   }
-  server.skillReqs.forEach(([skill, level], i) => {
+  server.skillReqs.slice(0, MAX_SKILL_REQ_PAIRS).forEach(([skill, level], i) => {
     values[String(871 + i * 2)] = skill
     values[String(872 + i * 2)] = level
   })
