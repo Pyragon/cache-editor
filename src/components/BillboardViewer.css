@@ -1,0 +1,14 @@
+.billboard-preview {
+  display: block;
+  image-rendering: pixelated;
+}
+
+/* Rough visual hints for the shape byte — the client clips circles and
+   brightens shape-2 billboards; exact rendering lives in the GL pipeline. */
+.billboard-circle {
+  border-radius: 50%;
+}
+
+.billboard-brightened {
+  filter: brightness(1.35);
+}
