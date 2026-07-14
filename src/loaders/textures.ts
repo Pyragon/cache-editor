@@ -26,33 +26,77 @@ export type TextureDefinition = {
   effectCombiner: number
 }
 
+// The `textures` and `texture_definitions` entries are two halves of the same
+// thing (same id space: the rendered material PNG and the fields that produced
+// it), so both loaders return this shape and open the same viewer. Edits always
+// save to texture_definitions/<id>.json, wherever you opened it from.
 export type TextureData = {
   id: number
-  png: Blob
-  definition: TextureDefinition | null
+  png: Blob | null
+  def: TextureDefinition | null
+  defsDir: FileSystemDirectoryHandle | null
+}
+
+export async function loadTexturePng(
+  texturesDir: FileSystemDirectoryHandle,
+  id: number,
+): Promise<Blob | null> {
+  try {
+    const subHandle = await texturesDir.getDirectoryHandle(String(id))
+    return await (await subHandle.getFileHandle(`${id}.png`)).getFile()
+  } catch {
+    return null
+  }
+}
+
+export async function loadTextureDef(
+  defsDir: FileSystemDirectoryHandle,
+  id: number,
+): Promise<TextureDefinition | null> {
+  try {
+    const file = await (await defsDir.getFileHandle(`${id}.json`)).getFile()
+    return JSON.parse(await file.text()) as TextureDefinition
+  } catch {
+    return null
+  }
+}
+
+export async function writeTextureDef(
+  defsDir: FileSystemDirectoryHandle,
+  def: TextureDefinition,
+): Promise<void> {
+  const fileHandle = await defsDir.getFileHandle(`${def.id}.json`, { create: true })
+  const writable = await fileHandle.createWritable()
+  await writable.write(JSON.stringify(def, null, 2))
+  await writable.close()
 }
 
 const loader: CacheLoader = {
   streamItems: streamDirItems,
 
   async loadItem(dirHandle, item, rootHandle) {
-    const subHandle = await dirHandle.getDirectoryHandle(String(item.id))
-    const pngHandle = await subHandle.getFileHandle(`${item.id}.png`)
-    const png = await pngHandle.getFile()
+    const png = await loadTexturePng(dirHandle, item.id)
 
-    let definition: TextureDefinition | null = null
+    let defsDir: FileSystemDirectoryHandle | null = null
+    let def: TextureDefinition | null = null
     if (rootHandle) {
       try {
-        const defsDir = await rootHandle.getDirectoryHandle('texture_definitions')
-        const defHandle = await defsDir.getFileHandle(`${item.id}.json`)
-        const defFile = await defHandle.getFile()
-        definition = JSON.parse(await defFile.text()) as TextureDefinition
+        defsDir = await rootHandle.getDirectoryHandle('texture_definitions')
+        def = await loadTextureDef(defsDir, item.id)
       } catch {
-        // no matching definition — viewer renders without it
+        // texture_definitions not dumped — viewer renders the image only
       }
     }
 
-    return { id: item.id, png, definition } satisfies TextureData
+    return { id: item.id, png, def, defsDir } satisfies TextureData
+  },
+
+  // Edits belong to the definition, so they save to texture_definitions/,
+  // not into this entry's own folder.
+  async saveItem(_dirHandle, _item, data) {
+    const { def, defsDir } = data as TextureData
+    if (!def || !defsDir) return
+    await writeTextureDef(defsDir, def)
   },
 }
 

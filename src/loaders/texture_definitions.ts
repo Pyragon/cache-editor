@@ -1,16 +1,12 @@
 import type { CacheLoader } from './types'
-import { deleteJsonItem, nextFreeJsonId, streamJsonItems, writeJsonItem } from './common'
-import type { TextureDefinition } from './textures'
+import { deleteJsonItem, nextFreeJsonId, streamJsonItems } from './common'
+import { loadTextureDef, loadTexturePng, writeTextureDef } from './textures'
+import type { TextureData, TextureDefinition } from './textures'
 
 // texture_definitions/<id>.json — one file per material, dumped from the
 // single parallel-array blob in the TEXTURE_DEFINITIONS index (cryogen
-// TextureDefinitions.parseTextureDefs). Same id space as the textures entry.
-export type TextureDefinitionData = {
-  id: number
-  def: TextureDefinition
-  texturesDir: FileSystemDirectoryHandle | null
-}
-
+// TextureDefinitions.parseTextureDefs). Shares the textures entry's id space
+// and viewer; see loaders/textures.ts for the shared TextureData shape.
 const NEW_DEFINITION_DEFAULTS: Omit<TextureDefinition, 'id'> = {
   detailsOnly: false,
   isHalfSize: false,
@@ -37,30 +33,30 @@ const loader: CacheLoader = {
   streamItems: streamJsonItems,
 
   async loadItem(dirHandle, item, rootHandle) {
-    const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
-    const file = await fileHandle.getFile()
-    const def = JSON.parse(await file.text()) as TextureDefinition
+    const def = await loadTextureDef(dirHandle, item.id)
 
-    let texturesDir: FileSystemDirectoryHandle | null = null
+    let png: Blob | null = null
     if (rootHandle) {
       try {
-        texturesDir = await rootHandle.getDirectoryHandle('textures')
+        const texturesDir = await rootHandle.getDirectoryHandle('textures')
+        png = await loadTexturePng(texturesDir, item.id)
       } catch {
-        // no textures entry in this dump — material preview unavailable
+        // textures not dumped — viewer shows the fields without the image
       }
     }
 
-    return { id: item.id, def, texturesDir } satisfies TextureDefinitionData
+    return { id: item.id, png, def, defsDir: dirHandle } satisfies TextureData
   },
 
-  async saveItem(dirHandle, item, data) {
-    const { def } = data as TextureDefinitionData
-    await writeJsonItem(dirHandle, item.id, def)
+  async saveItem(dirHandle, _item, data) {
+    const { def } = data as TextureData
+    if (!def) return
+    await writeTextureDef(dirHandle, def)
   },
 
   async createItem(dirHandle) {
     const id = await nextFreeJsonId(dirHandle)
-    await writeJsonItem(dirHandle, id, { id, ...NEW_DEFINITION_DEFAULTS })
+    await writeTextureDef(dirHandle, { id, ...NEW_DEFINITION_DEFAULTS })
     return { id, name: String(id) }
   },
 
@@ -69,12 +65,9 @@ const loader: CacheLoader = {
   },
 
   async cloneItem(dirHandle, item) {
-    const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
-    const file = await fileHandle.getFile()
-    const source = JSON.parse(await file.text()) as TextureDefinition
-
+    const source = await loadTextureDef(dirHandle, item.id)
     const id = await nextFreeJsonId(dirHandle)
-    await writeJsonItem(dirHandle, id, { ...source, id })
+    await writeTextureDef(dirHandle, { ...(source ?? NEW_DEFINITION_DEFAULTS), id })
     return { id, name: String(id) }
   },
 }

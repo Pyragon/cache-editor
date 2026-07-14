@@ -46,8 +46,6 @@ import BillboardViewer from './components/BillboardViewer'
 import type { BillboardData } from './loaders/billboards'
 import SkyboxViewer from './components/SkyboxViewer'
 import type { SkyboxData } from './loaders/config/skyboxes'
-import TextureDefinitionViewer from './components/TextureDefinitionViewer'
-import type { TextureDefinitionData } from './loaders/texture_definitions'
 import MapAreaViewer from './components/MapAreaViewer'
 import type { MapAreaData } from './loaders/map_areas'
 import AreaViewer from './components/AreaViewer'
@@ -209,7 +207,7 @@ function App() {
     ? selectedItemContent as ModelData
     : null
 
-  const textureContent = selectedEntry?.name === 'textures' && selectedItemContent != null
+  const textureContent = (selectedEntry?.name === 'textures' || selectedEntry?.name === 'texture_definitions') && selectedItemContent != null
     ? selectedItemContent as TextureData
     : null
 
@@ -275,10 +273,6 @@ function App() {
 
   const skyboxContent = selectedEntry?.name === 'config_skybox' && selectedItemContent != null
     ? selectedItemContent as SkyboxData
-    : null
-
-  const textureDefContent = selectedEntry?.name === 'texture_definitions' && selectedItemContent != null
-    ? selectedItemContent as TextureDefinitionData
     : null
 
   const mapAreaContent = selectedEntry?.name === 'map_areas' && selectedItemContent != null
@@ -773,7 +767,7 @@ function App() {
                 : modelContent != null
                 ? <ModelViewer data={modelContent} />
                 : textureContent != null
-                ? <TextureViewer data={textureContent} />
+                ? <TextureViewer data={textureContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : enumContent != null
                 ? <EnumViewer data={enumContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : cursorContent != null
@@ -806,8 +800,6 @@ function App() {
                 ? <BillboardViewer data={billboardContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : skyboxContent != null
                 ? <SkyboxViewer data={skyboxContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
-                : textureDefContent != null
-                ? <TextureDefinitionViewer data={textureDefContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : mapAreaContent != null
                 ? <MapAreaViewer data={mapAreaContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : areaContent != null
