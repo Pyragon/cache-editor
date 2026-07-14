@@ -2,7 +2,7 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
-  padding-bottom: 80px;
+
 }
 
 .item-header {
@@ -225,4 +225,30 @@
 
 .item-title-row .quest-name-input {
   flex: 1;
+}
+
+/* Map area rects table: 10 columns of numeric inputs — without a width rule
+   each input keeps its intrinsic ~150px width and the table overflows its
+   bordered wrapper. Let the wrapper size to the panel and the inputs fill
+   their cells instead. */
+.map-area-rects {
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.map-area-rects .cell-input {
+  /* Coordinates cap at 12800 — size for 5 digits plus the input's own
+     6px side padding + 1px borders (box-sizing includes them). The number
+     spinner is hidden below; Chromium otherwise reserves ~2ch for it. */
+  width: calc(6ch + 14px);
+  box-sizing: border-box;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.map-area-rects .cell-input::-webkit-outer-spin-button,
+.map-area-rects .cell-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
