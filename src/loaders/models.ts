@@ -81,6 +81,29 @@ export type ModelData = {
   textureTransU: Int8Array | null
   textureTransV: Int8Array | null
   textures: Map<number, Blob>      // texture id → rendered material PNG
+  // Billboard attachments (darkan Mesh.kt: u8 count, then u16 typeId,
+  // u16 face, u8 depth, s8 distance per entry; gated by footer flag 0x4).
+  billboards: ModelBillboard[] | null
+  // billboard type id → its config + rendered material PNG, resolved by the loader.
+  billboardTypes: Map<number, { def: BillboardTypeDef; material: Blob | null }>
+}
+
+export type ModelBillboard = {
+  typeId: number
+  face: number
+  depth: number
+  distance: number
+}
+
+// Mirrors BillboardDef in loaders/billboards.ts (kept structural to avoid a cycle).
+export type BillboardTypeDef = {
+  materialId: number
+  size2d: number
+  size3d: number
+  shape: number
+  blendType: number
+  stationary: boolean
+  hasUid: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +271,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const vertZOffset = off
   off += modelVerticesZ
   const texPnmOffset = off      // simple (type 0) texture triangles, 3 × u16 each
+  let textureEndOff = texPnmOffset  // start of the trailing particle/billboard chunks
 
   // Allocate arrays
   const vertexX = new Int32Array(vertexCount)
@@ -333,11 +357,14 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textureTransU = new Int8Array(texturedFaceCount)
     textureTransV = new Int8Array(texturedFaceCount)
 
-    let simpleCount = 0, complexCount = 0
+    let simpleCount = 0, complexCount = 0, type2Count = 0
     for (let i = 0; i < texturedFaceCount; i++) {
       const type = textureRenderTypes[i] & 0xFF
       if (type === 0) simpleCount++
-      else if (type >= 1 && type <= 3) complexCount++
+      else if (type >= 1 && type <= 3) {
+        complexCount++
+        if (type === 2) type2Count++
+      }
     }
     const scaleBytes = version >= 15 ? 9 : version === 14 ? 7 : 6
 
@@ -386,6 +413,32 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
         }
       }
     }
+    textureEndOff = speedsOff + complexCount + 2 * type2Count
+  }
+
+  // Particle emitters/effectors (flag 0x2, skipped) then billboards (flag 0x4)
+  // trail the texture data — darkan Mesh.kt reads them sequentially from there.
+  let billboards: ModelBillboard[] | null = null
+  if ((flags & 0x4) !== 0) {
+    try {
+      const footerStart = data.length - 23
+      const tail = new BinReader(data).at(textureEndOff)
+      if ((flags & 0x2) !== 0) {
+        const emitterCount = tail.u8()
+        for (let i = 0; i < emitterCount; i++) { tail.u16(); tail.u16() }
+        const effectorCount = tail.u8()
+        for (let i = 0; i < effectorCount; i++) { tail.u16(); tail.u16() }
+      }
+      const count = tail.u8()
+      if (count > 0 && textureEndOff + count * 6 <= footerStart) {
+        billboards = []
+        for (let i = 0; i < count; i++) {
+          billboards.push({ typeId: tail.u16(), face: tail.u16(), depth: tail.u8(), distance: tail.s8() })
+        }
+      }
+    } catch {
+      // malformed/unexpected tail — model still renders, just without billboards
+    }
   }
 
   return {
@@ -404,6 +457,8 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textureRotation, textureDirection, textureSpeed,
     textureTransU, textureTransV,
     textures: new Map(),
+    billboards,
+    billboardTypes: new Map(),
   }
 }
 
@@ -554,6 +609,8 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textureRotation: null, textureDirection: null, textureSpeed: null,
     textureTransU: null, textureTransV: null,
     textures: new Map(),
+    billboards: null, // old-format models predate billboards
+    billboardTypes: new Map(),
   }
 }
 
@@ -600,6 +657,31 @@ const loader: CacheLoader = {
           } catch {
             // missing texture — face falls back to its flat colour
           }
+        }))
+      }
+    }
+
+    // Resolve billboard configs + their material PNGs for the attachments.
+    if (model.billboards && rootHandle) {
+      let billboardsDir: FileSystemDirectoryHandle | null = null
+      let texturesDir: FileSystemDirectoryHandle | null = null
+      try { billboardsDir = await rootHandle.getDirectoryHandle('billboards') } catch { /* not dumped */ }
+      try { texturesDir = await rootHandle.getDirectoryHandle('textures') } catch { /* not dumped */ }
+      if (billboardsDir) {
+        const typeIds = new Set(model.billboards.map((b) => b.typeId))
+        await Promise.all([...typeIds].map(async (typeId) => {
+          try {
+            const defFile = await (await billboardsDir!.getFileHandle(`${typeId}.json`)).getFile()
+            const def = JSON.parse(await defFile.text())
+            let material: Blob | null = null
+            if (texturesDir && def.materialId >= 0) {
+              try {
+                const dir = await texturesDir.getDirectoryHandle(String(def.materialId))
+                material = await (await dir.getFileHandle(`${def.materialId}.png`)).getFile()
+              } catch { /* missing material */ }
+            }
+            model.billboardTypes.set(typeId, { def, material })
+          } catch { /* missing billboard def — attachment is skipped by the viewer */ }
         }))
       }
     }

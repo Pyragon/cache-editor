@@ -92,8 +92,18 @@ export default function ModelViewer({ data }: Props) {
 
     // Bucket faces by texture id; -1 = flat face colour. Textures whose PNG
     // is missing from the cache fall back to the colour bucket.
+    // Faces replaced by a billboard (hasUid set on its type) aren't rendered —
+    // the client skips them and draws only the billboard (ModelSM/darkan).
+    const hiddenFaces = new Set<number>()
+    if (data.billboards) {
+      for (const bb of data.billboards) {
+        if (data.billboardTypes.get(bb.typeId)?.def.hasUid) hiddenFaces.add(bb.face)
+      }
+    }
+
     const buckets = new Map<number, number[]>()
     for (let f = 0; f < faceCount; f++) {
+      if (hiddenFaces.has(f)) continue
       const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
       if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount)
         continue
@@ -416,6 +426,64 @@ export default function ModelViewer({ data }: Props) {
     const mesh = new THREE.Mesh(geo, materials)
     scene.add(mesh)
 
+    // --- Billboards: camera-facing sprites at their host face's centroid,
+    // sized size2d×2 by size3d×2 world units (sizes are half-extents), tinted
+    // by the host face colour when blendType 0 ("colour mix"), additive for
+    // shape 2 ("brightened"), circle-clipped for shape 1. Added as children of
+    // the mesh so they inherit its centering offset.
+    const spriteMaterials: THREE.SpriteMaterial[] = []
+    const spriteTextures: THREE.Texture[] = []
+    if (data.billboards) {
+      for (const bb of data.billboards) {
+        const info = data.billboardTypes.get(bb.typeId)
+        if (!info || bb.face < 0 || bb.face >= faceCount) continue
+        const { def, material } = info
+        const ia = triangleX[bb.face], ib = triangleY[bb.face], ic = triangleZ[bb.face]
+        if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount) continue
+
+        const smat = new THREE.SpriteMaterial({
+          color: def.blendType === 0 ? hslToRgb(faceColor[bb.face]) : 0xffffff,
+          transparent: true,
+          depthWrite: false,
+          blending: def.shape === 2 ? THREE.AdditiveBlending : THREE.NormalBlending,
+        })
+        spriteMaterials.push(smat)
+        const sprite = new THREE.Sprite(smat)
+        sprite.position.set(
+          -(vertexX[ia] + vertexX[ib] + vertexX[ic]) / 3,
+          -(vertexY[ia] + vertexY[ib] + vertexY[ic]) / 3,
+          -(vertexZ[ia] + vertexZ[ib] + vertexZ[ic]) / 3,
+        )
+        sprite.scale.set(def.size2d * 2, def.size3d * 2, 1)
+        sprite.renderOrder = 1
+        mesh.add(sprite)
+
+        if (material) {
+          createImageBitmap(material).then((bitmap) => {
+            if (disposed) { bitmap.close(); return }
+            let source: CanvasImageSource = bitmap
+            if (def.shape === 1) {
+              const canvas = document.createElement('canvas')
+              canvas.width = bitmap.width
+              canvas.height = bitmap.height
+              const ctx = canvas.getContext('2d')!
+              ctx.beginPath()
+              ctx.ellipse(canvas.width / 2, canvas.height / 2, canvas.width / 2, canvas.height / 2, 0, 0, Math.PI * 2)
+              ctx.clip()
+              ctx.drawImage(bitmap, 0, 0)
+              source = canvas
+            }
+            const texture = new THREE.Texture(source)
+            texture.colorSpace = THREE.SRGBColorSpace
+            texture.needsUpdate = true
+            spriteTextures.push(texture)
+            smat.map = texture
+            smat.needsUpdate = true
+          })
+        }
+      }
+    }
+
     const cx2 = (minX + maxX) / 2
     const cy2 = (minY + maxY) / 2
     const cz2 = (minZ + maxZ) / 2
@@ -457,6 +525,8 @@ export default function ModelViewer({ data }: Props) {
       geo.dispose()
       for (const texture of loadedTextures) texture.dispose()
       for (const material of materials) material.dispose()
+      for (const texture of spriteTextures) texture.dispose()
+      for (const material of spriteMaterials) material.dispose()
       mount.removeChild(renderer.domElement)
     }
   }, [data])
