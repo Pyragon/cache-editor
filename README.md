@@ -34,7 +34,7 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 10 | `huffman` | ✅ **Done** | Frequency table viewer (Table/Visual) + regenerate-from-corpus editor with round-trip self-test |
 | 11 | `music2` | Not implemented upstream | |
 | 12 | `cs2` | Not started | |
-| 13 | `font_metrics` | Not started | `fonts/metrics` |
+| 13 | `font_metrics` | Editor | Shown as **Fonts** — joins the metrics (13) with the glyph bitmaps from the font sprite archives (32/34), since a font is both halves keyed by one file id. Glyph atlas with editable advance widths, line-height/padding, and a live client-accurate text preview. Glyphs are read-only (the sprite archives aren't repackable yet). |
 | 14 | `midi_instruments` | Not started | |
 | 15 | `sound_effects_midi` | Not implemented upstream | |
 | 16 | `objects` | Editor | Full editable editor — user-verified 2026-07-13 |
@@ -53,9 +53,9 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 29 | `billboards` | ✅ **Done** | material id + size + shape/blend, live material preview, used-by-models list (scripts/scan-billboard-usage.mjs) |
 | 30 | `native_libraries` | ✅ **Done** | File browser — view/download/replace/add. `.dll`/`.exe` files can't be touched due to a browser platform restriction (see notice in the viewer) |
 | 31 | `shaders` | Not implemented upstream | |
-| 32 | `normal_fonts` | Not implemented upstream | |
+| 32 | `normal_fonts` | Merged into **Fonts** | Glyph bitmaps for the real typefaces — dumped by cryogen's FontGlyphs to `fonts/glyphs/normal/`, served by the `font_metrics` entry (no separate sidebar row). |
 | 33 | `game_tips` | Not implemented upstream | |
-| 34 | `jagex_fonts` | Not implemented upstream | |
+| 34 | `jagex_fonts` | Merged into **Fonts** | Single-glyph logo/wordmark entries — dumped to `fonts/glyphs/jagex/`, served by the `font_metrics` entry (no separate sidebar row). |
 | 35 | `cutscenes` | Not implemented upstream | |
 | 36 | `vorbis` | Not implemented upstream | |
 

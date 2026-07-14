@@ -11,6 +11,10 @@
 
 ## Textures / Texture Definitions
 
+- **Textures can't be repacked at all right now** — `MaterialDefinitions.getActions()` and `TextureDefinitions.getActions()` both return `null` in cryogen, so the repacker skips them. That means the definition fields the editor now saves to `texture_definitions/<id>.json` never reach the cache. Implement `TextureDefinitions.getActions()` (its `encode()`-equivalent parallel-array blob) so those edits actually land.
+- **Material editor: expose the procedural property graph.** A material isn't a stored image — it's a small program (a graph of `MaterialProperty` types: noise, combiners, colour ramps, sprite samplers) that cryogen executes to render the PNG. Roughly 30% of materials sample a sprite; the rest are purely procedural. Add a modal/editor covering all the MaterialProp* types from cryogen so materials can actually be authored, with a live re-render of the result. Needs `MaterialDefinitions.getActions()` too (its `encode()` already exists).
+- **Image upload for textures** only makes sense on top of the above: for sprite-backed materials it can write a new sprite and repoint the sampler; for procedural ones it would mean replacing the property graph with a single sprite sampler (destructive — should be an explicit, warned action).
+
 - **Consider merging the textures and texture_definitions editors** (raised 2026-07-13, texture_definitions held from sign-off pending this decision). They share an id space and both show the material PNG + definition fields — textures is the read-only viewer with the image focus, texture_definitions the editable form. A combined page could be the TextureViewer's presentation with the definition panel made editable (or a mode toggle), with saves going to `texture_definitions/<id>.json`. Decide whether the combined page lives on one entry with the other hidden/redirecting, or on both like quick chat.
 
 ## Item Icons
