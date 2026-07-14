@@ -1,22 +1,46 @@
-import type { CacheLoader, LoadedItem } from './types'
+import type { CacheLoader } from './types'
+import { deleteJsonItem, nextFreeJsonId, streamJsonItems } from './common'
+import { resolveQuickChatDirs, saveMessage } from './quick_chat'
+import type { QcMessageDef, QuickChatData } from './quick_chat'
 
-// Filenames aren't purely numeric — they're "<id> - <description>.json" —
-// so items are keyed by the full stem rather than `${id}.json`.
 const loader: CacheLoader = {
-  async *streamItems(dirHandle) {
-    for await (const handle of dirHandle.values()) {
-      if (handle.kind === 'file' && handle.name.endsWith('.json')) {
-        const stem = handle.name.slice(0, -5)
-        const id = parseInt(stem, 10)
-        if (!isNaN(id)) yield { id, name: stem } satisfies LoadedItem
-      }
-    }
+  streamItems: streamJsonItems,
+
+  async loadItem(dirHandle, item, rootHandle) {
+    const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
+    const file = await fileHandle.getFile()
+    const def = JSON.parse(await file.text()) as QcMessageDef
+
+    const { menusDir, messagesDir } = await resolveQuickChatDirs(rootHandle)
+    return {
+      kind: 'message', id: item.id, def,
+      menusDir, messagesDir: messagesDir ?? dirHandle,
+    } satisfies QuickChatData
   },
 
-  async loadItem(dirHandle, item) {
-    const fileHandle = await dirHandle.getFileHandle(`${item.name}.json`)
+  async saveItem(dirHandle, _item, data) {
+    const { def } = data as QuickChatData
+    await saveMessage(dirHandle, def as QcMessageDef)
+  },
+
+  async createItem(dirHandle) {
+    const id = await nextFreeJsonId(dirHandle)
+    await saveMessage(dirHandle, { id, message: ['New message'], searchable: true })
+    return { id, name: String(id) }
+  },
+
+  async deleteItem(dirHandle, item) {
+    await deleteJsonItem(dirHandle, item.id)
+  },
+
+  async cloneItem(dirHandle, item) {
+    const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
     const file = await fileHandle.getFile()
-    return JSON.parse(await file.text())
+    const source = JSON.parse(await file.text()) as QcMessageDef
+
+    const id = await nextFreeJsonId(dirHandle)
+    await saveMessage(dirHandle, { ...source, id })
+    return { id, name: String(id) }
   },
 }
 
