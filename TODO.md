@@ -42,6 +42,8 @@ Architecture note (investigated 2026-07-12): a quest lives in **two places** —
 
 ## Huffman
 
+- **REMINDER: test the Huffman viewer in-browser** (both Table and Visual modes) — planned for 2026-07-12 but forgotten; do on next at-home session. Note huffman is already marked Done in the sidebar, so if testing turns anything up it needs un-marking too.
+
 - **Regenerate-from-corpus editor** — make Huffman non-read-only by letting the user upload a chat corpus and rebuilding the table from it, so the compression can be re-tuned to a server's actual chat distribution. Details:
   - The cache's source of truth is only the per-byte **code-length array** (`originalByteData`); cryogen's `HuffmanDefinitions(byte[] codeLengths)` constructor derives the canonical `codes` + decode `table` (tree) from those lengths. So regeneration only needs to produce a good length-per-byte array — never hand-assign codes or build the tree.
   - Input: a plain-text chat corpus (upload a `.txt`; one message per line or concatenated). Count byte frequencies → run **length-limited Huffman** (package-merge, or plain Huffman + a depth-fixup pass) to cap code lengths at the format max (21 bits). Floor every byte to count ≥1 so all 256 keep a code and any future message can still encode.
