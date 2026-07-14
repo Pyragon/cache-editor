@@ -29,7 +29,7 @@ export default function TextureViewer({ data }: Props) {
   }
 
   const def = data.definition
-  const colourRgb = def ? hslToRgb(def.colour) : 0
+  const colourRgb = def ? hslToRgb(def.colorHsl) : 0
   const colourHex = `#${colourRgb.toString(16).padStart(6, '0')}`
 
   return (
@@ -80,20 +80,20 @@ export default function TextureViewer({ data }: Props) {
               <span className="texture-def-label">Colour</span>
               <span className="texture-def-value">
                 <span className="texture-swatch" style={{ background: colourHex }} />
-                {def.colour}
+                {def.colorHsl}
               </span>
             </div>
             {([
               ['Brightness',      def.brightness],
-              ['Shadow factor',   def.shadowFactor],
+              ['Alpha',           def.alpha],
               ['Effect ID',       def.effectId],
               ['Effect param 1',  def.effectParam1],
               ['Effect param 2',  def.effectParam2],
               ['Speed U',         def.textureSpeedU],
               ['Speed V',         def.textureSpeedV],
-              ['Mipmaps',         def.useMipmaps],
+              ['Mipmapping',      def.mipmapping],
               ['Combine mode',    def.combineMode],
-              ['Blend type',      def.blendType],
+              ['Effect combiner', def.effectCombiner],
             ] as [string, number][]).map(([label, value]) => (
               <div key={label} className="texture-def-card">
                 <span className="texture-def-label">{label}</span>
@@ -101,13 +101,14 @@ export default function TextureViewer({ data }: Props) {
               </div>
             ))}
             {([
-              ['Ground mesh',    def.isGroundMesh],
+              ['Details only',   def.detailsOnly],
               ['Half size',      def.isHalfSize],
               ['Skip triangles', def.skipTriangles],
               ['Brick tile',     def.isBrickTile],
               ['Repeat S',       def.repeatS],
               ['Repeat T',       def.repeatT],
               ['HDR',            def.hdr],
+              ['aBool2087 (?)',  def.aBool2087],
             ] as [string, boolean][]).map(([label, value]) => (
               <div key={label} className="texture-def-card">
                 <span className="texture-def-label">{label}</span>

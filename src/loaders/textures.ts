@@ -1,26 +1,29 @@
 import type { CacheLoader } from './types'
 import { streamDirItems } from './common'
 
+// Field names per darkan-bot-refactor MaterialType.kt (isHalfSize kept over
+// darkan's "isSmall"; aBool2087 is unidentified in darkan too).
 export type TextureDefinition = {
   id: number
-  isGroundMesh: boolean
+  detailsOnly: boolean
   isHalfSize: boolean
   skipTriangles: boolean
   brightness: number
-  shadowFactor: number
+  alpha: number
   effectId: number
   effectParam1: number
   effectParam2: number
-  colour: number
+  colorHsl: number
   textureSpeedU: number
   textureSpeedV: number
+  aBool2087: boolean
   isBrickTile: boolean
-  useMipmaps: number
+  mipmapping: number
   repeatS: boolean
   repeatT: boolean
   hdr: boolean
   combineMode: number
-  blendType: number
+  effectCombiner: number
 }
 
 export type TextureData = {
