@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import type { HitsplatData, HitsplatDef } from '../loaders/config/hitsplats'
 import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, downloadSpritePng, imageDataFromFile, loadSpriteMeta, renderFrame, renderFrameToCanvas } from './spriteRender'
-import { writeNewSprite } from '../loaders/spriteStore'
+import { nextFreeSpriteId } from '../loaders/spriteStore'
+import type { PendingSprites } from '../loaders/spriteStore'
+import { cacheTextHeight, drawCacheText, loadCacheFont, measureCacheText } from './fontRender'
+import type { CacheFont } from './fontRender'
 import { NumberInput, NumGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import './HitbarViewer.css'
@@ -78,6 +81,8 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
   const [sprites, setSprites] = useState<Sprites>({ leftCap: null, innerLeft: null, middleFill: null, rightCap: null })
   const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  const [pendingSprites, setPendingSprites] = useState<PendingSprites>({})
+  const [font, setFont] = useState<CacheFont | null>(null)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -85,12 +90,26 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
 
   useEffect(() => {
     setDraft(data.hitsplat)
+    setPendingSprites({})
+    setUploadError(null)
     setIsDirty(false)
   }, [data])
 
   useEffect(() => {
     onDirtyChange?.(isDirty)
   }, [isDirty, onDirtyChange])
+
+  // Resolve the cache font this hitsplat references, so the damage number is
+  // drawn with the real glyphs instead of a web-font stand-in.
+  useEffect(() => {
+    let cancelled = false
+    setFont(null)
+    if (!data.rootDir || draft.fontId < 0) return
+    loadCacheFont(data.rootDir, draft.fontId).then((loaded) => {
+      if (!cancelled) setFont(loaded)
+    })
+    return () => { cancelled = true }
+  }, [draft.fontId, data.rootDir])
 
   useEffect(() => {
     if (!data.spritesDir) return
@@ -127,9 +146,15 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
       ? draft.placementExampleString.replaceAll('%1', String(damage))
       : String(damage)
 
-    const measure = document.createElement('canvas').getContext('2d')!
-    measure.font = 'bold 11px Arial, sans-serif'
-    const textWidth = Math.ceil(measure.measureText(text).width)
+    // Measure with the real cache font when it's loaded; Arial only stands in
+    // while the font is still resolving (or if fontId doesn't resolve at all).
+    const textWidth = font
+      ? measureCacheText(font, text)
+      : (() => {
+          const measure = document.createElement('canvas').getContext('2d')!
+          measure.font = 'bold 11px Arial, sans-serif'
+          return Math.ceil(measure.measureText(text).width)
+        })()
 
     let width: number
     let height: number
@@ -174,14 +199,26 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
     // — see darkan EntityUpdating: textDrawY = drawY + textOffsetY + 15, then
     // renderPlain(text, x, textDrawY). (drawY is the sprite top = y 0 here.)
     const textBaselineY = draft.textOffsetY + 15
-    ctx.font = 'bold 11px Arial, sans-serif'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'alphabetic'
-    ctx.fillStyle = '#000'
-    ctx.fillText(text, textCenterX + 1, textBaselineY + 1)
-    ctx.fillStyle = draft.hasColor ? rgbIntToHex(draft.color) : '#ffffff'
-    ctx.fillText(text, textCenterX, textBaselineY)
-  }, [sprites, damage, draft.placementExampleString, draft.textOffsetY, draft.color, draft.hasColor])
+    const textColor = draft.hasColor ? rgbIntToHex(draft.color) : '#ffffff'
+
+    if (font) {
+      // Real cache font: glyph bitmaps blitted at advance-width intervals.
+      // drawCacheText takes the TOP of the glyph line, so convert from the
+      // client's baseline anchor using the font's own glyph height.
+      const left = textCenterX - textWidth / 2
+      const top = textBaselineY - cacheTextHeight(font)
+      drawCacheText(ctx, font, text, left + 1, top + 1, '#000')
+      drawCacheText(ctx, font, text, left, top, textColor)
+    } else {
+      ctx.font = 'bold 11px Arial, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'alphabetic'
+      ctx.fillStyle = '#000'
+      ctx.fillText(text, textCenterX + 1, textBaselineY + 1)
+      ctx.fillStyle = textColor
+      ctx.fillText(text, textCenterX, textBaselineY)
+    }
+  }, [sprites, damage, font, draft.placementExampleString, draft.textOffsetY, draft.color, draft.hasColor])
 
   function set(key: string, value: unknown) {
     setDraft((prev) => ({ ...prev, [key]: value }))
@@ -195,9 +232,9 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
     fileInputRef.current!.click()
   }
 
-  // Upload never overwrites a shared sprite: it allocates the next free
-  // sprite id, writes the new sprite immediately, and points this slot at
-  // it. (A brand-new id can't collide with anything already referenced.)
+  // Upload never overwrites a shared sprite: it allocates a fresh sprite id
+  // and points this slot at it. The sprite is only *staged* here — saveItem
+  // writes it — so Discard drops it without leaving an orphan on disk.
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     const slot = pendingSlotRef.current
@@ -212,19 +249,16 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
       }
       const meta = applyImageToMeta(imageData, 0, blank)
 
-      let maxId = -1
-      for await (const handle of data.spritesDir.values()) {
-        if (handle.kind !== 'directory') continue
-        const id = parseInt(handle.name, 10)
-        if (!isNaN(id) && id > maxId) maxId = id
-      }
-      const newId = maxId + 1
+      // Reserve an id past anything already staged this session, so two
+      // uploads before a save can't land on the same id.
+      const staged = Object.values(pendingSprites).map((p) => p.id)
+      const newId = await nextFreeSpriteId(data.spritesDir, staged)
 
       const canvas = document.createElement('canvas')
       renderFrame(canvas, meta, 0)
       const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
-      await writeNewSprite(data.spritesDir, newId, meta, png)
-
+      // Staged only — saveItem writes it, so Discard leaves no orphan behind.
+      setPendingSprites((prev) => ({ ...prev, [slot.field]: { id: newId, meta, png } }))
       setSprites((prev) => ({ ...prev, [slot.metaKey]: meta }))
       set(slot.field, newId)
       setUploadError(null)
@@ -235,8 +269,16 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
 
   async function handleSave() {
     setIsSaving(true)
-    await onSave({ ...data, hitsplat: draft })
+    await onSave({ ...data, hitsplat: draft, pendingSprites })
+    setPendingSprites({})
     setIsSaving(false)
+    setIsDirty(false)
+  }
+
+  function handleDiscard() {
+    setDraft(data.hitsplat)
+    setPendingSprites({})
+    setUploadError(null)
     setIsDirty(false)
   }
 
@@ -283,6 +325,13 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
               className="hit-preview-canvas"
               style={previewSize ? { width: previewSize.w * zoom, height: previewSize.h * zoom } : undefined}
             />
+            <p className="qc-hint">
+              {font
+                ? `Rendered with cache font ${draft.fontId} (${font.glyphs.size} glyphs).`
+                : draft.fontId < 0
+                  ? 'No fontId set — showing an Arial stand-in.'
+                  : `Font ${draft.fontId} has no glyphs in this dump — showing an Arial stand-in.`}
+            </p>
             <div className="hit-preview-controls">
               <span className="item-field-label">Damage</span>
               <NumberInput
@@ -379,7 +428,7 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
       {isDirty && (
         <div className="save-bar">
           <span className="save-bar-label">Unsaved changes</span>
-          <button type="button" className="save-bar-discard" onClick={() => { setDraft(data.hitsplat); setIsDirty(false) }}>Discard</button>
+          <button type="button" className="save-bar-discard" onClick={handleDiscard}>Discard</button>
           <button type="button" className="save-bar-save" onClick={handleSave} disabled={isSaving}>
             {isSaving ? 'Saving…' : 'Save'}
           </button>
