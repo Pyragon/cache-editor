@@ -15,7 +15,7 @@ Ordered to match [`IndexType.java`](https://github.com/Pyragon/cryogen/blob/mast
 
 Sidebar colours: **green** = feature-complete editor (user-reviewed), white = dedicated viewer/editor in progress, **amber** = dumped but only the raw-JSON fallback so far, **red** = not present in the dump (disabled).
 
-Status legend: **✅ Done** = complete & reviewed (green) · **Editor** = full editable editor built, pending review (some await a re-dump — see below) · **Viewer** = read-only or partial viewer · **Not started** = raw-JSON fallback only · **Not implemented upstream** = no cryogen `dumpFiles()`, never appears in a dump.
+Status legend: **✅ Done** = complete & reviewed (green) · **Editor** = full editable editor built, pending review · **Viewer** = read-only or partial viewer · **Not started** = raw-JSON fallback only · **Not implemented upstream** = no cryogen `dumpFiles()`, never appears in a dump.
 
 All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_definitions`, `map_areas`, config `areas`, config `hitsplats`, config `skyboxes`) have been **re-dumped** with the darkan-aligned names; the `textures` dump also carries the alpha channel + correct isHalfSize resolutions as of 2026-07-13.
 
@@ -90,7 +90,7 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 33 | `cursors` | ✅ **Done** | Full editor — hotspot picking on the sprite preview, live "your mouse becomes the cursor" test area with RS-style click crosses, sprite download/upload (uploads allocate a new sprite id), add/remove/clone, save validation |
 | 34 | `map_sprites` | Editor | Sprite preview, background colour picker, upscaling toggle, sprite download/upload, add/remove/clone. (Held from Done pending a minimap-render preview — see TODO) |
 | 35 | `quests` | Editor | Reads/writes quest JSON and cache structs (start NPC, start location, slot ID, prereq quests, skill requirements) |
-| 36 | `areas` | Editor | map element config (MECType) — sprites, colours, menu actions, visibility vars, params (needs re-dump; 73,896 entries) |
+| 36 | `areas` | Editor | map element config (MECType) — sprites, colours, menu actions, visibility vars, params (73,896 entries) |
 | 46 | `hitsplats` | Editor | Field editor with a live damage-number splat preview (held from Done pending cache-font rendering — see TODO) |
 | 47 | `clan_var` | Not dumped | |
 | 54 | `clan_var_settings` | Not dumped | |
