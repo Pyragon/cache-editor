@@ -15,8 +15,6 @@
 - **Material editor: expose the procedural property graph.** A material isn't a stored image — it's a small program (a graph of `MaterialProperty` types: noise, combiners, colour ramps, sprite samplers) that cryogen executes to render the PNG. Roughly 30% of materials sample a sprite; the rest are purely procedural. Add a modal/editor covering all the MaterialProp* types from cryogen so materials can actually be authored, with a live re-render of the result. Needs `MaterialDefinitions.getActions()` too (its `encode()` already exists).
 - **Image upload for textures** only makes sense on top of the above: for sprite-backed materials it can write a new sprite and repoint the sampler; for procedural ones it would mean replacing the property graph with a single sprite sampler (destructive — should be an explicit, warned action).
 
-- **Consider merging the textures and texture_definitions editors** (raised 2026-07-13, texture_definitions held from sign-off pending this decision). They share an id space and both show the material PNG + definition fields — textures is the read-only viewer with the image focus, texture_definitions the editable form. A combined page could be the TextureViewer's presentation with the definition panel made editable (or a mode toggle), with saves going to `texture_definitions/<id>.json`. Decide whether the combined page lives on one entry with the other hidden/redirecting, or on both like quick chat.
-
 ## Item Icons
 
 - **Generate item icons from our own cache instead of itemdb.biz.** The current set (`public/icons/`, fetched by `scripts/download-icons.mjs`) is scraped from itemdb.biz, which renders from the *latest* RS cache — a number of icons have changed since rev 727, so ours are subtly wrong. The proper fix is rendering them ourselves the way the client builds inventory icons: render the item's model (`inventoryModelId`) with the item's 2D params (zoom2d, xan2d/yan2d/zan2d, xOffset2d/yOffset2d) into a 32×32 canvas — the Three.js model pipeline in ModelViewer already does most of the heavy lifting. Check darkan's icon/sprite rendering code for the exact camera math before porting (see CLAUDE.md reference-repo rules).
@@ -29,7 +27,6 @@ Architecture note (investigated 2026-07-12): a quest lives in **two places** —
 - **`_levelRequirements` (quest JSON) and struct skill-reqs (keys 871+) are the SAME data** (both `[skillId, level]` lists; confirmed identical on Love Story). The client reads the struct; the JSON field is a server mirror. Decide whether to keep both UI sections or merge into one that writes both locations on save.
 - **`_questPrerequisiteIds` (quest JSON, stores quest ids) and struct prereqs (keys 859–870, store slot ids) are the same concept, two encodings.** Same merge/reconcile decision. Also handle the drift case (JSON and struct disagreeing on count).
 - **`preReqSkillReqs` (accumulated from prereq tree)** was removed from the UI. May want to add it back as a read-only computed display to show total skill requirements including all prerequisites.
-- **CONFIRMED BUG — `writeStruct` clears only 7 skill-req pairs (keys 871–884), but a quest struct exists with 10 pairs** (keys 871–890). Editing a quest with 8–10 reqs leaves the extra pairs orphaned/stale on save. Widen the clear loop (or make it dynamic up to the actual max, ~10).
 - **Get the rest of quest structs within the editor to edit the quest start interface** — the struct has many more keys than the viewer currently surfaces (e.g. 845/846 name+sort, 848, 856, 898, 948–952 journal text / requirement descriptions / reward text). Expose the rest for editing.
 
 ## NPCs
@@ -50,7 +47,6 @@ Architecture note (investigated 2026-07-12): a quest lives in **two places** —
 
 ## Hitsplats
 
-- **Preview uses bold 11px Arial as a stand-in font** — once a fonts viewer/loader exists, render the damage number with the actual cache font referenced by `fontId` so the preview is pixel-accurate to the client. This is the last blocker before hitsplats can be marked done.
 - **Verify hitsplat 24's right cap in-game** — its `rightCap` reuses the inner-left sprite (4497) un-flipped. Investigation found NO flip/rotate flag anywhere: not in the JSON, not in the client (darkan `EntityUpdating.kt` draws all caps with a plain `draw(x, y, combineMode, color, blend)` — no mirror param), and the cap sprites aren't clean horizontal flips of each other. So the preview *should* match the client. Confirm by looking at hitsplat 24 in the actual game: if in-game also shows the un-flipped right cap, this is just a data quirk and no further action is needed; if the game closes off the right side, there's a flip path we haven't found and it needs deeper investigation.
 
 ## General Editor

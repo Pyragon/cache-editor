@@ -83,8 +83,12 @@ const SPECIALIZED_ENTRIES = new Set([
 // the user has manually reviewed and signed off go in here.
 const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
-  'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox',
+  'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics',
 ])
+
+function unavailableReason(name: string): string {
+  return EMPTY_ENTRIES[name] ?? 'No data found for this cache entry'
+}
 
 function entryStatusClass(entry: CacheEntry): string {
   if (!entry.available) return 'unavailable'
@@ -135,6 +139,15 @@ function buildSidebarRows(entries: CacheEntry[]): SidebarRow[] {
   return rows
 }
 
+// Entries whose folder exists but is always empty, because the cache index
+// itself holds no data — a re-dump recreates the (empty) folder, so "the
+// folder resolved" isn't enough to call them available. Declared rather than
+// detected: checking emptiness means enumerating every entry's directory,
+// which is very slow on the big ones (models, sprites, items).
+const EMPTY_ENTRIES: Record<string, string> = {
+  config_sun: 'No data — the sun index is empty in this cache (rev 727 ships no sun definitions).',
+}
+
 async function readCacheDir(dirHandle: FileSystemDirectoryHandle): Promise<CacheEntry[]> {
   const entries: CacheEntry[] = []
   let entryId = 1
@@ -142,7 +155,8 @@ async function readCacheDir(dirHandle: FileSystemDirectoryHandle): Promise<Cache
   const known = new Set(ENTRY_ORDER.map((def) => def.path[0]))
   for (const def of ENTRY_ORDER) {
     const handle = await resolveEntryHandle(dirHandle, def.path)
-    entries.push({ id: entryId++, name: def.name, available: handle != null, group: def.group })
+    const available = handle != null && !(def.name in EMPTY_ENTRIES)
+    entries.push({ id: entryId++, name: def.name, available, group: def.group })
   }
 
   // Anything present on disk but not covered by the canonical order (custom
@@ -615,7 +629,7 @@ function App() {
                         entryStatusClass(entry),
                       ].join(' ').trim()}
                       disabled={!entry.available}
-                      title={entry.available ? undefined : 'No data found for this cache entry'}
+                      title={entry.available ? undefined : unavailableReason(entry.name)}
                       onClick={() => handleSelectEntry(entry.id)}
                     >
                       {formatEntryLabel(entry.name)}
@@ -667,7 +681,7 @@ function App() {
                               entryStatusClass(m),
                             ].join(' ').trim()}
                             disabled={!m.available}
-                            title={m.available ? undefined : 'No data found for this cache entry'}
+                            title={m.available ? undefined : unavailableReason(m.name)}
                             onClick={() => handleSelectEntry(m.id)}
                           >
                             {formatEntryLabel(m.name.replace(/^config_/, ''))}

@@ -34,11 +34,11 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 10 | `huffman` | ✅ **Done** | Frequency table viewer (Table/Visual) + regenerate-from-corpus editor with round-trip self-test |
 | 11 | `music2` | Not implemented upstream | |
 | 12 | `cs2` | Not started | |
-| 13 | `font_metrics` | Editor | Shown as **Fonts** — joins the metrics (13) with the glyph bitmaps from the font sprite archives (32/34), since a font is both halves keyed by one file id. Glyph atlas with editable advance widths, line-height/padding, and a live client-accurate text preview. Glyphs are read-only (the sprite archives aren't repackable yet). |
+| 13 | `font_metrics` | ✅ **Done** | Shown as **Fonts** — joins the metrics (13) with the glyph bitmaps from the font sprite archives (32/34), since a font is both halves keyed by one file id. Glyph atlas with editable advance widths, line-height/padding, and a live client-accurate text preview. Glyphs are read-only (the sprite archives aren't repackable yet). |
 | 14 | `midi_instruments` | Not started | |
 | 15 | `sound_effects_midi` | Not implemented upstream | |
 | 16 | `objects` | Editor | Full editable editor — user-verified 2026-07-13 |
-| 17 | `enums` | Editor | Editable key/value table with type-char dropdowns |
+| 17 | `enums` | ✅ **Done** | Editable key/value table with type-char dropdowns; Add pre-fills the next key. Decode audited against darkan `EnumType.kt` — opcodes 1-6 identical, 7/8 differ only in representation (darkan materialises a sparse array, cryogen keeps the written entries keyed by the same index), verified against the dump. |
 | 18 | `npcs` | Editor | Full editable editor — user-verified 2026-07-13 (model-translations desync hardening still in TODO) |
 | 19 | `items` | Editor | Full editable editor with itemdb icon previews — user-verified 2026-07-13 |
 | 20 | `animations` | Not started | |
@@ -91,7 +91,7 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 34 | `map_sprites` | Editor | Sprite preview, background colour picker, upscaling toggle, sprite download/upload, add/remove/clone. (Held from Done pending a minimap-render preview — see TODO) |
 | 35 | `quests` | Editor | Reads/writes quest JSON and cache structs (start NPC, start location, slot ID, prereq quests, skill requirements) |
 | 36 | `areas` | ✅ **Done** | map element config (MECType) — sprites, colours, menu actions, visibility vars, params, static-element Placed At list (73,896 entries) |
-| 46 | `hitsplats` | Editor | Field editor with a live damage-number splat preview (held from Done pending cache-font rendering — see TODO) |
+| 46 | `hitsplats` | ✅ **Done** | Field editor with a live splat preview whose damage number is rendered with the real cache font referenced by `fontId` (glyphs + advance widths from the cache, positioned exactly like the client) |
 | 47 | `clan_var` | Not dumped | |
 | 54 | `clan_var_settings` | Not dumped | |
 | 72 | `hitbars` | ✅ **Done** | Field editor with a live health-percentage bar preview, per-sprite previews + upload/download, and a slider tinted to the actual bar sprite colours |
