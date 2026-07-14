@@ -45,6 +45,9 @@ export type AreaData = {
   id: number
   def: AreaDef
   spritesDir: FileSystemDirectoryHandle | null
+  // map_areas/static_elements — per-surface placement dumps (cryogen
+  // WorldMapAreaDefinitions.dumpStaticElements), used for the Placed At list.
+  staticElementsDir: FileSystemDirectoryHandle | null
 }
 
 const NEW_AREA_DEFAULTS: Omit<AreaDef, 'id'> = {
@@ -87,15 +90,21 @@ const loader: CacheLoader = {
     const def = JSON.parse(await file.text()) as AreaDef
 
     let spritesDir: FileSystemDirectoryHandle | null = null
+    let staticElementsDir: FileSystemDirectoryHandle | null = null
     if (rootHandle) {
       try {
         spritesDir = await rootHandle.getDirectoryHandle('sprites')
       } catch {
         // no sprites entry in this dump — icon previews unavailable
       }
+      try {
+        staticElementsDir = await (await rootHandle.getDirectoryHandle('map_areas')).getDirectoryHandle('static_elements')
+      } catch {
+        // static elements not dumped yet — Placed At list unavailable
+      }
     }
 
-    return { id: item.id, def, spritesDir } satisfies AreaData
+    return { id: item.id, def, spritesDir, staticElementsDir } satisfies AreaData
   },
 
   async saveItem(dirHandle, item, data) {

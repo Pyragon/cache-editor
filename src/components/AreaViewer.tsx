@@ -59,6 +59,33 @@ function rgbIntToHex(rgb: number): string {
   return `#${(rgb & 0xffffff).toString(16).padStart(6, '0')}`
 }
 
+type Placement = { x: number; y: number; plane: number; areaId: number; membersOnly: boolean; surface: string }
+
+// area id → static-element placements, built once per session from
+// map_areas/static_elements/<surface>.json (dumped by cryogen's
+// WorldMapAreaDefinitions.dumpStaticElements).
+let placementsPromise: Promise<Map<number, Placement[]>> | null = null
+function loadPlacements(dir: FileSystemDirectoryHandle): Promise<Map<number, Placement[]>> {
+  placementsPromise ??= (async () => {
+    const byArea = new Map<number, Placement[]>()
+    for await (const handle of dir.values()) {
+      if (handle.kind !== 'file' || !handle.name.endsWith('.json')) continue
+      const surface = handle.name.slice(0, -5)
+      try {
+        const entries = JSON.parse(await (await handle.getFile()).text()) as Omit<Placement, 'surface'>[]
+        for (const entry of entries) {
+          if (!byArea.has(entry.areaId)) byArea.set(entry.areaId, [])
+          byArea.get(entry.areaId)!.push({ ...entry, surface })
+        }
+      } catch {
+        // malformed surface file — skip
+      }
+    }
+    return byArea
+  })()
+  return placementsPromise
+}
+
 // Renders a sprite's first frame, or a placeholder when the id doesn't resolve.
 function SpritePreview({ meta }: { meta: SpriteMeta | null }) {
   const ref = useRef<HTMLCanvasElement>(null)
@@ -86,6 +113,16 @@ export default function AreaViewer({ data, onSave, onDirtyChange }: Props) {
   const [isSaving, setIsSaving] = useState(false)
   const [sprites, setSprites] = useState<Record<string, SpriteMeta | null>>({})
   const [paramRows, setParamRows] = useState<ParamRow[]>([])
+  const [placements, setPlacements] = useState<Placement[] | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!data.staticElementsDir) { setPlacements(null); return }
+    loadPlacements(data.staticElementsDir).then((byArea) => {
+      if (!cancelled) setPlacements(byArea.get(data.id) ?? [])
+    })
+    return () => { cancelled = true }
+  }, [data.id, data.staticElementsDir])
 
   useEffect(() => {
     setDraft(data.def)
@@ -146,18 +183,44 @@ export default function AreaViewer({ data, onSave, onDirtyChange }: Props) {
   return (
     <div className="item-viewer">
       <div className="item-header">
-        <div className="item-title-row">
-          <input
-            className="quest-name-input"
-            placeholder="(unnamed area)"
-            value={draft.areaName ?? ''}
-            onChange={(e) => set('areaName', e.target.value === '' ? undefined : e.target.value)}
-          />
-        </div>
         <div className="item-badges">
-          <span className="item-id-badge">ID {data.id}</span>
+          <span className="enum-title">Area {data.id}</span>
         </div>
       </div>
+
+      <section className="item-section">
+        <h3>Map Label</h3>
+        <p className="qc-hint">
+          When set, this text is drawn directly on the world map at the area's position —
+          labelled areas are typically text-only and don't use a sprite.
+        </p>
+        <div className="item-grid">
+          <label className="item-field">
+            <span className="item-field-label">Label Text</span>
+            <input
+              className="item-field-input"
+              type="text"
+              placeholder="(none — icon only)"
+              value={draft.areaName ?? ''}
+              onChange={(e) => set('areaName', e.target.value === '' ? undefined : e.target.value)}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section className="item-section">
+        <h3>Placed At (static elements)</h3>
+        {placements == null ? (
+          <p className="map-sprite-none">No static_elements dump found — re-dump map_areas with the updated cryogen to enable this.</p>
+        ) : placements.length === 0 ? (
+          <p className="map-sprite-none">No hand-placed static elements reference this area. (Object-based placements via mapCategoryId aren't indexed — they'd need the maps index.)</p>
+        ) : (
+          <p className="billboard-used-by">
+            {placements.slice(0, 40).map((p) => `${p.surface} (${p.x}, ${p.y}${p.plane ? `, plane ${p.plane}` : ''})${p.membersOnly ? ' [P2P]' : ''}`).join(' · ')}
+            {placements.length > 40 ? ` · +${placements.length - 40} more` : ''}
+          </p>
+        )}
+      </section>
 
       <section className="item-section">
         <h3>Sprites</h3>
