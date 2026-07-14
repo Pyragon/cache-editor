@@ -42,6 +42,18 @@ import HitsplatViewer from './components/HitsplatViewer'
 import type { HitsplatData } from './loaders/config/hitsplats'
 import DefaultsViewer from './components/DefaultsViewer'
 import type { DefaultsData } from './loaders/defaults'
+import BillboardViewer from './components/BillboardViewer'
+import type { BillboardData } from './loaders/billboards'
+import SkyboxViewer from './components/SkyboxViewer'
+import type { SkyboxData } from './loaders/config/skyboxes'
+import TextureDefinitionViewer from './components/TextureDefinitionViewer'
+import type { TextureDefinitionData } from './loaders/texture_definitions'
+import MapAreaViewer from './components/MapAreaViewer'
+import type { MapAreaData } from './loaders/map_areas'
+import AreaViewer from './components/AreaViewer'
+import type { AreaData } from './loaders/config/map_areas'
+import QuickChatViewer from './components/QuickChatViewer'
+import type { QuickChatData } from './loaders/quick_chat'
 import { useConfirm } from './components/useConfirm'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
@@ -62,14 +74,16 @@ const GROUP_LABELS: Record<string, string> = {
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars', 'config_inventories',
-  'config_hitbars', 'config_hitsplats',
-  'items', 'objects', 'npcs', 'varbits', 'defaults', 'sprites', 'models', 'textures', 'enums', 'huffman', 'native_libraries',
+  'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas',
+  'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
+  'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
 // the user has manually reviewed and signed off go in here.
 const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
+  'quick_chat_messages', 'quick_chat_menus',
 ])
 
 function entryStatusClass(entry: CacheEntry): string {
@@ -253,6 +267,30 @@ function App() {
 
   const defaultsContent = selectedEntry?.name === 'defaults' && selectedItemContent != null
     ? selectedItemContent as DefaultsData
+    : null
+
+  const billboardContent = selectedEntry?.name === 'billboards' && selectedItemContent != null
+    ? selectedItemContent as BillboardData
+    : null
+
+  const skyboxContent = selectedEntry?.name === 'config_skybox' && selectedItemContent != null
+    ? selectedItemContent as SkyboxData
+    : null
+
+  const textureDefContent = selectedEntry?.name === 'texture_definitions' && selectedItemContent != null
+    ? selectedItemContent as TextureDefinitionData
+    : null
+
+  const mapAreaContent = selectedEntry?.name === 'map_areas' && selectedItemContent != null
+    ? selectedItemContent as MapAreaData
+    : null
+
+  const areaContent = selectedEntry?.name === 'config_map_areas' && selectedItemContent != null
+    ? selectedItemContent as AreaData
+    : null
+
+  const quickChatContent = (selectedEntry?.name === 'quick_chat_messages' || selectedEntry?.name === 'quick_chat_menus') && selectedItemContent != null
+    ? selectedItemContent as QuickChatData
     : null
 
   const filteredItems = activeItems.filter((item) =>
@@ -702,7 +740,8 @@ function App() {
         )}
 
         <main id="content">
-          <div className="content-panel" ref={contentPanelRef}>
+          <div className="content-panel">
+          <div className="content-panel-scroll" ref={contentPanelRef}>
             {isLoading ? (
               <p className="loading-text">
                 {loadCount > 0
@@ -752,10 +791,23 @@ function App() {
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : defaultsContent != null
                 ? <DefaultsViewer data={defaultsContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : billboardContent != null
+                ? <BillboardViewer data={billboardContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : skyboxContent != null
+                ? <SkyboxViewer data={skyboxContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : textureDefContent != null
+                ? <TextureDefinitionViewer data={textureDefContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : mapAreaContent != null
+                ? <MapAreaViewer data={mapAreaContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : areaContent != null
+                ? <AreaViewer data={areaContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : quickChatContent != null
+                ? <QuickChatViewer data={quickChatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
             ) : null}
+          </div>
           </div>
         </main>
       </div>
