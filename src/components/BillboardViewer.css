@@ -12,3 +12,12 @@
 .billboard-brightened {
   filter: brightness(1.35);
 }
+
+.billboard-used-by {
+  margin: 0;
+  max-width: 620px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-dim);
+  word-break: break-word;
+}
