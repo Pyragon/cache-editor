@@ -1,7 +1,7 @@
 import type { CacheLoader } from './types'
 import { deleteJsonItem, nextFreeJsonId, streamJsonItems } from './common'
-import { loadTextureDef, loadTexturePng, writeTextureDef } from './textures'
-import type { TextureData, TextureDefinition } from './textures'
+import { loadMaterial, loadTextureDef, loadTexturePng, resolveSpritesDir, saveTextureData, writeTextureDef } from './textures'
+import type { MaterialDefinition, TextureData, TextureDefinition } from './textures'
 
 // texture_definitions/<id>.json — one file per material, dumped from the
 // single parallel-array blob in the TEXTURE_DEFINITIONS index (cryogen
@@ -36,23 +36,23 @@ const loader: CacheLoader = {
     const def = await loadTextureDef(dirHandle, item.id)
 
     let png: Blob | null = null
+    let material: MaterialDefinition | null = null
+    let texturesDir: FileSystemDirectoryHandle | null = null
     if (rootHandle) {
       try {
-        const texturesDir = await rootHandle.getDirectoryHandle('textures')
+        texturesDir = await rootHandle.getDirectoryHandle('textures')
         png = await loadTexturePng(texturesDir, item.id)
+        material = await loadMaterial(texturesDir, item.id)
       } catch {
-        // textures not dumped — viewer shows the fields without the image
+        // textures not dumped — viewer shows the fields without image or ops
       }
     }
 
-    return { id: item.id, png, def, defsDir: dirHandle } satisfies TextureData
+    const spritesDir = await resolveSpritesDir(rootHandle)
+    return { id: item.id, png, def, defsDir: dirHandle, material, texturesDir, spritesDir } satisfies TextureData
   },
 
-  async saveItem(dirHandle, _item, data) {
-    const { def } = data as TextureData
-    if (!def) return
-    await writeTextureDef(dirHandle, def)
-  },
+  saveItem: (_dirHandle, _item, data) => saveTextureData(data as TextureData),
 
   async createItem(dirHandle) {
     const id = await nextFreeJsonId(dirHandle)

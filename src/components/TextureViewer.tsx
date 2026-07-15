@@ -1,9 +1,34 @@
-import { useEffect, useState } from 'react'
-import type { TextureData, TextureDefinition } from '../loaders/textures'
+import { useEffect, useRef, useState } from 'react'
+import { useZoom } from './useZoom'
+import type { MaterialDefinition, TextureData, TextureDefinition } from '../loaders/textures'
 import { hslToRgb } from '../loaders/models'
+import { opName } from '../loaders/textureOps'
 import { NumberInput, NumGrid, ToggleGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
+import TextureOpsEditor from './TextureOpsEditor'
+import { useTexturePreview } from './useTexturePreview'
 import './TextureViewer.css'
+
+// The live render, drawn from the evaluated op graph rather than the dumped PNG.
+function LivePreview({ image, zoom }: { image: ImageData; zoom: number }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+
+  useEffect(() => {
+    const canvas = ref.current
+    if (!canvas) return
+    canvas.width = image.width
+    canvas.height = image.height
+    canvas.getContext('2d')!.putImageData(image, 0, 0)
+  }, [image])
+
+  return (
+    <canvas
+      ref={ref}
+      className="texture-image"
+      style={{ width: image.width * zoom, height: image.height * zoom, imageRendering: 'pixelated' }}
+    />
+  )
+}
 
 type Props = {
   data: TextureData
@@ -41,17 +66,18 @@ const FLAG_FIELDS: NumFieldDef[] = [
 // definition fields that produce it (`texture_definitions`). Both entries open
 // this; edits always save to texture_definitions/<id>.json.
 export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
-  const [zoom, setZoom] = useState(2)
+  const [zoom, setZoom] = useZoom('cache-editor:texture-zoom', ZOOM_LEVELS, 1)
   const [url, setUrl] = useState<string | null>(null)
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
   const [draft, setDraft] = useState<TextureDefinition | null>(data.def)
+  const [material, setMaterial] = useState<MaterialDefinition | null>(data.material)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
 
   useEffect(() => {
-    setZoom(2)
     setDims(null)
     setDraft(data.def)
+    setMaterial(data.material)
     setIsDirty(false)
     if (!data.png) {
       setUrl(null)
@@ -72,12 +98,19 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
   }
 
   async function handleSave() {
-    if (!draft) return
     setIsSaving(true)
-    await onSave({ ...data, def: draft })
+    await onSave({ ...data, def: draft, material })
     setIsSaving(false)
     setIsDirty(false)
   }
+
+  function updateMaterial(next: MaterialDefinition) {
+    setMaterial(next)
+    setIsDirty(true)
+  }
+
+  // Renders the DRAFT graph, so the preview tracks edits before they're saved.
+  const preview = useTexturePreview(material, draft, data.texturesDir, data.defsDir, data.spritesDir ?? null)
 
   function handleDownload() {
     if (!url) return
@@ -115,9 +148,16 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
       </div>
 
       <section className="item-section">
-        <h3>Preview</h3>
+        <h3 className="tex-op-heading">
+          Preview
+          {preview.status === 'rendered' && <span className="item-id-badge">live</span>}
+          {preview.status !== 'rendered' && url && <span className="item-id-badge">last dump</span>}
+        </h3>
+
         <div className="texture-canvas-wrap">
-          {url ? (
+          {preview.status === 'rendered' ? (
+            <LivePreview image={preview.pixels} zoom={zoom} />
+          ) : url ? (
             <img
               src={url}
               alt={`Texture ${data.id}`}
@@ -132,6 +172,18 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
             <p className="map-sprite-none">No rendered material image for this id.</p>
           )}
         </div>
+
+        {preview.status === 'unsupported' && (
+          <p className="tex-op-note">
+            Showing the last dumped render — this material uses{' '}
+            {preview.ops.map((t) => `${opName(t)} (type ${t})`).join(', ')}, which the live renderer
+            doesn't evaluate yet.
+          </p>
+        )}
+        {preview.status === 'error' && (
+          <p className="tex-op-note">Live render unavailable: {preview.message}</p>
+        )}
+
         <div className="texture-actions">
           <button type="button" className="replace-btn" disabled={!url} onClick={handleDownload}>
             Download
@@ -172,10 +224,37 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
         </section>
       )}
 
+      <section className="item-section">
+        <h3 className="tex-op-heading">
+          Operations
+          {material && <span className="item-id-badge">{material.textureOperations?.length ?? 0} nodes</span>}
+        </h3>
+        <p className="tex-op-note tex-op-intro">
+          A material isn't a stored image — it's a small program the client runs per pixel. Each node
+          takes its inputs from other nodes, and the three outputs below pick which nodes produce the
+          colour, opacity and HDR channels.
+        </p>
+        {material ? (
+          <TextureOpsEditor material={material} onChange={updateMaterial} />
+        ) : (
+          <p className="map-sprite-none">
+            No op graph found at textures/{data.id}/{data.id}.json — re-dump the textures index to edit it.
+          </p>
+        )}
+      </section>
+
       {isDirty && (
         <div className="save-bar">
-          <span className="save-bar-label">Unsaved changes — saves to texture_definitions/{data.id}.json</span>
-          <button type="button" className="save-bar-discard" onClick={() => { setDraft(data.def); setIsDirty(false) }}>Discard</button>
+          <span className="save-bar-label">
+            Unsaved changes — saves to texture_definitions/{data.id}.json and textures/{data.id}/{data.id}.json
+          </span>
+          <button
+            type="button"
+            className="save-bar-discard"
+            onClick={() => { setDraft(data.def); setMaterial(data.material); setIsDirty(false) }}
+          >
+            Discard
+          </button>
           <button type="button" className="save-bar-save" onClick={handleSave} disabled={isSaving}>
             {isSaving ? 'Saving…' : 'Save'}
           </button>

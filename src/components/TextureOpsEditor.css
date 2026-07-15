@@ -1,0 +1,333 @@
+/* Keeps the "N nodes" badge off the heading text. */
+.tex-op-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Lines the op cards up with the Flags grid, which is .item-grid: four
+   minmax(175px, 1fr) columns capped at 900px. */
+.tex-ops {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 900px;
+}
+
+.tex-op-roots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #2f3542;
+  border-radius: 8px;
+  background: #1b1f27;
+}
+
+.tex-op-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The remove button lives outside the card, so it stays put whether the card is
+   collapsed or expanded to full height. */
+.tex-op-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tex-op {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #2f3542;
+  border-radius: 8px;
+  background: #1b1f27;
+  overflow: hidden;
+}
+
+/* Sits level with the card's header row. */
+.tex-op-remove {
+  margin-top: 7px;
+  flex: none;
+}
+
+.tex-op-dead {
+  opacity: 0.55;
+}
+
+.tex-op-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  background: #212734;
+}
+
+.tex-op-head:hover {
+  background: #262d3c;
+}
+
+.tex-op-index {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: #7d8798;
+  min-width: 19px;
+}
+
+.tex-op-name {
+  font-weight: 600;
+  color: #e6e9ef;
+}
+
+.tex-op-type {
+  font-size: 11px;
+  color: #6b7484;
+  font-family: ui-monospace, monospace;
+}
+
+.tex-op-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.tex-op-badge-root {
+  background: #1f3a2c;
+  color: #6ee7a0;
+  border: 1px solid #2c5a42;
+}
+
+.tex-op-badge-dead {
+  background: #3a2626;
+  color: #e79191;
+  border: 1px solid #5a3131;
+}
+
+.tex-op-chevron {
+  margin-left: auto;
+  color: #7d8798;
+  font-family: ui-monospace, monospace;
+}
+
+/* The "still in use" modal: what currently points at the node you tried to remove. */
+.tex-op-modal-lead {
+  margin: 0 0 12px;
+}
+
+.tex-op-refs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tex-op-refs li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #2f3542;
+  border-radius: 6px;
+  background: #171b22;
+}
+
+.tex-op-ref-node {
+  font-weight: 600;
+  color: #e6e9ef;
+}
+
+.tex-op-ref-slot {
+  margin-left: auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #8b93a3;
+}
+
+.tex-op-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid #2f3542;
+}
+
+.tex-op-note {
+  margin: 0;
+  font-size: 12px;
+  color: #8b93a3;
+}
+
+/* The section's lead-in paragraph, which sits directly above the output selectors. */
+.tex-op-intro {
+  margin-bottom: 14px;
+  max-width: 900px;
+}
+
+.tex-op-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+  gap: 8px;
+}
+
+.tex-op-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tex-op-field-bool {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.tex-op-label {
+  font-size: 11px;
+  color: #8b93a3;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.tex-op-hint {
+  text-transform: none;
+  letter-spacing: 0;
+  color: #6b7484;
+}
+
+.tex-op-wide {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tex-op-table-wrap {
+  overflow-x: auto;
+}
+
+.tex-op-table {
+  width: auto;
+  min-width: 260px;
+}
+
+.tex-op-th-swatch,
+.tex-op-td-swatch {
+  width: 28px;
+}
+
+.tex-op-th-remove {
+  width: 32px;
+}
+
+.tex-op-swatch {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid #3a4152;
+  vertical-align: middle;
+}
+
+.tex-op-swatch-none {
+  background: repeating-linear-gradient(45deg, #2a2f3a, #2a2f3a 3px, #1b1f27 3px, #1b1f27 6px);
+}
+
+/* The native colour input sits transparently on top of the swatch, so clicking
+   the colour itself opens the picker. */
+.tex-op-swatch-picker {
+  position: relative;
+  display: inline-flex;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.tex-op-swatch-picker:hover .tex-op-swatch {
+  border-color: #6b7484;
+}
+
+.tex-op-swatch-picker input[type='color'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.tex-op-color-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tex-op-color-input {
+  width: 32px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #3a4152;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  flex: none;
+}
+
+.tex-op-shorts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tex-op-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tex-op-add .item-stackable-select {
+  max-width: 260px;
+}
+
+.tex-op-shapes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tex-op-shape {
+  border: 1px solid #2f3542;
+  border-radius: 6px;
+  padding: 10px;
+  background: #171b22;
+}
+
+.tex-op-shape-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.tex-op-shape-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cfd5e0;
+}
+
+.tex-op-shape-colors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 11px;
+}
