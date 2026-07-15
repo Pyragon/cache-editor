@@ -457,6 +457,9 @@ export default function ModelViewer({ data }: Props) {
     const wireframe = matsRef.current[0]?.wireframe ?? false
     const materials: THREE.MeshBasicMaterial[] = []
     const loadedTextures: THREE.Texture[] = []
+    // Materials with a UV scroll (the fire cape's flowing lava): the client offsets
+    // sampling by seconds * speed / 64 each frame (OpenGlToolkit.renderAnimatedTexture).
+    const scrollingTextures: { texture: THREE.Texture; u: number; v: number }[] = []
     let disposed = false
 
     groups.forEach((g, i) => {
@@ -470,6 +473,7 @@ export default function ModelViewer({ data }: Props) {
 
       if (g.tex >= 0) {
         const blob = data.textures.get(g.tex)!
+        const speed = data.textureSpeeds.get(g.tex)
         createImageBitmap(blob).then((bitmap) => {
           if (disposed) { bitmap.close(); return }
           const texture = new THREE.Texture(bitmap)
@@ -478,6 +482,7 @@ export default function ModelViewer({ data }: Props) {
           texture.colorSpace = THREE.SRGBColorSpace
           texture.needsUpdate = true
           loadedTextures.push(texture)
+          if (speed) scrollingTextures.push({ texture, u: speed.u, v: speed.v })
           mat.map = texture
           mat.needsUpdate = true
         })
@@ -738,6 +743,17 @@ export default function ModelViewer({ data }: Props) {
       } else {
         // don't bank time while hidden, or re-enabling replays a burst
         lastParticleTime = now
+      }
+
+      // Animated materials: offset = seconds * speed / 64, the exact client formula
+      // (the % 128000 keeps the float exact; 128s is a whole number of loops for any
+      // speed). This runs every frame regardless of the particle FPS cap — it's two
+      // uniform writes, and choppy lava looks broken in a way choppy sparks don't.
+      if (scrollingTextures.length > 0) {
+        const seconds = (now % 128000) / 1000
+        for (const entry of scrollingTextures) {
+          entry.texture.offset.set(((seconds * entry.u) / 64) % 1, ((seconds * entry.v) / 64) % 1)
+        }
       }
 
       renderer.render(scene, camera)

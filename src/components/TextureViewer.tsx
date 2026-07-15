@@ -9,23 +9,84 @@ import TextureOpsEditor from './TextureOpsEditor'
 import { useTexturePreview } from './useTexturePreview'
 import './TextureViewer.css'
 
-// The live render, drawn from the evaluated op graph rather than the dumped PNG.
-function LivePreview({ image, zoom }: { image: ImageData; zoom: number }) {
-  const ref = useRef<HTMLCanvasElement>(null)
+// The preview surface, shared by the live op-graph render (ImageData) and the
+// dumped-PNG fallback (Blob). Materials with a UV scroll (the fire cape's lava)
+// slide with the client's formula — offset = seconds * speed / 64, speeds in 64ths
+// of a repeat per second — and the speeds come from the DRAFT, so editing
+// Speed U/V animates the preview immediately.
+function TexturePreviewSurface({ source, zoom, speedU, speedV, onDims }: {
+  source: ImageData | Blob
+  zoom: number
+  speedU: number
+  speedV: number
+  onDims?: (w: number, h: number) => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [tile, setTile] = useState<HTMLCanvasElement | ImageBitmap | null>(null)
 
   useEffect(() => {
-    const canvas = ref.current
-    if (!canvas) return
-    canvas.width = image.width
-    canvas.height = image.height
-    canvas.getContext('2d')!.putImageData(image, 0, 0)
-  }, [image])
+    let cancelled = false
+    if (source instanceof Blob) {
+      createImageBitmap(source).then((bitmap) => {
+        if (cancelled) { bitmap.close(); return }
+        setTile(bitmap)
+        onDims?.(bitmap.width, bitmap.height)
+      }).catch(() => setTile(null))
+      return () => { cancelled = true }
+    }
+    const offscreen = document.createElement('canvas')
+    offscreen.width = source.width
+    offscreen.height = source.height
+    offscreen.getContext('2d')!.putImageData(source, 0, 0)
+    setTile(offscreen)
+    onDims?.(source.width, source.height)
+    // onDims deliberately excluded: it's only a dims reporter, and depending on its
+    // identity would rebuild the tile every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source])
 
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !tile) return
+    const w = tile.width
+    const h = tile.height
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')!
+
+    // Sampling at uv + offset shifts the visible content by -offset, so the draw
+    // position is negated — same direction as the model viewer's texture.offset.
+    function draw(now: number) {
+      const seconds = (now % 128000) / 1000
+      const sx = -Math.round((((((seconds * speedU) / 64) % 1) + 1) % 1) * w) % w
+      const sy = -Math.round((((((seconds * speedV) / 64) % 1) + 1) % 1) * h) % h
+      ctx.clearRect(0, 0, w, h)
+      ctx.drawImage(tile!, sx, sy)
+      if (sx !== 0) ctx.drawImage(tile!, sx + w, sy)
+      if (sy !== 0) ctx.drawImage(tile!, sx, sy + h)
+      if (sx !== 0 && sy !== 0) ctx.drawImage(tile!, sx + w, sy + h)
+    }
+
+    if (speedU === 0 && speedV === 0) {
+      draw(0)
+      return
+    }
+
+    let raf = 0
+    function loop(now: number) {
+      draw(now)
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [tile, speedU, speedV])
+
+  if (!tile) return null
   return (
     <canvas
-      ref={ref}
+      ref={canvasRef}
       className="texture-image"
-      style={{ width: image.width * zoom, height: image.height * zoom, imageRendering: 'pixelated' }}
+      style={{ width: tile.width * zoom, height: tile.height * zoom, imageRendering: 'pixelated' }}
     />
   )
 }
@@ -156,17 +217,20 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
 
         <div className="texture-canvas-wrap">
           {preview.status === 'rendered' ? (
-            <LivePreview image={preview.pixels} zoom={zoom} />
-          ) : url ? (
-            <img
-              src={url}
-              alt={`Texture ${data.id}`}
-              className="texture-image"
-              style={dims ? { width: dims.w * zoom, height: dims.h * zoom } : undefined}
-              onLoad={(e) => {
-                const img = e.currentTarget
-                setDims({ w: img.naturalWidth, h: img.naturalHeight })
-              }}
+            <TexturePreviewSurface
+              source={preview.pixels}
+              zoom={zoom}
+              speedU={draft?.textureSpeedU ?? 0}
+              speedV={draft?.textureSpeedV ?? 0}
+              onDims={(w, h) => setDims({ w, h })}
+            />
+          ) : data.png ? (
+            <TexturePreviewSurface
+              source={data.png}
+              zoom={zoom}
+              speedU={draft?.textureSpeedU ?? 0}
+              speedV={draft?.textureSpeedV ?? 0}
+              onDims={(w, h) => setDims({ w, h })}
             />
           ) : (
             <p className="map-sprite-none">No rendered material image for this id.</p>

@@ -82,6 +82,10 @@ export type ModelData = {
   textureTransU: Int8Array | null
   textureTransV: Int8Array | null
   textures: Map<number, Blob>      // texture id → rendered material PNG
+  // texture id → the material's UV scroll, in 64ths of a repeat per second (the
+  // fire cape's flow: OpenGlToolkit scrolls offset = seconds * speed / 64). Only
+  // materials that actually move have an entry.
+  textureSpeeds: Map<number, { u: number; v: number }>
   // Billboard attachments (darkan Mesh.kt: u8 count, then u16 typeId,
   // u16 face, u8 depth, s8 distance per entry; gated by footer flag 0x4).
   billboards: ModelBillboard[] | null
@@ -523,6 +527,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textureRotation, textureDirection, textureSpeed,
     textureTransU, textureTransV,
     textures: new Map(),
+    textureSpeeds: new Map(),
     billboards,
     billboardTypes: new Map(),
     emitters,
@@ -679,6 +684,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textureRotation: null, textureDirection: null, textureSpeed: null,
     textureTransU: null, textureTransV: null,
     textures: new Map(),
+    textureSpeeds: new Map(),
     billboards: null, // old-format models predate billboards
     billboardTypes: new Map(),
     emitters: null, // …and particle emitters
@@ -730,6 +736,24 @@ const loader: CacheLoader = {
             model.textures.set(id, png)
           } catch {
             // missing texture — face falls back to its flat colour
+          }
+        }))
+      }
+
+      // The material's UV scroll speeds, so animated textures (the fire cape's
+      // flowing lava) move in the viewer like they do in the client.
+      let defsDir: FileSystemDirectoryHandle | null = null
+      try { defsDir = await rootHandle.getDirectoryHandle('texture_definitions') } catch { /* not dumped */ }
+      if (defsDir) {
+        await Promise.all([...ids].map(async (id) => {
+          try {
+            const file = await (await defsDir!.getFileHandle(`${id}.json`)).getFile()
+            const def = JSON.parse(await file.text())
+            const u = def.textureSpeedU ?? 0
+            const v = def.textureSpeedV ?? 0
+            if (u !== 0 || v !== 0) model.textureSpeeds.set(id, { u, v })
+          } catch {
+            // no definition — texture stays still
           }
         }))
       }
