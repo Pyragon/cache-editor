@@ -79,6 +79,16 @@
   max-width: 900px;
 }
 
+/* Explanation notes sit flush (tex-op-note has no margins) — give whatever
+   directly follows one some breathing room (clan vars, varc, quest computed
+   reqs / struct extras, etc.). */
+.tex-op-note + .item-grid,
+.tex-op-note + .quest-prereqs,
+.tex-op-note + .quest-table-wrap,
+.tex-op-note + .add-row-btn {
+  margin-top: 12px;
+}
+
 /* Sections that stack two grids (a dropdown/colour row followed by a NumGrid, as in
    the particle viewer's Speed and Colour sections) get the same 8px rhythm between
    the grids as between rows within one — otherwise the seam collapses to zero. */

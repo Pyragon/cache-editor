@@ -1274,9 +1274,9 @@ function App() {
                 : varcStringContent != null
                 ? <VarcStringViewer data={varcStringContent} />
                 : clanVarContent != null
-                ? <ClanVarViewer data={clanVarContent} title="Clan Var" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <ClanVarViewer data={clanVarContent} title="Clan Var" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenVar={(id) => handleNavigateToItem('config_clan_var', id)} />
                 : clanVarSettingsContent != null
-                ? <ClanVarViewer data={clanVarSettingsContent} title="Clan Setting" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <ClanVarViewer data={clanVarSettingsContent} title="Clan Setting" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenVar={(id) => handleNavigateToItem('config_clan_var_settings', id)} />
                 : hitsplatContent != null
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : defaultsContent != null

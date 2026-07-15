@@ -45,7 +45,9 @@ export async function deleteJsonItem(dirHandle: FileSystemDirectoryHandle, id: n
   await dirHandle.removeEntry(`${id}.json`)
 }
 
-export type JsonDefData<T> = { id: number; def: T }
+// `dir` lets viewers scan sibling defs (e.g. the clan var bit-packing map
+// shows every var sharing the selected var's base word).
+export type JsonDefData<T> = { id: number; def: T; dir?: FileSystemDirectoryHandle }
 
 // Full editable loader for flat `<id>.json` entries: list, load/save as
 // { id, def }, and Add/Remove/Clone with the given defaults for new items.
@@ -56,7 +58,7 @@ export function makeJsonDefLoader<T>(newItemDefaults: (id: number) => T): CacheL
     async loadItem(dirHandle, item) {
       const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
       const file = await fileHandle.getFile()
-      return { id: item.id, def: JSON.parse(await file.text()) as T } satisfies JsonDefData<T>
+      return { id: item.id, def: JSON.parse(await file.text()) as T, dir: dirHandle } satisfies JsonDefData<T>
     },
 
     async saveItem(dirHandle, item, data) {
