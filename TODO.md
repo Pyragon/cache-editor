@@ -11,9 +11,16 @@
 
 ## Textures / Texture Definitions
 
-- **Textures can't be repacked at all right now** — `MaterialDefinitions.getActions()` and `TextureDefinitions.getActions()` both return `null` in cryogen, so the repacker skips them. That means the definition fields the editor now saves to `texture_definitions/<id>.json` never reach the cache. Implement `TextureDefinitions.getActions()` (its `encode()`-equivalent parallel-array blob) so those edits actually land.
-- **Material editor: expose the procedural property graph.** A material isn't a stored image — it's a small program (a graph of `MaterialProperty` types: noise, combiners, colour ramps, sprite samplers) that cryogen executes to render the PNG. Roughly 30% of materials sample a sprite; the rest are purely procedural. Add a modal/editor covering all the MaterialProp* types from cryogen so materials can actually be authored, with a live re-render of the result. Needs `MaterialDefinitions.getActions()` too (its `encode()` already exists).
-- **Image upload for textures** only makes sense on top of the above: for sprite-backed materials it can write a new sprite and repoint the sampler; for procedural ones it would mean replacing the property graph with a single sprite sampler (destructive — should be an explicit, warned action).
+- **`TextureDefinitions.getActions()` still returns `null`** in cryogen, so the *flag* edits the editor saves to `texture_definitions/<id>.json` never reach the cache. (`MaterialDefinitions.getActions()` is now implemented, so the op graph repacks fine — this is the other half.) It needs an `encode()` for its parallel-array blob.
+- **Live preview: port the Rasterizer (op 29).** The TS renderer (`src/loaders/textureRender.ts`) covers 37 of 38 op types and renders **2185/2185 textures pixel-identical to cryogen**. The one gap is op 29, which leaves **406 textures** (16%) falling back to the dumped PNG. It needs the shape rasterizers in cryogen's `texture/rasterizers/`. Only four shape/mode combinations actually occur in the cache, so only these paths are needed:
+  - `LineRasterizer` stroked (1539 shapes) — `method6159` + `method11220` (Bresenham with clipping)
+  - `EllipseRasterizer` filled+stroked (906) — `method5316` and its helpers `method2637` / `method1174` / `method12838` / `method15241` (~470 lines, the bulk of the work)
+  - `RectangleRasterizer` filled+stroked (674) — `method744` + `method4561` / `method1388`
+  - `BezierCurveRasterizer` stroked (499) — `method12399` → `method12117` / `method4779`
+
+  Verify with the harness: `RenderRefDump.java` + `SpriteRefDump.java` in cryogen dump reference pixels, and the scratchpad `verify-render.mjs` diffs every texture against them. Note the renderer must keep reproducing the row-cache aliasing (see `textureCaches.ts`) — a full-image evaluation gives different pixels.
+- **No way to add/remove/reorder op nodes yet** — the editor edits existing nodes and rewires inputs, but can't grow the graph. Adding a node means appending to `textureOperations` *and* `operationIndices` together, and re-checking the three root indices.
+- **Image upload for textures** only makes sense on top of a live preview: for sprite-backed materials it can write a new sprite and repoint the sampler op; for procedural ones it would mean replacing the whole graph with a single sprite sampler (destructive — should be an explicit, warned action).
 
 ## Item Icons
 
@@ -49,8 +56,14 @@ Architecture note (investigated 2026-07-12): a quest lives in **two places** —
 
 - **Verify hitsplat 24's right cap in-game** — its `rightCap` reuses the inner-left sprite (4497) un-flipped. Investigation found NO flip/rotate flag anywhere: not in the JSON, not in the client (darkan `EntityUpdating.kt` draws all caps with a plain `draw(x, y, combineMode, color, blend)` — no mirror param), and the cap sprites aren't clean horizontal flips of each other. So the preview *should* match the client. Confirm by looking at hitsplat 24 in the actual game: if in-game also shows the un-flipped right cap, this is just a data quirk and no further action is needed; if the game closes off the right side, there's a flip path we haven't found and it needs deeper investigation.
 
+## Models
+
+- **Import a Blender model and convert it to the RS mesh format.** Not `.blend` directly (proprietary, no parser) — the route is Blender's **glTF or OBJ export**, converted client-side into a new-format 727 mesh. Needs, in order: (1) a mesh **encoder** in TS (`models.ts` only decodes today) — vertices as delta-smart2 streams, faces, per-face HSL colours quantised from vertex/material colours, the 23-byte footer; (2) cryogen `ModelDefinitions.getActions()` so the written `model.dat` actually repacks (check whether models repack at all today); (3) an Upload button on the model viewer with the usual staged-upload pattern + upload-safety disclaimers. Constraints to enforce at import: ≤65k verts/faces (shorts), tri-only geometry, and textures mapped to the closest RS mechanism (planar PNM per face) or dropped to flat colours in v1.
+
+- **Per-face translucency isn't rendered.** Fully transparent faces (alpha 255) are now hidden, but partially transparent ones (glass, ghosts — alpha 1–254) still draw opaque. Fixing it means a 4-component colour attribute + `transparent` materials in ModelViewer, and accepting the sorting artifacts that come with double-sided transparency.
+
 ## General Editor
 
-- **Detail viewers still missing** (raw-JSON fallback only): `animations` (+ `animation_frame_sets`/`frame_bases`), `spot_animations`, `interfaces`, `cs2`, `sound_effects`, `midi_instruments`, `particles`, `font_metrics`, and config `identikits` (which also needs its dump format flattened first).
+- **Detail viewers still missing** (raw-JSON fallback only): `animations` (+ `animation_frame_sets`/`frame_bases`), `spot_animations`, `interfaces`, `cs2`, `sound_effects`, `midi_instruments`, and config `identikits` (which also needs its dump format flattened first).
 - **Open Cache button** shows `📁 folderName` — consider a cleaner label or breadcrumb.
 - **Error handling** — if a struct file is missing or malformed, the quest silently shows no server data. Could surface a visible warning.
