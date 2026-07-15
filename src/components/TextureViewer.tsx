@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { useZoom } from './useZoom'
+import { writeMaterial, writeTextureDef, writeTexturePng } from '../loaders/textures'
 import type { MaterialDefinition, TextureData, TextureDefinition } from '../loaders/textures'
 import { hslToRgb } from '../loaders/models'
+import type { SpriteMeta } from '../loaders/sprites'
+import { nextFreeSpriteId, writeNewSprite } from '../loaders/spriteStore'
 import { opName } from '../loaders/textureOps'
 import { NumberInput, NumGrid, ToggleGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import TextureOpsEditor from './TextureOpsEditor'
 import { useTexturePreview } from './useTexturePreview'
+import { applyImageToMeta, imageDataFromFile } from './spriteRender'
+import { averageImageColor, quantizeImage } from './quantize'
+import { rgbToHsl16 } from './rsColor'
 import './TextureViewer.css'
 
 // The preview surface, shared by the live op-graph render (ImageData) and the
@@ -91,10 +97,40 @@ function TexturePreviewSurface({ source, zoom, speedU, speedV, onDims }: {
   )
 }
 
+// A quantized upload waiting for the user to confirm creation. Ids are
+// allocated at stage time so the panel can say exactly what it will write.
+type StagedImage = {
+  image: ImageData
+  fileName: string
+  originalCount: number
+  colorCount: number
+  textureId: number
+  spriteId: number
+}
+
+function StagedImageCanvas({ image }: { image: ImageData }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const canvas = ref.current!
+    canvas.width = image.width
+    canvas.height = image.height
+    canvas.getContext('2d')!.putImageData(image, 0, 0)
+  }, [image])
+  return (
+    <canvas
+      ref={ref}
+      className="texture-image"
+      style={{ imageRendering: 'pixelated', maxWidth: '100%' }}
+    />
+  )
+}
+
 type Props = {
   data: TextureData
   onSave: (data: TextureData) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
+  /** Called with the new texture id after "New from image" writes its files. */
+  onCreated?: (id: number) => void
 }
 
 const ZOOM_LEVELS = [1, 2, 4, 8]
@@ -126,7 +162,7 @@ const FLAG_FIELDS: NumFieldDef[] = [
 // Merged view of a material: the rendered PNG (the `textures` entry) and the
 // definition fields that produce it (`texture_definitions`). Both entries open
 // this; edits always save to texture_definitions/<id>.json.
-export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
+export default function TextureViewer({ data, onSave, onDirtyChange, onCreated }: Props) {
   const [zoom, setZoom] = useZoom('cache-editor:texture-zoom', ZOOM_LEVELS, 1)
   const [url, setUrl] = useState<string | null>(null)
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
@@ -134,12 +170,18 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
   const [material, setMaterial] = useState<MaterialDefinition | null>(data.material)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [staged, setStaged] = useState<StagedImage | null>(null)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [isCreating, setIsCreating] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     setDims(null)
     setDraft(data.def)
     setMaterial(data.material)
     setIsDirty(false)
+    setStaged(null)
+    setUploadError(null)
     if (!data.png) {
       setUrl(null)
       return
@@ -179,6 +221,121 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
     a.href = url
     a.download = `texture_${data.id}.png`
     a.click()
+  }
+
+  function openUpload() {
+    setUploadError(null)
+    fileInputRef.current!.value = ''
+    fileInputRef.current!.click()
+  }
+
+  // Stages an uploaded image as a brand-new texture: quantized to the sprite
+  // palette limit and previewed with its allocated ids. The image is read as
+  // pixel data only; nothing hits disk until the user clicks Create.
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploadError(null)
+    try {
+      if (!data.texturesDir || !data.defsDir || !data.spritesDir) {
+        throw new Error('Creating a texture needs the textures, texture_definitions and sprites folders in this dump.')
+      }
+      const raw = await imageDataFromFile(file)
+      const { image, colorCount, originalCount } = quantizeImage(raw, 255)
+
+      const spriteId = await nextFreeSpriteId(data.spritesDir)
+      // The two texture folders share one id space, so the new id must clear both.
+      let maxId = -1
+      for await (const handle of data.texturesDir.values()) {
+        if (handle.kind !== 'directory') continue
+        const id = parseInt(handle.name, 10)
+        if (!isNaN(id) && id > maxId) maxId = id
+      }
+      for await (const handle of data.defsDir.values()) {
+        if (handle.kind !== 'file' || !handle.name.endsWith('.json')) continue
+        const id = parseInt(handle.name, 10)
+        if (!isNaN(id) && id > maxId) maxId = id
+      }
+
+      setStaged({ image, fileName: file.name, originalCount, colorCount, textureId: maxId + 1, spriteId })
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // Writes the three halves of a sprite-backed material — the sprite, the
+  // 3-node op graph sampling it (the same shape the cache uses for its own
+  // image-based materials, e.g. texture 1190), and the definition flags.
+  async function handleCreate() {
+    if (!staged || !data.texturesDir || !data.defsDir || !data.spritesDir) return
+    setIsCreating(true)
+    setUploadError(null)
+    try {
+      const { image, textureId, spriteId } = staged
+
+      const blankMeta: SpriteMeta = {
+        width: 0, height: 0, palette: [0],
+        pixelIndices: [[]], alpha: [[]],
+        usesAlpha: [false], isVertical: [false],
+        offsetsX: [0], offsetsY: [0], subWidths: [0], subHeights: [0],
+      }
+      const meta = applyImageToMeta(image, 0, blankMeta)
+
+      const canvas = document.createElement('canvas')
+      canvas.width = image.width
+      canvas.height = image.height
+      canvas.getContext('2d')!.putImageData(image, 0, 0)
+      const png = await new Promise<Blob>((resolve, reject) =>
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png'),
+      )
+
+      await writeNewSprite(data.spritesDir, spriteId, meta, png)
+
+      await writeMaterial(data.texturesDir, {
+        id: textureId,
+        textureOperations: [
+          { fillValue: 4096, type: 0, monochrome: true, imageCacheCapacity: 1 },
+          { fillValue: 0, type: 0, monochrome: true, imageCacheCapacity: 1 },
+          { spriteId, type: 39, monochrome: false, imageCacheCapacity: 1 },
+        ],
+        operationIndices: [[], [], []],
+        opaqueOperationIndex: 2,
+        opacityOperationIndex: 0,
+        hdrOperationIndex: 1,
+      })
+      await writeTexturePng(data.texturesDir, textureId, png)
+
+      const avg = averageImageColor(image)
+      await writeTextureDef(data.defsDir, {
+        id: textureId,
+        detailsOnly: true,
+        isHalfSize: Math.max(image.width, image.height) <= 64,
+        skipTriangles: false,
+        brightness: 0,
+        alpha: -1,
+        effectId: 0,
+        effectParam1: 0,
+        colorHsl: avg ? rgbToHsl16(avg.r, avg.g, avg.b) : 0,
+        textureSpeedU: 0,
+        textureSpeedV: 0,
+        aBool2087: false,
+        isBrickTile: false,
+        mipmapping: 2,
+        repeatS: true,
+        repeatT: true,
+        hdr: false,
+        combineMode: 0,
+        effectParam2: 0,
+        effectCombiner: 0,
+      })
+
+      setStaged(null)
+      onCreated?.(textureId)
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsCreating(false)
+    }
   }
 
   const colourHex = `#${hslToRgb(draft?.colorHsl ?? 0).toString(16).padStart(6, '0')}`
@@ -252,8 +409,52 @@ export default function TextureViewer({ data, onSave, onDirtyChange }: Props) {
           <button type="button" className="replace-btn" disabled={!url} onClick={handleDownload}>
             Download
           </button>
+          <button type="button" className="replace-btn" onClick={openUpload}>
+            New from image…
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={handleFileChange}
+          />
         </div>
+        {uploadError && !staged && <p className="upload-error">{uploadError}</p>}
       </section>
+
+      {staged && (
+        <section className="item-section">
+          <h3 className="tex-op-heading">
+            New texture from image
+            <span className="item-id-badge">texture {staged.textureId}</span>
+          </h3>
+          <div className="texture-canvas-wrap">
+            <StagedImageCanvas image={staged.image} />
+          </div>
+          <p className="tex-op-note">
+            {staged.fileName} — {staged.image.width} × {staged.image.height},{' '}
+            {staged.originalCount > staged.colorCount
+              ? `${staged.originalCount} colours reduced to ${staged.colorCount} to fit the sprite palette (max 255).`
+              : `${staged.colorCount} colours — fits the sprite palette as-is.`}
+          </p>
+          <p className="tex-op-note">
+            Create writes new sprite {staged.spriteId} and a 3-node material at texture {staged.textureId} that
+            samples it — the same shape the cache uses for its own image-based materials. In-game, materials
+            render at 128 × 128 (64 × 64 with Half Size, set automatically for images 64px and under), so other
+            sizes are resampled. The image is read as pixel data only; nothing is written until you click Create.
+          </p>
+          {uploadError && <p className="upload-error">{uploadError}</p>}
+          <div className="texture-actions">
+            <button type="button" className="replace-btn" onClick={() => setStaged(null)} disabled={isCreating}>
+              Cancel
+            </button>
+            <button type="button" className="save-bar-save" onClick={handleCreate} disabled={isCreating}>
+              {isCreating ? 'Creating…' : `Create texture ${staged.textureId}`}
+            </button>
+          </div>
+        </section>
+      )}
 
       {draft ? (
         <>

@@ -88,6 +88,21 @@ export async function loadTexturePng(
   }
 }
 
+// Writes the rendered PNG half of a material (textures/<id>/<id>.png) — the
+// dump artifact the model viewer textures meshes with and the preview falls
+// back to. Used when creating a texture from an uploaded image.
+export async function writeTexturePng(
+  texturesDir: FileSystemDirectoryHandle,
+  id: number,
+  png: Blob,
+): Promise<void> {
+  const subHandle = await texturesDir.getDirectoryHandle(String(id), { create: true })
+  const fileHandle = await subHandle.getFileHandle(`${id}.png`, { create: true })
+  const writable = await fileHandle.createWritable()
+  await writable.write(png)
+  await writable.close()
+}
+
 export async function loadTextureDef(
   defsDir: FileSystemDirectoryHandle,
   id: number,

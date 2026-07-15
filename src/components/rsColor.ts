@@ -44,3 +44,24 @@ export function hslToHex(hsl: number): string | null {
   const rgb = table[hsl & 0xffff] & 0xffffff
   return `#${rgb.toString(16).padStart(6, '0')}`
 }
+
+// Nearest packed-HSL index for an RGB colour — inverse lookup over the same
+// palette table, so it round-trips with hslToHex. Linear scan of the 65536
+// entries; fine for one-off conversions like a new texture's flat colour.
+export function rgbToHsl16(r: number, g: number, b: number): number {
+  if (table === null) table = buildTable()
+  let best = 0
+  let bestDist = Infinity
+  for (let i = 0; i < 65536; i++) {
+    const rgb = table[i]
+    const dr = ((rgb >> 16) & 0xff) - r
+    const dg = ((rgb >> 8) & 0xff) - g
+    const db = (rgb & 0xff) - b
+    const dist = dr * dr + dg * dg + db * db
+    if (dist < bestDist) {
+      bestDist = dist
+      best = i
+    }
+  }
+  return best
+}

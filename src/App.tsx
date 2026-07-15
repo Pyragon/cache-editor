@@ -534,6 +534,19 @@ function App() {
     setSelectedItemId(item.id)
   }
 
+  // "New from image" in the texture viewer wrote its files itself — surface
+  // the new id in the sidebar list and jump to it (unless unsaved edits on the
+  // current item make the user decline the jump; the files exist either way).
+  async function handleTextureCreated(id: number) {
+    setActiveItems((prev) => {
+      if (prev.some((i) => i.id === id)) return prev
+      return [...prev, { id, name: String(id) }].sort((a, b) => a.id - b.id || a.name.localeCompare(b.name))
+    })
+    if (!(await confirmLeaveItem())) return
+    void discardPendingNew()
+    setSelectedItemId(id)
+  }
+
   async function handleRemoveItem() {
     const loader = selectedEntry ? getLoader(selectedEntry.name) : null
     const entryHandle = await currentEntryHandle()
@@ -1049,7 +1062,7 @@ function App() {
                 : modelContent != null
                 ? <ModelViewer data={modelContent} />
                 : textureContent != null
-                ? <TextureViewer data={textureContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <TextureViewer data={textureContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onCreated={handleTextureCreated} />
                 : particleContent != null
                 ? <ParticleViewer data={particleContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : enumContent != null
