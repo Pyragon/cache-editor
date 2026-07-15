@@ -567,3 +567,21 @@
   margin: 0;
 }
 
+
+/* "New item, not saved yet" banner above the viewer for staged Add/Clone. */
+.pending-new-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(217, 164, 65, 0.4);
+  background: rgba(217, 164, 65, 0.08);
+}
+
+.pending-new-label {
+  flex: 1;
+  font-size: 13px;
+  color: #d9a441;
+}

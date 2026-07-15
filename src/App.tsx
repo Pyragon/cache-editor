@@ -264,7 +264,12 @@ function App() {
 
   // An item created via Add that hasn't been saved yet — navigating away
   // from it deletes it again instead of leaving a half-configured file.
-  const pendingNewRef = useRef<{ entryName: string; item: LoadedItem } | null>(null)
+  // A just-Added/Cloned item. `content` staged means it exists ONLY in memory
+  // — nothing is on disk until the user saves (an abandoned defaults file
+  // would otherwise repack into the cache via cryogen's getActions).
+  const pendingNewRef = useRef<{ entryName: string; item: LoadedItem; content?: unknown } | null>(null)
+  // State mirror of pendingNewRef, so the "not saved yet" banner re-renders.
+  const [pendingNew, setPendingNew] = useState<{ entry: string; id: number } | null>(null)
 
   // Warn before the tab closes/reloads with unsaved changes. (The browser
   // shows its own generic message; the returnValue text isn't displayed.)
@@ -471,6 +476,13 @@ function App() {
     }
     const loader = getLoader(selectedEntry.name)
     if (!loader) return
+    // Staged new items have no file yet - their content lives on the ref.
+    const pending = pendingNewRef.current
+    if (pending && pending.content !== undefined
+        && pending.entryName === selectedEntry.name && pending.item.id === selectedItem.id) {
+      setSelectedItemContent(pending.content)
+      return
+    }
     let cancelled = false
     async function load() {
       const entryHandle = await resolveEntryHandle(cacheHandle!, getEntryPath(selectedEntry!.name))
@@ -507,6 +519,7 @@ function App() {
     // A saved new item is a keeper.
     if (pendingNewRef.current?.item.id === selectedItem.id && pendingNewRef.current.entryName === selectedEntry.name) {
       pendingNewRef.current = null
+      setPendingNew(null)
     }
   }
 
@@ -526,16 +539,19 @@ function App() {
     return resolveEntryHandle(cacheHandle, getEntryPath(selectedEntry.name))
   }
 
-  // Deletes the never-saved Add-ed item (if any) from disk and, when we're
-  // still on its entry, from the item list.
+  // Drops the never-saved Add-ed/Cloned item (if any): out of the item list,
+  // and off disk only in the fallback case where it was actually written
+  // (staged items never were).
   async function discardPendingNew() {
     const pending = pendingNewRef.current
     if (!pending || !cacheHandle) return
     pendingNewRef.current = null
+    setPendingNew(null)
 
     if (pending.entryName === selectedEntry?.name) {
       setActiveItems((prev) => prev.filter((i) => i.id !== pending.item.id))
     }
+    if (pending.content !== undefined) return // in-memory only, nothing on disk
     const loader = getLoader(pending.entryName)
     if (!loader?.deleteItem) return
     const entryHandle = await resolveEntryHandle(cacheHandle, getEntryPath(pending.entryName))
@@ -573,6 +589,30 @@ function App() {
     return true
   }
 
+  // Stages a new/cloned item in memory: the loader writes its defaults (it
+  // owns that knowledge), we load them, then take the file straight back off
+  // disk - nothing persists until the user saves.
+  async function stagePendingItem(
+    loader: NonNullable<ReturnType<typeof getLoader>>,
+    entryHandle: FileSystemDirectoryHandle,
+    item: LoadedItem,
+  ) {
+    let content: unknown
+    if (loader.deleteItem && loader.saveItem) {
+      try {
+        content = await loader.loadItem(entryHandle, item, cacheHandle ?? undefined)
+        await loader.deleteItem(entryHandle, item)
+      } catch {
+        content = undefined // staging failed - fall back to the on-disk flow
+      }
+    }
+    pendingNewRef.current = { entryName: selectedEntry!.name, item, content }
+    setPendingNew({ entry: selectedEntry!.name, id: item.id })
+    setActiveItems((prev) => [...prev, item].sort((a, b) => a.id - b.id || a.name.localeCompare(b.name)))
+    setSelectedItemId(item.id)
+    if (content !== undefined) setSelectedItemContent(content)
+  }
+
   async function handleAddItem() {
     const loader = selectedEntry ? getLoader(selectedEntry.name) : null
     const entryHandle = await currentEntryHandle()
@@ -580,9 +620,22 @@ function App() {
     if (!(await confirmLeaveItem())) return
     await discardPendingNew()
     const item = await loader.createItem(entryHandle)
-    pendingNewRef.current = { entryName: selectedEntry!.name, item }
-    setActiveItems((prev) => [...prev, item].sort((a, b) => a.id - b.id || a.name.localeCompare(b.name)))
-    setSelectedItemId(item.id)
+    await stagePendingItem(loader, entryHandle, item)
+  }
+
+  // The banner's Discard: drop the staged item and select a neighbour.
+  async function handleDiscardPendingNew() {
+    const pending = pendingNewRef.current
+    if (!pending) return
+    setIsContentDirty(false)
+    const removedId = pending.item.id
+    await discardPendingNew()
+    setActiveItems((prev) => {
+      const idx = prev.findIndex((i) => i.id === removedId)
+      const next = prev.filter((i) => i.id !== removedId)
+      setSelectedItemId(next[Math.min(Math.max(idx, 0), next.length - 1)]?.id ?? null)
+      return next
+    })
   }
 
   // "New from image" in the texture viewer wrote its files itself — surface
@@ -607,10 +660,13 @@ function App() {
       { title: 'Delete item', confirmLabel: 'Delete', danger: true },
     )
     if (!ok) return
+    let onDisk = true
     if (pendingNewRef.current?.item.id === selectedItem.id && pendingNewRef.current.entryName === selectedEntry!.name) {
+      onDisk = pendingNewRef.current.content === undefined
       pendingNewRef.current = null
+      setPendingNew(null)
     }
-    await loader.deleteItem(entryHandle, selectedItem)
+    if (onDisk) await loader.deleteItem(entryHandle, selectedItem)
     const removedId = selectedItem.id
     setIsContentDirty(false)
     setActiveItems((prev) => {
@@ -625,13 +681,19 @@ function App() {
     const loader = selectedEntry ? getLoader(selectedEntry.name) : null
     const entryHandle = await currentEntryHandle()
     if (!loader?.cloneItem || !entryHandle || !selectedItem) return
+    // A staged new item has no file for cloneItem to read.
+    if (pendingNewRef.current?.item.id === selectedItem.id
+        && pendingNewRef.current.entryName === selectedEntry!.name
+        && pendingNewRef.current.content !== undefined) {
+      await confirmDialog('Save the new item first - it only exists in the editor until then.', {
+        title: 'Nothing to clone yet', acknowledge: true, confirmLabel: 'Got it',
+      })
+      return
+    }
     if (!(await confirmLeaveItem())) return
-    // Clone before discarding a pending new item — the source could BE the
-    // pending item, and it has to still exist on disk to be read.
     const item = await loader.cloneItem(entryHandle, selectedItem)
     await discardPendingNew()
-    setActiveItems((prev) => [...prev, item].sort((a, b) => a.id - b.id || a.name.localeCompare(b.name)))
-    setSelectedItemId(item.id)
+    await stagePendingItem(loader, entryHandle, item)
   }
 
   async function loadEntryItems(handle: FileSystemDirectoryHandle, entry: CacheEntry, version: number, selectId?: number) {
@@ -1155,7 +1217,23 @@ function App() {
                 ? <NativeLibrariesViewer data={activeContent as NativeLibrariesData} />
                 : <pre className="content-json">{JSON.stringify(activeContent, null, 2)}</pre>
             ) : selectedItemContent != null ? (
-              questContent != null
+              <>
+              {pendingNew && selectedEntry?.name === pendingNew.entry && selectedItemId === pendingNew.id && (
+                <div className="pending-new-bar">
+                  <span className="pending-new-label">
+                    New item {pendingNew.id} exists only in the editor until you save it.
+                  </span>
+                  <button type="button" className="save-bar-discard" onClick={handleDiscardPendingNew}>
+                    Discard
+                  </button>
+                  {!isContentDirty && (
+                    <button type="button" className="save-bar-save" onClick={() => handleSaveItem(selectedItemContent)}>
+                      Save
+                    </button>
+                  )}
+                </div>
+              )}
+              {questContent != null
                 ? <QuestViewer data={questContent.quest} serverData={questContent.server ?? undefined} onSave={(quest, server) => handleSaveItem({ quest, server })} onDirtyChange={setIsContentDirty} />
                 : spriteContent != null
                 ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
@@ -1215,7 +1293,8 @@ function App() {
                 ? <FontViewer data={fontContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : quickChatContent != null
                 ? <QuickChatViewer data={quickChatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
-                : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>
+                : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>}
+              </>
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
             ) : null}
