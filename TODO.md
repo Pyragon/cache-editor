@@ -63,6 +63,7 @@ Architecture note (investigated 2026-07-12): a quest lives in **two places** —
 
 ## General Editor
 
+- **REMINDER: set up proper production hosting when the editor is nearly feature-complete** (user asked 2026-07-14 to be reminded "much later once we get almost everything finished"). The app is backend-less, so production = `npm run build` + Caddy `file_server` on `dist/` (no Node process at runtime, nothing to restart — unlike the dev server, whose week-old instance developed 20-second event-loop stalls). Content-hashed assets can take the same `immutable` caching the `/icons/*` Caddy route already has.
 - **Detail viewers still missing** (raw-JSON fallback only): `animations` (+ `animation_frame_sets`/`frame_bases`), `spot_animations`, `interfaces`, `cs2`, `sound_effects`, `midi_instruments`, and config `identikits` (which also needs its dump format flattened first).
 - **Open Cache button** shows `📁 folderName` — consider a cleaner label or breadcrumb.
 - **Error handling** — if a struct file is missing or malformed, the quest silently shows no server data. Could surface a visible warning.

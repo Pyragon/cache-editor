@@ -40,7 +40,7 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 16 | `objects` | Editor | Full editable editor |
 | 17 | `enums` | ✅ **Done** | Editable key/value table with type-char dropdowns; Add pre-fills the next key. Decode audited against darkan `EnumType.kt` — opcodes 1-6 identical, 7/8 differ only in representation (darkan materialises a sparse array, cryogen keeps the written entries keyed by the same index), verified against the dump. |
 | 18 | `npcs` | Editor | Full editable editor (model-translations desync hardening still in TODO) |
-| 19 | `items` | Editor | Full editable editor with itemdb icon previews |
+| 19 | `items` | ✅ **Done** | Full editor — icon previews, cross-entry View links (model posed as the inventory icon with recolours/retextures/icon lighting, equipment models, cursors), cursor preview cards with resolved option labels |
 | 20 | `animations` | Not started | |
 | 21 | `spot_animations` | Not started | |
 | 22 | `varbits` | ✅ **Done** | baseVar / start-bit / end-bit editor |
