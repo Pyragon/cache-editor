@@ -100,7 +100,7 @@ const SPECIALIZED_ENTRIES = new Set([
 const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
   'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics',
-  'particles', 'textures', 'texture_definitions', 'items',
+  'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
 ])
 
 function unavailableReason(name: string): string {

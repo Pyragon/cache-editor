@@ -85,7 +85,7 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 26 | `structs` | ✅ **Done** | Param key→value table |
 | 29 | `skyboxes` | ✅ **Done** | material preview + sun ids + background mode (sun fields unused in this cache — sun table is empty at rev 727) |
 | 30 | `sun` | Not started | Empty in the current dump |
-| 31 | `light_intensities` | Editor | Flickering point-light configs (waveform/speed/amplitude/base) with a live animated preview of the client formula — dumper + byte-verified repack added to cryogen (`LightIntensityDefinitions`) |
+| 31 | `light_intensities` | ✅ **Done** | Flickering point-light configs (waveform/speed/amplitude/base) with a live animated preview of the client formula — dumper + byte-verified repack added to cryogen (`LightIntensityDefinitions`) |
 | 32 | `bas` | Not dumped | 2,573 files in the cache (verified) — awaiting a cryogen dumper |
 | 33 | `cursors` | ✅ **Done** | Full editor — hotspot picking on the sprite preview, live "your mouse becomes the cursor" test area with RS-style click crosses, sprite download/upload (uploads allocate a new sprite id), add/remove/clone, save validation |
 | 34 | `map_sprites` | Editor | Sprite preview, background colour picker, upscaling toggle, sprite download/upload, add/remove/clone. (Held from Done pending a minimap-render preview — see TODO) |
