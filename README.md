@@ -79,9 +79,9 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 12 | `animations` | Empty in cache | No archive in the CONFIG index at rev 727 (moved to the top-level animations index) |
 | 13 | `spot_anims` | Empty in cache | No archive in the CONFIG index at rev 727 (moved to the top-level spot_animations index) |
 | 14 | `varbits` | Empty in cache | Config sub-archive, distinct from the top-level `varbits` index — holds no data at rev 727 |
-| 15 | `varc_string` | Editor | Presence records only (the cache stores no fields) — Add/Remove manage which ids exist |
+| 15 | `varc_string` | ✅ **Done** | Presence records only (the cache stores no fields) — Add/Remove manage which ids exist |
 | 16 | `vars` | ✅ **Done** | Param-type dropdown + client code (verified against darkan `VarpType`: only opcodes 1/5 exist, so the sparse data is correct) |
-| 19 | `varc` | Editor | Client variables — type-char dropdown + persists-across-sessions toggle |
+| 19 | `varc` | ✅ **Done** | Client variables — type-char dropdown + persists-across-sessions toggle |
 | 26 | `structs` | ✅ **Done** | Param key→value table |
 | 29 | `skyboxes` | ✅ **Done** | material preview + sun ids + background mode (sun fields unused in this cache — sun table is empty at rev 727) |
 | 30 | `sun` | Not started | Empty in the current dump |
@@ -89,11 +89,11 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 | 32 | `bas` | Not dumped | 2,573 files in the cache (verified) — awaiting a cryogen dumper |
 | 33 | `cursors` | ✅ **Done** | Full editor — hotspot picking on the sprite preview, live "your mouse becomes the cursor" test area with RS-style click crosses, sprite download/upload (uploads allocate a new sprite id), add/remove/clone, save validation |
 | 34 | `map_sprites` | Editor | Sprite preview, background colour picker, upscaling toggle, sprite download/upload, add/remove/clone. (Held from Done pending a minimap-render preview — see TODO) |
-| 35 | `quests` | Editor | Reads/writes quest JSON and cache structs (start NPC, start location, slot ID, prereq quests, skill requirements) |
+| 35 | `quests` | ✅ **Done** | Edits both cache archives a quest lives in — the quest def (archive 35) and the quest-start-interface struct (archive 26, journal texts, interface names, raw extras) — with the quest↔slot map derived from the cache (name-matched, 183/183 vs the old hardcoded table) and computed prereq-tree skill totals |
 | 36 | `areas` | ✅ **Done** | map element config (MECType) — sprites, colours, menu actions, visibility vars, params, static-element Placed At list (73,896 entries) |
 | 46 | `hitsplats` | ✅ **Done** | Field editor with a live splat preview whose damage number is rendered with the real cache font referenced by `fontId` (glyphs + advance widths from the cache, positioned exactly like the client) |
-| 47 | `clan_var` | Editor | Clan variables — type char + varbit-style bit packing into a base clan var |
-| 54 | `clan_var_settings` | Editor | Clan settings variables — same editor as clan vars (identical shape, different cache opcode) |
+| 47 | `clan_var` | ✅ **Done** | Clan variables — type char + interactive 32-bit register map of the base word (drag to set bits, neighbour lanes, overlap warnings) |
+| 54 | `clan_var_settings` | ✅ **Done** | Clan settings variables — same editor as clan vars (identical shape, different cache opcode) |
 | 72 | `hitbars` | ✅ **Done** | Field editor with a live health-percentage bar preview, per-sprite previews + upload/download, and a slider tinted to the actual bar sprite colours |
 
 ## License

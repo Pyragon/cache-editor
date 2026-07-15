@@ -101,6 +101,7 @@ const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
   'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics',
   'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
+  'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests',
 ])
 
 function unavailableReason(name: string): string {
