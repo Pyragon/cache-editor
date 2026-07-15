@@ -30,25 +30,25 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 6 | `music` | Not implemented upstream | |
 | 7 | `models` | Viewer | Read-only 3D viewer (Three.js) with wireframe toggle |
 | 8 | `sprites` | Viewer | Displays PNG frames with zoom, upload/download per frame |
-| 9 | `textures` | ✅ **Done** | Live op-graph render (37/38 op types, pixel-identical to cryogen; op 29 falls back to the dumped PNG), op-graph editor, animated UV scrolling per the client formula, and "New from image" texture creation (median-cut quantized to the sprite palette) — user signed off 2026-07-14 |
+| 9 | `textures` | ✅ **Done** | Live op-graph render (37/38 op types, pixel-identical to cryogen; op 29 falls back to the dumped PNG), op-graph editor, animated UV scrolling per the client formula, and "New from image" texture creation (median-cut quantized to the sprite palette) |
 | 10 | `huffman` | ✅ **Done** | Frequency table viewer (Table/Visual) + regenerate-from-corpus editor with round-trip self-test |
 | 11 | `music2` | Not implemented upstream | |
 | 12 | `cs2` | Not started | |
 | 13 | `font_metrics` | ✅ **Done** | Shown as **Fonts** — joins the metrics (13) with the glyph bitmaps from the font sprite archives (32/34), since a font is both halves keyed by one file id. Glyph atlas with editable advance widths, line-height/padding, and a live client-accurate text preview. Glyphs are read-only (the sprite archives aren't repackable yet). |
 | 14 | `midi_instruments` | Not started | |
 | 15 | `sound_effects_midi` | Not implemented upstream | |
-| 16 | `objects` | Editor | Full editable editor — user-verified 2026-07-13 |
+| 16 | `objects` | Editor | Full editable editor |
 | 17 | `enums` | ✅ **Done** | Editable key/value table with type-char dropdowns; Add pre-fills the next key. Decode audited against darkan `EnumType.kt` — opcodes 1-6 identical, 7/8 differ only in representation (darkan materialises a sparse array, cryogen keeps the written entries keyed by the same index), verified against the dump. |
-| 18 | `npcs` | Editor | Full editable editor — user-verified 2026-07-13 (model-translations desync hardening still in TODO) |
-| 19 | `items` | Editor | Full editable editor with itemdb icon previews — user-verified 2026-07-13 |
+| 18 | `npcs` | Editor | Full editable editor (model-translations desync hardening still in TODO) |
+| 19 | `items` | Editor | Full editable editor with itemdb icon previews |
 | 20 | `animations` | Not started | |
 | 21 | `spot_animations` | Not started | |
 | 22 | `varbits` | ✅ **Done** | baseVar / start-bit / end-bit editor |
 | 23 | `map_areas` | ✅ **Done** | world map areas — name, placement, map size, area rects table, live-derived bounds (map preview idea in TODO) |
 | 24 | `quick_chat_messages` | ✅ **Done** | Combined quick chat editor (Edit/Preview toggle, template chips, response navigation, segment/dynamic-part sync) |
 | 25 | `quick_chat_menus` | ✅ **Done** | Same combined editor — drill into submenus/messages, saves route to the right folder |
-| 26 | `texture_definitions` | ✅ **Done** | Full field editor with live material preview + HSL16 colour swatch — shares the textures viewer; flags repack via cryogen's `TextureDefinitions.encode()` (byte-identical round-trip) — user signed off 2026-07-14 |
-| 27 | `particles` | ✅ **Done** | Producer/type editor with a live client-faithful effect preview (emission windows, face-normal cones, effectors) at selectable 10/25/50 FPS; model viewer renders emitters on their carrier faces — user signed off 2026-07-13 |
+| 26 | `texture_definitions` | ✅ **Done** | Full field editor with live material preview + HSL16 colour swatch — shares the textures viewer; flags repack via cryogen's `TextureDefinitions.encode()` (byte-identical round-trip) |
+| 27 | `particles` | ✅ **Done** | Producer/type editor with a live client-faithful effect preview (emission windows, face-normal cones, effectors) at selectable 10/25/50 FPS; model viewer renders emitters on their carrier faces |
 | 28 | `defaults` | ✅ **Done** | entity / equipment blobs |
 | 29 | `billboards` | ✅ **Done** | material id + size + shape/blend, live material preview, used-by-models list (scripts/scan-billboard-usage.mjs) |
 | 30 | `native_libraries` | ✅ **Done** | File browser — view/download/replace/add. `.dll`/`.exe` files can't be touched due to a browser platform restriction (see notice in the viewer) |
