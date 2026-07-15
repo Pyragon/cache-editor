@@ -80,7 +80,7 @@ const SPECIALIZED_ENTRIES = new Set([
   'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
-  'particles',
+  'particles', 'textures', 'texture_definitions',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -88,7 +88,7 @@ const SPECIALIZED_ENTRIES = new Set([
 const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
   'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics',
-  'particles',
+  'particles', 'textures', 'texture_definitions',
 ])
 
 function unavailableReason(name: string): string {
