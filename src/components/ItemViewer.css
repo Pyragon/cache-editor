@@ -124,6 +124,48 @@
   border-bottom-color: var(--electric-blue-bright);
 }
 
+/* Id fields that navigate to another entry (modelId -> model viewer):
+   a small button in the cell's top-right, matching the fonts sample-text
+   Reset button. */
+.field-link-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  overflow: hidden;
+}
+
+/* When space runs out, the label text gives way (ellipsis) instead of the
+   button being pushed out through the cell's right edge. */
+.field-link-label > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-link-btn {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.field-link-btn:hover {
+  background: rgba(0, 102, 255, 0.18);
+  border-color: rgba(126, 184, 255, 0.45);
+  color: #7eb8ff;
+}
+
 .item-options {
   display: flex;
   flex-direction: column;
@@ -375,4 +417,51 @@ input[type="number"]::-webkit-inner-spin-button {
 .num-input-step:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+/* Cursor previews under the Cursors grid: the actual cursor sprites, labelled. */
+.item-cursor-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.item-cursor-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.item-cursor-img {
+  height: 40px;
+  min-width: 40px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.item-cursor-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 18px;
+}
+
+.item-cursor-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+/* The card is a flex column, so stretching fills the padded width. */
+.item-cursor-card .cursor-pick-btn {
+  align-self: stretch;
 }

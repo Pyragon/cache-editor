@@ -22,6 +22,9 @@ export type ItemDef = {
 export type ItemData = {
   id: number
   item: ItemDef
+  /** config/cursors + sprites, so the viewer can preview the item's cursors. */
+  cursorsDir: FileSystemDirectoryHandle | null
+  spritesDir: FileSystemDirectoryHandle | null
 }
 
 const NEW_ITEM_DEFAULTS: Omit<ItemDef, 'id'> = {
@@ -94,11 +97,23 @@ const loader: CacheLoader = {
     }
   },
 
-  async loadItem(dirHandle, item) {
+  async loadItem(dirHandle, item, rootHandle) {
     const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
     const file = await fileHandle.getFile()
     const def = JSON.parse(await file.text()) as ItemDef
-    return { id: item.id, item: def } satisfies ItemData
+
+    let cursorsDir: FileSystemDirectoryHandle | null = null
+    let spritesDir: FileSystemDirectoryHandle | null = null
+    if (rootHandle) {
+      try {
+        cursorsDir = await (await rootHandle.getDirectoryHandle('config')).getDirectoryHandle('cursors')
+      } catch { /* cursors not dumped — viewer skips the previews */ }
+      try {
+        spritesDir = await rootHandle.getDirectoryHandle('sprites')
+      } catch { /* sprites not dumped — viewer skips the previews */ }
+    }
+
+    return { id: item.id, item: def, cursorsDir, spritesDir } satisfies ItemData
   },
 
   async saveItem(dirHandle, item, data) {

@@ -6,13 +6,17 @@ import type { ReactNode } from 'react'
 import type { ParamRow } from './defParams'
 
 // Item icon served from public/icons (fetched by scripts/download-icons.mjs).
-// Renders an empty placeholder for ids with no downloaded icon.
+// Renders an empty placeholder for ids with no downloaded icon. Keyed by id:
+// reusing one <img> keeps SHOWING the previous item's icon until the new file
+// finishes fetching (slow over the network), which reads as a laggy update —
+// a fresh element goes blank immediately and fills in when ready.
 export function ItemIcon({ id }: { id: number }) {
   const [failed, setFailed] = useState(false)
   useEffect(() => setFailed(false), [id])
   if (failed || id < 0) return <span className="item-icon item-icon-empty" />
   return (
     <img
+      key={id}
       className="item-icon"
       src={`${import.meta.env.BASE_URL}icons/${id}.png`}
       alt=""
@@ -79,19 +83,46 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
 
 export type NumFieldDef = [key: string, label: string]
 
-export function NumGrid({ fields, values, onChange }: {
+// A cell's id link to another entry's viewer (e.g. modelId → the model
+// viewer), rendered as a small button in the cell's top-right corner.
+export type FieldLink = { label: string; onOpen: (value: number) => void }
+
+export function NumGrid({ fields, values, onChange, links }: {
   fields: NumFieldDef[]
   values: Record<string, unknown>
   onChange: (key: string, value: number) => void
+  links?: Record<string, FieldLink | undefined>
 }) {
   return (
     <div className="item-grid">
-      {fields.map(([key, label]) => (
-        <label key={key} className="item-field">
-          <span className="item-field-label" title={label}>{label}</span>
-          <NumberInput value={Number(values[key] ?? 0)} onChange={(v) => onChange(key, v)} />
-        </label>
-      ))}
+      {fields.map(([key, label]) => {
+        const value = Number(values[key] ?? 0)
+        const link = links?.[key]
+        return (
+          <label key={key} className="item-field">
+            <span className={`item-field-label${link ? ' field-link-label' : ''}`} title={label}>
+              {link ? (
+                <>
+                  <span>{label}</span>
+                  {value >= 0 && (
+                    <button
+                      type="button"
+                      className="field-link-btn"
+                      title={`Open ${value} in its viewer`}
+                      onClick={(e) => { e.preventDefault(); link.onOpen(value) }}
+                    >
+                      {link.label}
+                    </button>
+                  )}
+                </>
+              ) : (
+                label
+              )}
+            </span>
+            <NumberInput value={value} onChange={(v) => onChange(key, v)} />
+          </label>
+        )
+      })}
     </div>
   )
 }

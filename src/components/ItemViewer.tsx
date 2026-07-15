@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { ItemData, ItemDef } from '../loaders/items'
+import type { CursorDef } from '../loaders/config/cursors'
+import type { ModelDisplayParams } from './ModelViewer'
+import { loadSpriteMeta, renderFrameToCanvas } from './spriteRender'
 import { NumberInput, ItemIcon, NumGrid, PairTable, ParamsTable  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { paramRowsToRecord, toParamRows } from './defParams'
@@ -10,6 +13,76 @@ type Props = {
   data: ItemData
   onSave: (data: ItemData) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
+  /** Opens the model viewer with the given model id selected — posed with the
+      item's inventory-icon display params when given, plain otherwise (the
+      equipment models are worn meshes; the icon transform doesn't apply). */
+  onOpenModel?: (id: number, display?: ModelDisplayParams) => void
+  /** Opens the config cursors viewer with the given cursor id selected. */
+  onOpenCursor?: (id: number) => void
+}
+
+// The Equipment Models fields that hold model ids (the wear offsets are
+// translations, not ids). −1 = none; NumGrid hides the link for negatives.
+const EQUIP_MODEL_KEYS = [
+  'maleEquip1', 'maleEquip2', 'maleEquip3',
+  'femaleEquip1', 'femaleEquip2', 'femaleEquip3',
+  'maleHead1', 'maleHead2', 'femaleHead1', 'femaleHead2',
+]
+
+
+// [cursor id key, op index key, label, which options list the op indexes]
+const CURSOR_PREVIEWS: [key: string, opKey: string, label: string, options: 'groundOptions' | 'inventoryOptions'][] = [
+  ['primaryCursor', 'primaryCursorActionIndex', 'Ground', 'groundOptions'],
+  ['secondaryCursor', 'secondaryCursorActionIndex', 'Ground', 'groundOptions'],
+  ['customCursorId1', 'customCursorOp1', 'Inventory', 'inventoryOptions'],
+  ['customCursorId2', 'customCursorOp2', 'Inventory', 'inventoryOptions'],
+]
+
+// Small render of a cursor's sprite: config/cursors/<id>.json → spriteId →
+// sprite meta → canvas. Tracks the DRAFT id so editing the cell updates it.
+function CursorPreview({ cursorsDir, spritesDir, cursorId, label, onOpen }: {
+  cursorsDir: FileSystemDirectoryHandle | null
+  spritesDir: FileSystemDirectoryHandle | null
+  cursorId: number
+  label: string
+  onOpen?: (id: number) => void
+}) {
+  const [url, setUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setUrl(null)
+    if (cursorId < 0 || !cursorsDir || !spritesDir) return
+    ;(async () => {
+      try {
+        const file = await (await cursorsDir.getFileHandle(`${cursorId}.json`)).getFile()
+        const def = JSON.parse(await file.text()) as CursorDef
+        if (def.spriteId < 0) return
+        const meta = await loadSpriteMeta(spritesDir, def.spriteId)
+        if (!meta || cancelled) return
+        const canvas = renderFrameToCanvas(meta)
+        if (canvas && !cancelled) setUrl(canvas.toDataURL())
+      } catch {
+        // missing cursor def or sprite — no preview
+      }
+    })()
+    return () => { cancelled = true }
+  }, [cursorsDir, spritesDir, cursorId])
+
+  if (cursorId < 0) return null
+  return (
+    <div className="item-cursor-card">
+      {url
+        ? <img className="item-cursor-img" src={url} alt="" />
+        : <span className="item-cursor-img item-cursor-missing">?</span>}
+      <span className="item-cursor-label">{label} · {cursorId}</span>
+      {onOpen && (
+        <button type="button" className="cursor-pick-btn" onClick={() => onOpen(cursorId)}>
+          View
+        </button>
+      )}
+    </div>
+  )
 }
 
 const GENERAL_FIELDS: NumFieldDef[] = [
@@ -65,15 +138,20 @@ const LINK_FIELDS: NumFieldDef[] = [
   ['bindTemplateId', 'Bind Template'],
 ]
 
+// Keys keep darkan's field names; the labels say what the client does with
+// them. primary/secondary (opcodes 127/128) attach a cursor to a GROUND menu
+// option (the index picks the groundOptions slot — same pair NPCs/objects use
+// for their world options). custom 1/2 (129/130) attach one to an INVENTORY
+// option, queried by interface CS2 (CS2Interpreter.method4630).
 const CURSOR_FIELDS: NumFieldDef[] = [
-  ['primaryCursorActionIndex', 'Primary Op'],
-  ['primaryCursor', 'Primary Cursor'],
-  ['secondaryCursorActionIndex', 'Secondary Op'],
-  ['secondaryCursor', 'Secondary Cursor'],
-  ['customCursorOp1', 'Custom Op 1'],
-  ['customCursorId1', 'Custom Cursor 1'],
-  ['customCursorOp2', 'Custom Op 2'],
-  ['customCursorId2', 'Custom Cursor 2'],
+  ['primaryCursorActionIndex', 'Ground Option 1'],
+  ['primaryCursor', 'Ground Cursor 1'],
+  ['secondaryCursorActionIndex', 'Ground Option 2'],
+  ['secondaryCursor', 'Ground Cursor 2'],
+  ['customCursorOp1', 'Inventory Option 1'],
+  ['customCursorId1', 'Inventory Cursor 1'],
+  ['customCursorOp2', 'Inventory Option 2'],
+  ['customCursorId2', 'Inventory Cursor 2'],
 ]
 
 const UNKNOWN_FIELDS: NumFieldDef[] = [
@@ -84,7 +162,7 @@ const UNKNOWN_FIELDS: NumFieldDef[] = [
   ['realOffsetY', 'realOffsetY'],
 ]
 
-export default function ItemViewer({ data, onSave, onDirtyChange }: Props) {
+export default function ItemViewer({ data, onSave, onDirtyChange, onOpenModel, onOpenCursor }: Props) {
   const [draft, setDraft] = useState<ItemDef>(data.item)
   const [paramRows, setParamRows] = useState<ParamRow[]>(() => toParamRows(data.item.clientScriptData))
   const [newQuestId, setNewQuestId] = useState('')
@@ -274,12 +352,48 @@ export default function ItemViewer({ data, onSave, onDirtyChange }: Props) {
 
       <section className="item-section">
         <h3>Model</h3>
-        <NumGrid fields={MODEL_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
+        <NumGrid
+          fields={MODEL_FIELDS}
+          values={draft}
+          onChange={(k, v) => set(k, v)}
+          links={{ modelId: onOpenModel && {
+            label: 'View',
+            // Carry the item's display params so the model viewer can pose the
+            // model the way the client draws this item's inventory icon.
+            // Defaults per client ItemDefinitions (zoom 2000, resize 128).
+            onOpen: (id) => onOpenModel(id, {
+              label: `item ${data.id}`,
+              zoom: Number(draft.modelZoom ?? 2000) || 2000,
+              rotationX: Number(draft.modelRotationX ?? 0),
+              rotationY: Number(draft.modelRotationY ?? 0),
+              rotationZ: Number(draft.modelRotationZ ?? 0),
+              offsetX: Number(draft.modelOffsetX ?? 0),
+              offsetY: Number(draft.modelOffsetY ?? 0),
+              resizeX: Number(draft.resizeX ?? 128) || 128,
+              resizeY: Number(draft.resizeY ?? 128) || 128,
+              resizeZ: Number(draft.resizeZ ?? 128) || 128,
+              ambient: Number(draft.ambient ?? 0),
+              contrast: Number(draft.contrast ?? 0),
+              recolorFrom: (draft.originalModelColours as number[] | undefined) ?? [],
+              recolorTo: (draft.modifiedModelColours as number[] | undefined) ?? [],
+              retextureFrom: (draft.originalTextureIds as number[] | undefined) ?? [],
+              retextureTo: (draft.modifiedTextureIds as number[] | undefined) ?? [],
+            }),
+          } }}
+        />
       </section>
 
       <section className="item-section">
         <h3>Equipment Models</h3>
-        <NumGrid fields={EQUIP_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
+        <NumGrid
+          fields={EQUIP_FIELDS}
+          values={draft}
+          onChange={(k, v) => set(k, v)}
+          links={onOpenModel && Object.fromEntries(EQUIP_MODEL_KEYS.map((key) => [
+            key,
+            { label: 'View', onOpen: (id: number) => onOpenModel(id) },
+          ]))}
+        />
       </section>
 
       <section className="item-section">
@@ -290,6 +404,23 @@ export default function ItemViewer({ data, onSave, onDirtyChange }: Props) {
       <section className="item-section">
         <h3>Cursors</h3>
         <NumGrid fields={CURSOR_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
+        {CURSOR_PREVIEWS.some(([key]) => Number(draft[key] ?? -1) >= 0) && (
+          <div className="item-cursor-row">
+            {CURSOR_PREVIEWS.map(([key, opKey, label, optionsKey]) => {
+              const option = (draft[optionsKey] as (string | null)[] | undefined)?.[Number(draft[opKey] ?? -1)]
+              return (
+                <CursorPreview
+                  key={key}
+                  cursorsDir={data.cursorsDir}
+                  spritesDir={data.spritesDir}
+                  cursorId={Number(draft[key] ?? -1)}
+                  label={option ? `${label} · ${option}` : label}
+                  onOpen={onOpenCursor}
+                />
+              )
+            })}
+          </div>
+        )}
       </section>
 
       <PairTable

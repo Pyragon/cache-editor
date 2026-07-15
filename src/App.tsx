@@ -9,9 +9,11 @@ import type { QuestData } from './components/QuestViewer'
 import SpriteViewer from './components/SpriteViewer'
 import type { SpriteData } from './loaders/sprites'
 import ModelViewer from './components/ModelViewer'
+import type { ModelDisplayParams } from './components/ModelViewer'
 import type { ModelData } from './loaders/models'
 import TextureViewer from './components/TextureViewer'
 import ParticleViewer from './components/ParticleViewer'
+import { loadTextureDef, loadTexturePng } from './loaders/textures'
 import type { TextureData } from './loaders/textures'
 import type { ParticleData } from './loaders/particles'
 import NativeLibrariesViewer from './components/NativeLibrariesViewer'
@@ -80,7 +82,7 @@ const SPECIALIZED_ENTRIES = new Set([
   'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
-  'particles', 'textures', 'texture_definitions',
+  'particles',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -235,6 +237,9 @@ function App() {
   const [isLoading, setIsLoading] = useState(false)
   const [loadCount, setLoadCount] = useState(0)
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null)
+  // Inventory-icon pose for the model viewer, set when arriving via an item's
+  // "View Model" link and cleared again by any manual navigation.
+  const [modelDisplay, setModelDisplay] = useState<ModelDisplayParams | null>(null)
   const [filter, setFilter] = useState('')
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
   const [isContentDirty, setIsContentDirty] = useState(false)
@@ -513,13 +518,15 @@ function App() {
     return true
   }
 
-  async function handleSelectItem(id: number) {
-    if (id === selectedItemId) return
-    if (!(await confirmLeaveItem())) return
+  async function handleSelectItem(id: number): Promise<boolean> {
+    if (id === selectedItemId) return true
+    if (!(await confirmLeaveItem())) return false
     if (pendingNewRef.current?.item.id !== id || pendingNewRef.current?.entryName !== selectedEntry?.name) {
       void discardPendingNew()
     }
+    setModelDisplay(null)
     setSelectedItemId(id)
+    return true
   }
 
   async function handleAddItem() {
@@ -583,7 +590,7 @@ function App() {
     setSelectedItemId(item.id)
   }
 
-  async function loadEntryItems(handle: FileSystemDirectoryHandle, entry: CacheEntry, version: number) {
+  async function loadEntryItems(handle: FileSystemDirectoryHandle, entry: CacheEntry, version: number, selectId?: number) {
     const loader = getLoader(entry.name)
     if (!loader) {
       setIsLoading(false)
@@ -616,18 +623,20 @@ function App() {
 
     buffer.sort((a, b) => a.id - b.id || a.name.localeCompare(b.name))
     setActiveItems(buffer)
-    setSelectedItemId(buffer[0]?.id ?? null)
+    const preselect = selectId != null && buffer.some((i) => i.id === selectId) ? selectId : buffer[0]?.id ?? null
+    setSelectedItemId(preselect)
     setLoadCount(0)
     setIsLoading(false)
   }
 
-  async function handleSelectEntry(id: number) {
+  async function handleSelectEntry(id: number, selectId?: number): Promise<boolean> {
     const entry = entries.find((e) => e.id === id)
-    if (!entry || !entry.available) return
-    if (entry.id !== selectedEntryId && !(await confirmLeaveItem())) return
+    if (!entry || !entry.available) return false
+    if (entry.id !== selectedEntryId && !(await confirmLeaveItem())) return false
     await discardPendingNew()
 
     const version = ++loadVersion.current
+    setModelDisplay(null)
     setSelectedEntryId(id)
     setActiveItems([])
     setActiveContent(null)
@@ -637,7 +646,54 @@ function App() {
     setIsLoading(true)
     setLoadCount(0)
 
-    if (cacheHandle) await loadEntryItems(cacheHandle, entry, version)
+    if (cacheHandle) await loadEntryItems(cacheHandle, entry, version, selectId)
+    return true
+  }
+
+  // Cross-entry id links (e.g. an item's modelId → the model viewer): jump to
+  // the target entry with that item preselected. Same-entry jumps skip the
+  // list reload. If the id doesn't exist in the target's list, the entry still
+  // opens on its first item — same as clicking it in the sidebar. Returns
+  // false when the user cancelled on the unsaved-changes prompt.
+  async function handleNavigateToItem(entryName: string, itemId: number): Promise<boolean> {
+    const entry = entries.find((e) => e.name === entryName)
+    if (!entry?.available) return false
+    if (entry.id === selectedEntryId) return handleSelectItem(itemId)
+    return handleSelectEntry(entry.id, itemId)
+  }
+
+  // An item's "View Model": navigate, then pose the viewer with the item's
+  // inventory-icon display params (set after navigating — the navigation
+  // handlers clear any previous pose).
+  async function handleOpenItemModel(id: number, display?: ModelDisplayParams) {
+    if (!(await handleNavigateToItem('models', id))) return
+    if (!display) return // equipment-model links: plain navigation, no pose
+
+    // Texture-swap targets aren't among the textures the model's own loader
+    // fetched, so pull their rendered PNGs (and scroll speeds) here.
+    if (display.retextureTo.length > 0 && cacheHandle) {
+      const blobs = new Map<number, Blob>()
+      const speeds = new Map<number, { u: number; v: number }>()
+      try {
+        const texturesDir = await cacheHandle.getDirectoryHandle('textures')
+        await Promise.all(display.retextureTo.map(async (texId) => {
+          const png = await loadTexturePng(texturesDir, texId)
+          if (png) blobs.set(texId, png)
+        }))
+      } catch { /* textures not dumped — swapped faces fall back to flat colour */ }
+      try {
+        const defsDir = await cacheHandle.getDirectoryHandle('texture_definitions')
+        await Promise.all(display.retextureTo.map(async (texId) => {
+          const def = await loadTextureDef(defsDir, texId)
+          if (def && (def.textureSpeedU !== 0 || def.textureSpeedV !== 0)) {
+            speeds.set(texId, { u: def.textureSpeedU, v: def.textureSpeedV })
+          }
+        }))
+      } catch { /* no definitions dumped — swapped textures stay still */ }
+      display = { ...display, retextureBlobs: blobs, retextureSpeeds: speeds }
+    }
+
+    setModelDisplay(display)
   }
 
   // Folder problems are modal rather than a line of text in the sidebar: they always
@@ -1060,7 +1116,7 @@ function App() {
                 : spriteContent != null
                 ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : modelContent != null
-                ? <ModelViewer data={modelContent} />
+                ? <ModelViewer data={modelContent} display={modelDisplay} />
                 : textureContent != null
                 ? <TextureViewer data={textureContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onCreated={handleTextureCreated} />
                 : particleContent != null
@@ -1072,7 +1128,7 @@ function App() {
                 : mapSpriteContent != null
                 ? <MapSpriteViewer data={mapSpriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : itemContent != null
-                ? <ItemViewer data={itemContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <ItemViewer data={itemContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenModel={handleOpenItemModel} onOpenCursor={(id) => handleNavigateToItem('config_cursors', id)} />
                 : objectContent != null
                 ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : npcContent != null
