@@ -399,16 +399,23 @@ function App() {
   const filteredItemsRef = useRef(filteredItems)
   filteredItemsRef.current = filteredItems
 
+  // Auto-select on numeric filters — keyed to the filter text and the loaded
+  // list (which covers "id typed while the entry was still streaming"), NOT to
+  // filteredItems: that array is rebuilt with a fresh identity every render,
+  // so depending on it re-fired this after every click and stomped any manual
+  // selection while an id filter was active.
   useEffect(() => {
     if (/^\d+$/.test(filter)) {
       const num = parseInt(filter, 10)
-      const idx = filteredItems.findIndex((item) => item.id === num)
+      const items = filteredItemsRef.current
+      const idx = items.findIndex((item) => item.id === num)
       if (idx !== -1) {
-        handleSelectItemRef.current(filteredItems[idx].id)
+        handleSelectItemRef.current(items[idx].id)
         virtualizer.scrollToIndex(idx, { align: 'center' })
       }
     }
-  }, [filter, filteredItems, virtualizer])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter, activeItems, virtualizer])
 
   // Keep the selected row in view when it's changed programmatically
   // (Add / Clone appends off-screen, Remove auto-selects a neighbour).
