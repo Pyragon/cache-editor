@@ -1,0 +1,31 @@
+.particle-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 900px;
+}
+
+.particle-canvas {
+  border: 1px solid #2f3542;
+  border-radius: 8px;
+  background: #0d1016;
+  display: block;
+  max-width: 100%;
+}
+
+.particle-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.particle-color-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.particle-color-row .item-field-input {
+  min-width: 0;
+}

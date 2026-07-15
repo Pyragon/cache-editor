@@ -79,6 +79,13 @@
   max-width: 900px;
 }
 
+/* Sections that stack two grids (a dropdown/colour row followed by a NumGrid, as in
+   the particle viewer's Speed and Colour sections) get the same 8px rhythm between
+   the grids as between rows within one — otherwise the seam collapses to zero. */
+.item-grid + .item-grid {
+  margin-top: 8px;
+}
+
 .item-field {
   display: flex;
   flex-direction: column;
