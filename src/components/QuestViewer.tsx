@@ -50,7 +50,20 @@ const DEFAULT_SERVER_DATA: QuestServerData = {
   slotId: -1,
   prereqQuestIds: [],
   skillReqs: [],
+  structId: -1,
+  structName: '',
+  structSortName: '',
+  journal: { startHint: '', requiredItems: '', enemiesToDefeat: '', rewards: '' },
+  extraValues: [],
+  preReqSkillReqs: [],
 }
+
+const JOURNAL_FIELDS: [key: keyof QuestServerData['journal'], structKey: number, label: string][] = [
+  ['startHint', 948, 'Start Hint'],
+  ['requiredItems', 949, 'Required Items'],
+  ['enemiesToDefeat', 950, 'Enemies to Defeat'],
+  ['rewards', 951, 'Rewards'],
+]
 
 type BadgeDropdownProps = {
   value: string
@@ -198,6 +211,29 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
     setIsServerDirty(true)
   }
 
+  function setJournal(key: keyof QuestServerData['journal'], value: string) {
+    setServerDraft((prev) => ({ ...prev, journal: { ...prev.journal, [key]: value } }))
+    setIsServerDirty(true)
+  }
+
+  function setExtra(i: number, which: 0 | 1, value: number | string) {
+    setServerDraft((prev) => ({
+      ...prev,
+      extraValues: prev.extraValues.map((row, ri) =>
+        ri === i ? ([which === 0 ? Number(value) : row[0], which === 1 ? value : row[1]] as [number, string | number]) : row
+      ),
+    }))
+    setIsServerDirty(true)
+  }
+
+  function addExtra() {
+    setServer('extraValues', [...serverDraft.extraValues, [0, 0]])
+  }
+
+  function removeExtra(i: number) {
+    setServer('extraValues', serverDraft.extraValues.filter((_, ri) => ri !== i))
+  }
+
   async function handleSave() {
     setIsSaving(true)
     await onSave(draft, serverDraft)
@@ -322,6 +358,14 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
         </div>
       </div>
 
+      <p className="tex-op-note quest-sources-note">
+        A quest lives in two cache archives: sections marked <strong>quest def</strong> edit
+        config/quests/&lt;id&gt;.json (CONFIG archive 35 — the client's quest list), and sections
+        marked <strong>struct</strong> edit config/structs/{serverDraft.structId >= 0 ? serverDraft.structId : '?'}.json
+        (CONFIG archive 26 — the quest start interface), linked via enum 2252. Some data exists in
+        both and can drift.
+      </p>
+
       <div className="quest-stats">
         {([
           ['QP Required', 'questpointRequirement'],
@@ -348,7 +392,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
       </div>
 
       <section className="quest-section">
-        <h3>Level Requirements</h3>
+        <h3>Level Requirements (quest def)</h3>
         <div className="quest-table-wrap uniform">
           <table className="quest-table">
             <thead><tr><th>Skill</th><th>Level</th><th>Remove</th></tr></thead>
@@ -375,7 +419,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
       </section>
 
       <section className="quest-section">
-        <h3>Prerequisite Quest IDs</h3>
+        <h3>Prerequisite Quest IDs (quest def)</h3>
         <div className="quest-prereqs">
           {prereqs.map((id) => (
             <span key={id} className="prereq-tag">
@@ -394,7 +438,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
       </section>
 
       <section className="quest-section">
-        <h3>Prereq Quest IDs (cache)</h3>
+        <h3>Prereq Quest IDs (struct, keys 859–870)</h3>
         <div className="quest-prereqs">
           {serverDraft.prereqQuestIds.map((id) => (
             <span key={id} className="prereq-tag">
@@ -435,7 +479,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
       </section>
 
       <section className="quest-section">
-        <h3>Start Location</h3>
+        <h3>Start Location (struct, key 850)</h3>
         <div className="tile-inputs">
           {(['x', 'y', 'plane'] as const).map((field) => (
             <div key={field} className="tile-field">
@@ -447,7 +491,7 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
       </section>
 
       <section className="quest-section">
-        <h3>Skill Requirements (cache)</h3>
+        <h3>Skill Requirements (struct, keys 871+)</h3>
         <div className="quest-table-wrap uniform">
           <table className="quest-table">
             <thead><tr><th>Skill</th><th>Level</th><th>Remove</th></tr></thead>
@@ -471,6 +515,80 @@ export default function QuestViewer({ data, serverData, onSave, onDirtyChange }:
           </table>
         </div>
         <button type="button" className="add-row-btn" onClick={addSkillReq}>+ Add requirement</button>
+      </section>
+
+      <section className="quest-section">
+        <h3>Total Skill Requirements (computed)</h3>
+        <p className="tex-op-note">
+          Read-only: the highest level needed per skill across this quest and its entire
+          prerequisite tree (struct data, accumulated recursively).
+        </p>
+        <div className="quest-prereqs quest-computed-reqs">
+          {serverDraft.preReqSkillReqs.length === 0 && <span className="quest-computed-none">None</span>}
+          {serverDraft.preReqSkillReqs.map(([skillId, level]) => (
+            <span key={skillId} className="prereq-tag quest-computed-tag">
+              {level} {SKILLS[skillId] ?? `Skill ${skillId}`}
+            </span>
+          ))}
+        </div>
+      </section>
+
+      <section className="quest-section">
+        <h3>Quest Start Interface (struct {serverDraft.structId >= 0 ? serverDraft.structId : '?'})</h3>
+        <div className="quest-journal-names">
+          <label className="item-field">
+            <span className="item-field-label">Interface Name (845)</span>
+            <input className="item-field-input" value={serverDraft.structName}
+              onChange={(e) => setServer('structName', e.target.value)} />
+          </label>
+          <label className="item-field">
+            <span className="item-field-label">Sort Name (846)</span>
+            <input className="item-field-input" value={serverDraft.structSortName}
+              onChange={(e) => setServer('structSortName', e.target.value)} />
+          </label>
+        </div>
+        {JOURNAL_FIELDS.map(([key, structKey, label]) => (
+          <label key={key} className="item-field quest-journal-field">
+            <span className="item-field-label">{label} ({structKey})</span>
+            <textarea
+              className="item-field-input quest-journal-text"
+              rows={2}
+              value={serverDraft.journal[key]}
+              onChange={(e) => setJournal(key, e.target.value)}
+            />
+          </label>
+        ))}
+      </section>
+
+      <section className="quest-section">
+        <h3>Other Struct Values</h3>
+        <p className="tex-op-note">
+          Every remaining key of struct {serverDraft.structId >= 0 ? serverDraft.structId : '?'} not
+          covered by the fields above, editable raw. Known uses include extra location hashes
+          (851–854), the quest-complete graphic (952) and Squeal-era reward text (1212).
+        </p>
+        {serverDraft.extraValues.length > 0 && (
+          <div className="quest-table-wrap uniform">
+            <table className="quest-table">
+              <thead><tr><th>Key</th><th>Value</th><th>Remove</th></tr></thead>
+              <tbody>
+                {serverDraft.extraValues.map(([key, value], i) => (
+                  <tr key={i}>
+                    <td style={{ width: 110 }}>
+                      <NumberInput className="cell-input" value={key} onChange={(v) => setExtra(i, 0, v)} />
+                    </td>
+                    <td>
+                      <input className="cell-input" value={String(value)}
+                        onChange={(e) => setExtra(i, 1, e.target.value)} />
+                    </td>
+                    <td><button type="button" className="row-remove-btn" onClick={() => removeExtra(i)}>×</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <button type="button" className="add-row-btn" onClick={addExtra}>+ Add value</button>
       </section>
 
       {anyDirty && (

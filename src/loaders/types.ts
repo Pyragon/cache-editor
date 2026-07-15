@@ -9,6 +9,22 @@ export type QuestServerData = {
   slotId: number
   prereqQuestIds: number[]
   skillReqs: [number, number][]
+  /** The quest-start-interface struct backing this data (CONFIG archive 26). */
+  structId: number
+  /** Struct keys 845/846 — the interface's own name + sort name. */
+  structName: string
+  structSortName: string
+  /** Journal texts, struct keys 948–951. */
+  journal: {
+    startHint: string
+    requiredItems: string
+    enemiesToDefeat: string
+    rewards: string
+  }
+  /** Every other struct key the dedicated fields don't manage, editable raw. */
+  extraValues: [key: number, value: string | number][]
+  /** Read-only: max level per skill over this quest and its whole prereq tree. */
+  preReqSkillReqs: [number, number][]
 }
 
 export type CacheLoader = {

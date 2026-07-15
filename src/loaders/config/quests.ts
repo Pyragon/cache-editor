@@ -1,47 +1,40 @@
 import type { CacheLoader, LoadedItem, QuestServerData } from '../types'
 
-// Quest ID (from quest JSON "id" field) → Slot ID (from Quests.java)
-const QUEST_ID_TO_SLOT: Record<number, number> = {
-  6: 1,   51: 2,   99: 3,   66: 4,   15: 5,  137: 6,  72: 7,  152: 8,  60: 9,  64: 10,
-  27: 11, 186: 12,  55: 13, 185: 14,  63: 15, 132: 16, 179: 17,  43: 18,  57: 19, 102: 20,
-  128: 21,   0: 22,  44: 23, 158: 24, 104: 25,  92: 26,  26: 27,  13: 28, 140: 29, 135: 30,
-  123: 31,  69: 32, 111: 33,  34: 34,  75: 35, 149: 36,   8: 37,  94: 38,  97: 39, 107: 40,
-  143: 41,  73: 42, 154: 43, 116: 44, 136: 45, 106: 46,  76: 47,  98: 48,  50: 49,  93: 50,
-  118: 51, 138: 52,  82: 53, 134: 54,   3: 55,  65: 56, 150: 57, 120: 58, 125: 59,  38: 60,
-  112: 61, 105: 62, 141: 63,  21: 64,  19: 65,  59: 66, 119: 67,  42: 68,  37: 69,  24: 70,
-  124: 71, 108: 72, 130: 73, 147: 74, 151: 75, 156: 76, 129: 77,  28: 78,  22: 79, 133: 80,
-   54: 81, 146: 82,  58: 83,   9: 84,  68: 85,  67: 86,  30: 87,  62: 88, 100: 89, 110: 90,
-  127: 91, 101: 92,   2: 93, 121: 94,  12: 95,  10: 96,  71: 97,  39: 98,  70: 99,  36: 100,
-   46: 101,  48: 102,  89: 103,  45: 104,  81: 105, 126: 106, 157: 107, 113: 108,   7: 109,  78: 110,
-   40: 111,  90: 112,  85: 113,  31: 114, 103: 115,  16: 116, 145: 117, 148: 118,   1: 119,  88: 120,
-  144: 121, 153: 122, 155: 123,  79: 124,  32: 125,  61: 126,   5: 127,  49: 128,  91: 129,  25: 130,
-   52: 131,  41: 132,  23: 133,  96: 134,  47: 135, 109: 136, 139: 137,  80: 138,   4: 139,  14: 140,
-  142: 141,  29: 142,  95: 143,  56: 144,  86: 145,  87: 146,  74: 148, 115: 149,  18: 150, 122: 151,
-  114: 152,  20: 153,  33: 154,  77: 155, 117: 156, 168: 157, 175: 158,  53: 159,  35: 160, 167: 161,
-  170: 162, 169: 163, 171: 165, 174: 167,  11: 168, 172: 170, 177: 171, 176: 172,  83: 173, 180: 174,
-  194: 176, 203: 178, 183: 179, 187: 180, 188: 181, 191: 182, 192: 183, 193: 184, 196: 187, 200: 188,
-  201: 190, 199: 191, 202: 192,
-}
+// A quest lives in TWO cache archives: the quest def (CONFIG archive 35,
+// dumped to config/quests/<id> - <name>.json — the client's quest list reads
+// these) and the quest-start-interface struct (CONFIG archive 26,
+// config/structs/<structId>.json). The link is slot id → struct id via enum
+// 2252; the quest↔slot pairing itself is derived below by matching the quest
+// def's name against struct key 845 (validated: reproduces the old hardcoded
+// Quests.java table 183/183 with staged exact → normalized → token matching).
 
 // Skill reqs occupy contiguous key pairs from 871. The next known field sits
 // at 895, so 12 pairs (871-894) is the hard ceiling before a write would
 // clobber a neighbouring key; the dump's real maximum is 10 pairs.
 const MAX_SKILL_REQ_PAIRS = 12
 
-const SLOT_TO_QUEST_ID: Record<number, number> = Object.fromEntries(
-  Object.entries(QUEST_ID_TO_SLOT).map(([questId, slotId]) => [slotId, Number(questId)])
-)
+// Struct keys owned by dedicated UI fields; everything else is surfaced (and
+// written back) through the raw extras table.
+function isManagedKey(key: number): boolean {
+  if (key === 691 || key === 845 || key === 846 || key === 847 || key === 850) return true
+  if (key >= 859 && key <= 870) return true                       // prereq slots
+  if (key >= 871 && key < 871 + MAX_SKILL_REQ_PAIRS * 2) return true // skill req pairs
+  if (key >= 948 && key <= 951) return true                       // journal texts
+  return false
+}
 
 // Module-level cache — invalidated when root handle reference changes
 let _cachedRoot: FileSystemDirectoryHandle | null = null
 let _slotToStruct: Record<number, number> = {}
 let _structCache = new Map<number, Record<string, unknown>>()
+let _questToSlot: Record<number, number> | null = null
 
 function maybeInvalidate(rootHandle: FileSystemDirectoryHandle) {
   if (_cachedRoot !== rootHandle) {
     _cachedRoot = rootHandle
     _slotToStruct = {}
     _structCache.clear()
+    _questToSlot = null
   }
 }
 
@@ -77,6 +70,98 @@ async function getStructValues(rootHandle: FileSystemDirectoryHandle, structId: 
   return values
 }
 
+// ---------------------------------------------------------------------------
+// Quest ↔ slot derivation (replaces the hardcoded Quests.java table)
+// ---------------------------------------------------------------------------
+
+function normName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/^(the|a)\s+/, '')
+    .replace(/[^a-z0-9]/g, '')
+    .replaceAll('ll', 'l')
+}
+
+function nameTokens(s: string): Set<string> {
+  const stripped = s.toLowerCase().replace(/^(the|a)\s+/, '')
+  return new Set(stripped.match(/[a-z0-9]+/g) ?? [])
+}
+
+function isSubset(a: Set<string>, b: Set<string>): boolean {
+  for (const t of a) if (!b.has(t)) return false
+  return true
+}
+
+async function getQuestToSlot(
+  questsHandle: FileSystemDirectoryHandle,
+  rootHandle: FileSystemDirectoryHandle,
+): Promise<Record<number, number>> {
+  maybeInvalidate(rootHandle)
+  if (_questToSlot) return _questToSlot
+
+  // Quest names straight from the dump's filenames ("<id> - <name>.json" is
+  // written from the def's name field, so no file reads are needed).
+  const questNames = new Map<number, string>()
+  for await (const handle of questsHandle.values()) {
+    if (handle.kind !== 'file') continue
+    const match = handle.name.match(/^(\d+) - (.+)\.json$/)
+    if (match) questNames.set(parseInt(match[1], 10), match[2])
+  }
+
+  const slotToStruct = await getSlotToStruct(rootHandle)
+  const slotNames = new Map<number, string>()
+  for (const [slot, structId] of Object.entries(slotToStruct)) {
+    try {
+      const values = await getStructValues(rootHandle, structId as number)
+      const name = values['845']
+      if (typeof name === 'string') slotNames.set(Number(slot), name)
+    } catch {
+      // struct missing from the dump — that slot just won't map
+    }
+  }
+
+  // Staged matching, each stage consuming its matches: exact name, then
+  // normalized (case / leading the-a / punctuation / ll→l), then a unique
+  // token-subset for the stragglers ("Forgettable Tale..." ⊂ full title).
+  const mapping: Record<number, number> = {}
+  const questsLeft = new Map(questNames)
+  const slotsLeft = new Map(slotNames)
+  const take = (questId: number, slot: number) => {
+    mapping[questId] = slot
+    questsLeft.delete(questId)
+    slotsLeft.delete(slot)
+  }
+
+  for (const pass of ['exact', 'norm'] as const) {
+    const index = new Map<string, number[]>()
+    for (const [qid, name] of questsLeft) {
+      const key = pass === 'exact' ? name : normName(name)
+      const list = index.get(key)
+      if (list) list.push(qid)
+      else index.set(key, [qid])
+    }
+    for (const [slot, name] of [...slotsLeft]) {
+      const key = pass === 'exact' ? name : normName(name)
+      const candidates = index.get(key) ?? []
+      if (candidates.length === 1 && questsLeft.has(candidates[0])) take(candidates[0], slot)
+    }
+  }
+  for (const [slot, name] of [...slotsLeft]) {
+    const st = nameTokens(name)
+    if (st.size === 0) continue
+    const candidates = [...questsLeft].filter(([, qn]) => {
+      const qt = nameTokens(qn)
+      return isSubset(st, qt) || isSubset(qt, st)
+    })
+    if (candidates.length === 1) take(candidates[0][0], slot)
+  }
+
+  _questToSlot = mapping
+  return mapping
+}
+
+// ---------------------------------------------------------------------------
+
 function decodeWorldTile(hash: number) {
   return {
     x: (hash >> 14) & 0x3fff,
@@ -109,10 +194,42 @@ function extractPrereqSlots(values: Record<string, unknown>): number[] {
   return slots
 }
 
+// Max level per skill over this struct's reqs plus its whole prereq tree
+// (slots → structs via enum 2252, cycle-safe).
+async function accumulateSkillReqs(
+  rootHandle: FileSystemDirectoryHandle,
+  slotId: number,
+): Promise<[number, number][]> {
+  const slotToStruct = await getSlotToStruct(rootHandle)
+  const best = new Map<number, number>()
+  const visited = new Set<number>()
+
+  async function visit(slot: number) {
+    if (visited.has(slot)) return
+    visited.add(slot)
+    const structId = slotToStruct[slot]
+    if (!structId) return
+    let values: Record<string, unknown>
+    try {
+      values = await getStructValues(rootHandle, structId)
+    } catch {
+      return
+    }
+    for (const [skill, level] of extractSkillReqs(values)) {
+      if ((best.get(skill) ?? 0) < level) best.set(skill, level)
+    }
+    for (const prereqSlot of extractPrereqSlots(values)) await visit(prereqSlot)
+  }
+
+  await visit(slotId)
+  return [...best.entries()].sort((a, b) => a[0] - b[0])
+}
+
 async function writeStruct(
   rootHandle: FileSystemDirectoryHandle,
   structId: number,
-  server: QuestServerData
+  server: QuestServerData,
+  questToSlot: Record<number, number>,
 ): Promise<void> {
   const structsHandle = await getStructsHandle(rootHandle)
   const fileHandle = await structsHandle.getFileHandle(`${structId}.json`)
@@ -125,6 +242,12 @@ async function writeStruct(
   if (server.startNpc >= 0) values['691'] = server.startNpc
   else delete values['691']
 
+  // Interface name + sort name
+  if (server.structName !== '') values['845'] = server.structName
+  else delete values['845']
+  if (server.structSortName !== '') values['846'] = server.structSortName
+  else delete values['846']
+
   // slotId
   values['847'] = server.slotId
 
@@ -136,7 +259,7 @@ async function writeStruct(
   // Prereq quest IDs → slot IDs stored in keys 859-870
   for (let key = 859; key <= 870; key++) delete values[String(key)]
   server.prereqQuestIds
-    .map((id) => QUEST_ID_TO_SLOT[id])
+    .map((id) => questToSlot[id])
     .filter((slot): slot is number => slot != null)
     .forEach((slot, i) => { values[String(859 + i)] = slot })
 
@@ -157,6 +280,30 @@ async function writeStruct(
     values[String(871 + i * 2)] = skill
     values[String(872 + i * 2)] = level
   })
+
+  // Journal texts (948-951) — absent when empty, like the dump
+  const journalKeys: [string, string][] = [
+    ['948', server.journal.startHint],
+    ['949', server.journal.requiredItems],
+    ['950', server.journal.enemiesToDefeat],
+    ['951', server.journal.rewards],
+  ]
+  for (const [key, text] of journalKeys) {
+    if (text !== '') values[key] = text
+    else delete values[key]
+  }
+
+  // Raw extras: the table owns every unmanaged key — drop the ones that were
+  // removed, write the current rows (numeric strings become numbers so ids
+  // stay ids).
+  for (const key of Object.keys(values)) {
+    if (!isManagedKey(Number(key))) delete values[key]
+  }
+  for (const [key, value] of server.extraValues) {
+    if (isManagedKey(key)) continue
+    values[String(key)] =
+      typeof value === 'string' && /^-?\d+$/.test(value.trim()) ? Number(value.trim()) : value
+  }
 
   json.values = values
   const writable = await fileHandle.createWritable()
@@ -187,7 +334,8 @@ const loader: CacheLoader = {
 
     try {
       const slotToStruct = await getSlotToStruct(rootHandle)
-      const slotId = QUEST_ID_TO_SLOT[quest.id as number]
+      const questToSlot = await getQuestToSlot(dirHandle, rootHandle)
+      const slotId = questToSlot[quest.id as number]
       if (slotId == null) return { quest, server: null }
 
       const structId = slotToStruct[slotId]
@@ -201,12 +349,42 @@ const loader: CacheLoader = {
       const startLocation = locHash != null ? decodeWorldTile(locHash) : { x: 0, y: 0, plane: 0 }
 
       const skillReqs = extractSkillReqs(values)
-      const prereqSlots = extractPrereqSlots(values)
-      const prereqQuestIds = prereqSlots
-        .map((slot) => SLOT_TO_QUEST_ID[slot])
+      const slotToQuest: Record<number, number> = {}
+      for (const [qid, slot] of Object.entries(questToSlot)) slotToQuest[slot] = Number(qid)
+      const prereqQuestIds = extractPrereqSlots(values)
+        .map((slot) => slotToQuest[slot])
         .filter((id): id is number => id != null)
 
-      const server: QuestServerData = { startNpc, startLocation, slotId: slotIdFromStruct, prereqQuestIds, skillReqs }
+      const journal = {
+        startHint: (values['948'] as string | undefined) ?? '',
+        requiredItems: (values['949'] as string | undefined) ?? '',
+        enemiesToDefeat: (values['950'] as string | undefined) ?? '',
+        rewards: (values['951'] as string | undefined) ?? '',
+      }
+
+      const extraValues: [number, string | number][] = Object.entries(values)
+        .filter(([key]) => !isManagedKey(Number(key)))
+        .map(([key, value]): [number, string | number] => [
+          Number(key),
+          typeof value === 'number' || typeof value === 'string' ? value : JSON.stringify(value),
+        ])
+        .sort((a, b) => a[0] - b[0])
+
+      const preReqSkillReqs = await accumulateSkillReqs(rootHandle, slotIdFromStruct >= 0 ? slotIdFromStruct : slotId)
+
+      const server: QuestServerData = {
+        startNpc,
+        startLocation,
+        slotId: slotIdFromStruct,
+        prereqQuestIds,
+        skillReqs,
+        structId,
+        structName: (values['845'] as string | undefined) ?? '',
+        structSortName: (values['846'] as string | undefined) ?? '',
+        journal,
+        extraValues,
+        preReqSkillReqs,
+      }
       return { quest, server }
     } catch {
       return { quest, server: null }
@@ -221,12 +399,9 @@ const loader: CacheLoader = {
     await writable.write(JSON.stringify(quest, null, 2))
     await writable.close()
 
-    if (server && _cachedRoot) {
-      const slotId = QUEST_ID_TO_SLOT[quest.id as number]
-      if (slotId != null) {
-        const structId = _slotToStruct[slotId]
-        if (structId) await writeStruct(_cachedRoot, structId, server)
-      }
+    if (server && _cachedRoot && server.structId) {
+      const questToSlot = await getQuestToSlot(dirHandle, _cachedRoot)
+      await writeStruct(_cachedRoot, server.structId, server, questToSlot)
     }
   },
 }

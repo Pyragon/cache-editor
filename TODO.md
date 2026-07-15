@@ -25,16 +25,6 @@
 
 - **Generate item icons from our own cache instead of itemdb.biz.** The current set (`public/icons/`, fetched by `scripts/download-icons.mjs`) is scraped from itemdb.biz, which renders from the *latest* RS cache — a number of icons have changed since rev 727, so ours are subtly wrong. The proper fix is rendering them ourselves the way the client builds inventory icons: render the item's model (`inventoryModelId`) with the item's 2D params (zoom2d, xan2d/yan2d/zan2d, xOffset2d/yOffset2d) into a 32×32 canvas — the Three.js model pipeline in ModelViewer already does most of the heavy lifting. Check darkan's icon/sprite rendering code for the exact camera math before porting (see CLAUDE.md reference-repo rules).
 
-## Quests
-
-Architecture note (investigated 2026-07-12): a quest lives in **two places** — the server-side quest JSON (`config/quests/<id> - <name>.json`) and the client-facing **cache struct** (`config/structs/<structId>.json`). Link: quest id → slot id (hardcoded `QUEST_ID_TO_SLOT`) → struct id (via enum `2252`, slot→struct). The viewer's "(cache)" sections edit the struct; the plain sections edit the quest JSON. The two hold overlapping/duplicated copies of the same data, and they can drift out of sync (confirmed: "Love Story" JSON lists 2 prereqs `[48,163]` but its struct only stores 1).
-
-- **Slot ID mapping is hardcoded** — `QUEST_ID_TO_SLOT` in `quests.ts` was extracted manually from `Quests.java`. Figure out if/how this mapping can be derived directly from the cache so it doesn't go stale.
-- **`_levelRequirements` (quest JSON) and struct skill-reqs (keys 871+) are the SAME data** (both `[skillId, level]` lists; confirmed identical on Love Story). The client reads the struct; the JSON field is a server mirror. Decide whether to keep both UI sections or merge into one that writes both locations on save.
-- **`_questPrerequisiteIds` (quest JSON, stores quest ids) and struct prereqs (keys 859–870, store slot ids) are the same concept, two encodings.** Same merge/reconcile decision. Also handle the drift case (JSON and struct disagreeing on count).
-- **`preReqSkillReqs` (accumulated from prereq tree)** was removed from the UI. May want to add it back as a read-only computed display to show total skill requirements including all prerequisites.
-- **Get the rest of quest structs within the editor to edit the quest start interface** — the struct has many more keys than the viewer currently surfaces (e.g. 845/846 name+sort, 848, 856, 898, 948–952 journal text / requirement descriptions / reward text). Expose the rest for editing.
-
 ## NPCs
 
 - **Model Translations table desync risk.** The table is positional — slot N of `modelTranslation` pairs with the Nth entry of `modelIds` (per the cache format, opcode 121). Two things to harden: (a) when the Model IDs comma-list is edited on an NPC that has translations, the `modelIds` and `modelTranslation` arrays are edited independently and can desync (wrong translation paired with wrong model, or length mismatch); (b) ideally the UI should present translations *joined* to their model row so they can't drift, rather than as a separate free-edit list. Verified the basic pages work post-redump, but this pairing logic is fiddly and was deferred.

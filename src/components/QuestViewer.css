@@ -534,3 +534,48 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Two-archive explainer under the quest header. */
+.quest-sources-note {
+  margin: 0 0 4px;
+  max-width: 900px;
+}
+
+/* Quest start interface (struct) section. */
+.quest-journal-names {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+  max-width: 900px;
+  margin-bottom: 10px;
+}
+
+.quest-journal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 900px;
+  margin-bottom: 10px;
+}
+
+.quest-journal-text {
+  resize: vertical;
+  min-height: 40px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px 10px;
+}
+
+.quest-computed-tag {
+  color: #7eb8ff;
+}
+
+.quest-computed-none {
+  font-size: 12px;
+  color: var(--text-dim);
+}
