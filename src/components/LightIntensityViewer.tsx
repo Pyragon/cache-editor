@@ -3,6 +3,8 @@ import type { LightIntensityData, LightIntensityDef } from '../loaders/config/li
 import { NumGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { FLICKER_TABLE } from './flickerTable'
+import { PARTICLE_FPS_DEFAULT, PARTICLE_FPS_OPTIONS } from './particleSim'
+import { useZoom } from './useZoom'
 import './LightIntensityViewer.css'
 
 // Waveform names per FlickeringEffect.applyEffect (darkan) — effect selects
@@ -15,6 +17,11 @@ const EFFECT_NAMES: [value: number, label: string][] = [
   [4, '4 — Strobe (on/off)'],
   [5, '5 — Triangle pulse'],
 ]
+
+// The particle previews' options plus 100 — the light preview is two cheap
+// canvas draws, so it can afford full-rate on high-refresh displays (the
+// actual ceiling is the display's requestAnimationFrame rate).
+const LIGHT_FPS_OPTIONS = [...PARTICLE_FPS_OPTIONS, 100]
 
 const NUM_FIELDS: NumFieldDef[] = [
   ['duration', 'Duration (speed)'],
@@ -53,6 +60,11 @@ export default function LightIntensityViewer({ data, onSave, onDirtyChange }: Pr
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const draftRef = useRef(draft)
   draftRef.current = draft
+  // Draw-rate cap (same options as the particle previews, own setting). The
+  // waveform is time-based, so skipping draws never slows the animation down.
+  const [fps, setFps] = useZoom('cache-editor:light-fps', LIGHT_FPS_OPTIONS, PARTICLE_FPS_DEFAULT)
+  const fpsRef = useRef(fps)
+  useEffect(() => { fpsRef.current = fps }, [fps])
 
   useEffect(() => {
     setDraft(data.light)
@@ -89,8 +101,11 @@ export default function LightIntensityViewer({ data, onSave, onDirtyChange }: Pr
     const toY = (v: number) => plotY + plotH - (Math.min(Math.max(v, 0), 2) / 2) * plotH
 
     let raf = 0
+    let lastDraw = 0
     function draw(now: number) {
       raf = requestAnimationFrame(draw)
+      if (now - lastDraw < 1000 / fpsRef.current) return
+      lastDraw = now
       const def = draftRef.current
       const frames = Math.floor(now / 20)
       const rotation = Math.floor((def.duration * frames) / 50) & 0x7ff
@@ -172,6 +187,21 @@ export default function LightIntensityViewer({ data, onSave, onDirtyChange }: Pr
         </p>
         <div className="light-preview-wrap">
           <canvas ref={canvasRef} width={640} height={180} className="light-preview-canvas" />
+        </div>
+        <div className="hit-zoom-bar">
+          <span className="hit-zoom-label">Preview FPS</span>
+          <div className="hit-zoom-buttons">
+            {LIGHT_FPS_OPTIONS.map((f) => (
+              <button
+                key={f}
+                type="button"
+                className={`zoom-btn${fps === f ? ' active' : ''}`}
+                onClick={() => setFps(f)}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
         </div>
       </section>
 
