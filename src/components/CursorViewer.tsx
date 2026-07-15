@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useZoom } from './useZoom'
 import { NumberInput } from './defFields'
 import type { CursorData, CursorDef } from '../loaders/config/cursors'
 import type { SpriteMeta } from '../loaders/sprites'
@@ -13,18 +14,11 @@ type Props = {
 
 const ZOOM_LEVELS = [1, 2, 4, 8]
 
-const ZOOM_STORAGE_KEY = 'cache-editor:cursor-zoom'
-
-function loadSavedZoom(): number {
-  const saved = Number(localStorage.getItem(ZOOM_STORAGE_KEY))
-  return ZOOM_LEVELS.includes(saved) ? saved : 1
-}
-
 export default function CursorViewer({ data, onSave, onDirtyChange }: Props) {
   const [draft, setDraft] = useState<CursorDef>(data.cursor)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
-  const [zoom, setZoom] = useState(loadSavedZoom)
+  const [zoom, setZoom] = useZoom('cache-editor:cursor-zoom', ZOOM_LEVELS, 1)
   const [sprite, setSprite] = useState<SpriteMeta | null>(null)
   const [spriteError, setSpriteError] = useState<string | null>(null)
   const [isPickingHotspot, setIsPickingHotspot] = useState(false)
@@ -279,7 +273,7 @@ export default function CursorViewer({ data, onSave, onDirtyChange }: Props) {
               key={z}
               type="button"
               className={`zoom-btn${zoom === z ? ' active' : ''}`}
-              onClick={() => { setZoom(z); localStorage.setItem(ZOOM_STORAGE_KEY, String(z)) }}
+              onClick={() => setZoom(z)}
             >
               {z}×
             </button>

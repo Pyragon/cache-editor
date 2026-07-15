@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useZoom } from './useZoom'
 import { NumberInput } from './defFields'
 import type { SpriteData, SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, imageDataFromFile, renderFrame } from './spriteRender'
@@ -37,7 +38,7 @@ function FrameCanvas({ meta, frameIndex, zoom }: { meta: SpriteMeta; frameIndex:
 // ---------------------------------------------------------------------------
 
 export default function SpriteViewer({ data, onSave, onDirtyChange }: Props) {
-  const [zoom, setZoom] = useState(4)
+  const [zoom, setZoom] = useZoom('cache-editor:sprite-zoom', ZOOM_LEVELS, 4)
   const [draft, setDraft] = useState<SpriteMeta>(data.meta)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -47,7 +48,6 @@ export default function SpriteViewer({ data, onSave, onDirtyChange }: Props) {
   const pendingFrameRef = useRef<number>(0)
 
   useEffect(() => {
-    setZoom(4)
     setDraft(data.meta)
     setIsDirty(false)
     setUploadError(null)

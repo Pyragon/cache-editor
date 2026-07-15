@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useZoom } from './useZoom'
 import type { BillboardData, BillboardDef } from '../loaders/billboards'
 import { NumGrid, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
@@ -9,6 +10,8 @@ type Props = {
   onSave: (data: BillboardData) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
 }
+
+const ZOOM_LEVELS = [1, 2, 4]
 
 const GENERAL_FIELDS: NumFieldDef[] = [
   ['materialId', 'Material ID'],
@@ -42,7 +45,7 @@ export default function BillboardViewer({ data, onSave, onDirtyChange }: Props) 
   const [draft, setDraft] = useState<BillboardDef>(data.def)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
-  const [zoom, setZoom] = useState(2)
+  const [zoom, setZoom] = useZoom('cache-editor:billboard-zoom', ZOOM_LEVELS, 2)
   const [materialUrl, setMaterialUrl] = useState<string | null>(null)
   const [usedBy, setUsedBy] = useState<number[] | null>(null)
 
@@ -114,7 +117,7 @@ export default function BillboardViewer({ data, onSave, onDirtyChange }: Props) 
       <div className="hit-zoom-bar">
         <span className="hit-zoom-label">Zoom</span>
         <div className="hit-zoom-buttons">
-          {[1, 2, 4].map((z) => (
+          {ZOOM_LEVELS.map((z) => (
             <button
               key={z}
               type="button"

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useZoom } from './useZoom'
 import type { HitbarData, HitbarDef } from '../loaders/config/hitbars'
 import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, averageSpriteColor, downloadSpritePng, imageDataFromFile, loadSpriteMeta, renderFrame, renderFrameToCanvas } from './spriteRender'
@@ -7,6 +8,8 @@ import type { PendingSprites } from '../loaders/spriteStore'
 import { NumberInput, NumGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import './HitbarViewer.css'
+
+const ZOOM_LEVELS = [1, 2, 4, 8]
 
 type Props = {
   data: HitbarData
@@ -69,7 +72,7 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [percent, setPercent] = useState(75)
-  const [zoom, setZoom] = useState(1)
+  const [zoom, setZoom] = useZoom('cache-editor:hitbar-zoom', ZOOM_LEVELS, 1)
   const [sprites, setSprites] = useState<Sprites>({ green: null, red: null, pGreen: null, pRed: null })
   const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -237,7 +240,7 @@ export default function HitbarViewer({ data, onSave, onDirtyChange }: Props) {
       <div className="hit-zoom-bar">
         <span className="hit-zoom-label">Zoom</span>
         <div className="hit-zoom-buttons">
-          {[1, 2, 4, 8].map((z) => (
+          {ZOOM_LEVELS.map((z) => (
             <button
               key={z}
               type="button"

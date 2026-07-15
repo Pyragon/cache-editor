@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useZoom } from './useZoom'
 import type { FontData, FontMetricsDef } from '../loaders/font_metrics'
 import { NumberInput } from './defFields'
 import { DEFAULT_IMPORT, frameToCanvas, loadFontFace, rasteriseFont } from './fontImport'
 import type { ImportOptions, ImportedFont } from './fontImport'
 import { nextFreeSpriteId } from '../loaders/spriteStore'
 import './FontViewer.css'
+
+const ZOOM_LEVELS = [1, 2, 4]
 
 type Props = {
   data: FontData
@@ -220,7 +223,7 @@ export default function FontViewer({ data, onSave, onDirtyChange }: Props) {
   const [isSaving, setIsSaving] = useState(false)
   const [sample, setSample] = useState(DEFAULT_SAMPLE)
   const [color, setColor] = useState('#ffffff')
-  const [zoom, setZoom] = useState(1)
+  const [zoom, setZoom] = useZoom('cache-editor:font-zoom', ZOOM_LEVELS, 1)
   const [showAll, setShowAll] = useState(false)
   const [bitmaps, setBitmaps] = useState<Map<number, ImageBitmap>>(new Map())
   const sampleRef = useRef<HTMLTextAreaElement>(null)
@@ -413,7 +416,7 @@ export default function FontViewer({ data, onSave, onDirtyChange }: Props) {
       <div className="hit-zoom-bar">
         <span className="hit-zoom-label">Zoom</span>
         <div className="hit-zoom-buttons">
-          {[1, 2, 4].map((z) => (
+          {ZOOM_LEVELS.map((z) => (
             <button key={z} type="button" className={`zoom-btn${zoom === z ? ' active' : ''}`} onClick={() => setZoom(z)}>
               {z}×
             </button>

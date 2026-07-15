@@ -1,5 +1,6 @@
 import { NumberInput } from './defFields'
 import { useEffect, useRef, useState } from 'react'
+import { useZoom } from './useZoom'
 import type { MapSpriteData, MapSpriteDef } from '../loaders/config/map_sprites'
 import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, imageDataFromFile, renderFrame } from './spriteRender'
@@ -13,13 +14,6 @@ type Props = {
 
 const ZOOM_LEVELS = [1, 2, 4, 8]
 
-const ZOOM_STORAGE_KEY = 'cache-editor:map-sprite-zoom'
-
-function loadSavedZoom(): number {
-  const saved = Number(localStorage.getItem(ZOOM_STORAGE_KEY))
-  return ZOOM_LEVELS.includes(saved) ? saved : 1
-}
-
 function rgbIntToHex(rgb: number): string {
   return `#${(rgb & 0xffffff).toString(16).padStart(6, '0')}`
 }
@@ -32,7 +26,7 @@ export default function MapSpriteViewer({ data, onSave, onDirtyChange }: Props) 
   const [draft, setDraft] = useState<MapSpriteDef>(data.mapSprite)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
-  const [zoom, setZoom] = useState(loadSavedZoom)
+  const [zoom, setZoom] = useZoom('cache-editor:map-sprite-zoom', ZOOM_LEVELS, 1)
   const [sprite, setSprite] = useState<SpriteMeta | null>(null)
   const [spriteError, setSpriteError] = useState<string | null>(null)
   const [isSpriteDirty, setIsSpriteDirty] = useState(false)
@@ -224,7 +218,7 @@ export default function MapSpriteViewer({ data, onSave, onDirtyChange }: Props) 
               key={z}
               type="button"
               className={`zoom-btn${zoom === z ? ' active' : ''}`}
-              onClick={() => { setZoom(z); localStorage.setItem(ZOOM_STORAGE_KEY, String(z)) }}
+              onClick={() => setZoom(z)}
             >
               {z}×
             </button>

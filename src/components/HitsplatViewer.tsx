@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useZoom } from './useZoom'
 import type { HitsplatData, HitsplatDef } from '../loaders/config/hitsplats'
 import type { SpriteMeta } from '../loaders/sprites'
 import { applyImageToMeta, downloadSpritePng, imageDataFromFile, loadSpriteMeta, renderFrame, renderFrameToCanvas } from './spriteRender'
@@ -9,6 +10,8 @@ import type { CacheFont } from './fontRender'
 import { NumberInput, NumGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import './HitbarViewer.css'
+
+const ZOOM_LEVELS = [1, 2, 4, 8]
 
 type Props = {
   data: HitsplatData
@@ -77,7 +80,7 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [damage, setDamage] = useState(497)
-  const [zoom, setZoom] = useState(1)
+  const [zoom, setZoom] = useZoom('cache-editor:hitsplat-zoom', ZOOM_LEVELS, 1)
   const [sprites, setSprites] = useState<Sprites>({ leftCap: null, innerLeft: null, middleFill: null, rightCap: null })
   const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -305,7 +308,7 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
       <div className="hit-zoom-bar">
         <span className="hit-zoom-label">Zoom</span>
         <div className="hit-zoom-buttons">
-          {[1, 2, 4, 8].map((z) => (
+          {ZOOM_LEVELS.map((z) => (
             <button
               key={z}
               type="button"
