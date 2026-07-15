@@ -11,7 +11,9 @@ import type { SpriteData } from './loaders/sprites'
 import ModelViewer from './components/ModelViewer'
 import type { ModelData } from './loaders/models'
 import TextureViewer from './components/TextureViewer'
+import ParticleViewer from './components/ParticleViewer'
 import type { TextureData } from './loaders/textures'
+import type { ParticleData } from './loaders/particles'
 import NativeLibrariesViewer from './components/NativeLibrariesViewer'
 import type { NativeLibrariesData } from './loaders/native_libraries'
 import EnumViewer from './components/EnumViewer'
@@ -55,6 +57,7 @@ import type { FontData } from './loaders/font_metrics'
 import QuickChatViewer from './components/QuickChatViewer'
 import type { QuickChatData } from './loaders/quick_chat'
 import { useConfirm } from './components/useConfirm'
+import { WriteCapture, downloadCaptured, dropToDirectoryHandle } from './loaders/dropFs'
 
 type QuestContent = { quest: QuestData; server: QuestServerData | null }
 import './App.css'
@@ -77,6 +80,7 @@ const SPECIALIZED_ENTRIES = new Set([
   'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
+  'particles',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -84,6 +88,7 @@ const SPECIALIZED_ENTRIES = new Set([
 const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
   'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics',
+  'particles',
 ])
 
 function unavailableReason(name: string): string {
@@ -148,6 +153,42 @@ const EMPTY_ENTRIES: Record<string, string> = {
   config_sun: 'No data — the sun index is empty in this cache (rev 727 ships no sun definitions).',
 }
 
+// Add / Remove / Clone write to disk straight away rather than going through
+// saveItem, so unlike an edit they can't be turned into a download: Remove has no
+// browser API at all outside Chromium, and a created file wouldn't be on disk for the
+// item list to read back.
+// Shown in every "that isn't a cache folder" modal. The unpacked cache isn't something
+// you download — it's produced by cryogen's CacheBuilder — and that's the bit people
+// get stuck on, so it gets spelled out rather than assumed.
+const UnpackedFolderHelp = () => (
+  <>
+    <p className="folder-help-para">
+      The editor works against an <strong>unpacked</strong> cache: a folder of folders, one per cache
+      index. It isn't the packed cache (<code>main_file_cache.dat2</code> and friends) and it isn't a
+      download — you generate it yourself.
+    </p>
+    <p className="folder-help-para">
+      Run <strong><code>CacheBuilder</code></strong> in the cryogen repo. It reads your packed cache and
+      writes the unpacked one out to the path in <code>CacheBuilder.UNPACKED_PATH</code>:
+    </p>
+    <pre className="folder-help-tree">{`cryogen-cache/
+├── packed/            (the .dat2 / .idx files CacheBuilder reads)
+└── unpacked/          ← open this
+    ├── items/
+    ├── models/
+    ├── particles/
+    ├── textures/
+    └── …`}</pre>
+    <p className="folder-help-para">
+      You can pick either <code>unpacked/</code> itself or its parent — if the folder you choose contains
+      an <code>unpacked/</code> subfolder, the editor steps into it for you.
+    </p>
+  </>
+)
+
+const CRUD_UNAVAILABLE =
+  'Not available in a dragged-in folder — this browser can only read it. Editing an existing item still works (it downloads).'
+
 async function readCacheDir(dirHandle: FileSystemDirectoryHandle): Promise<CacheEntry[]> {
   const entries: CacheEntry[] = []
   let entryId = 1
@@ -175,7 +216,18 @@ function App() {
   const [cacheHandle, setCacheHandle] = useState<FileSystemDirectoryHandle | null>(null)
   const [entries, setEntries] = useState<CacheEntry[]>([])
   const [dirName, setDirName] = useState<string | null>(null)
-  const [cacheError, setCacheError] = useState<string | null>(null)
+
+  // Firefox has no folder picker, but it can read a folder that's dragged in. Such a
+  // session can't write back, so saves download instead — `isDownloadMode` is what the
+  // save bars and the banner key off.
+  const canPickFolder = typeof window.showDirectoryPicker === 'function'
+  const [isDownloadMode, setIsDownloadMode] = useState(false)
+  const [isDragging, setIsDragging] = useState(false)
+  /** Non-null while a chosen folder is being scanned, before the sidebar exists. */
+  const [openingStage, setOpeningStage] = useState<string | null>(null)
+  const [downloadNotice, setDownloadNotice] = useState('')
+  const writeCapture = useRef(new WriteCapture())
+
   const [selectedEntryId, setSelectedEntryId] = useState<number | null>(null)
   const [activeItems, setActiveItems] = useState<LoadedItem[]>([])
   const [activeContent, setActiveContent] = useState<unknown>(null)
@@ -235,6 +287,10 @@ function App() {
 
   const textureContent = (selectedEntry?.name === 'textures' || selectedEntry?.name === 'texture_definitions') && selectedItemContent != null
     ? selectedItemContent as TextureData
+    : null
+
+  const particleContent = selectedEntry?.name === 'particles' && selectedItemContent != null
+    ? selectedItemContent as ParticleData
     : null
 
   const enumContent = selectedEntry?.name === 'enums' && selectedItemContent != null
@@ -384,6 +440,16 @@ function App() {
     const entryHandle = await resolveEntryHandle(cacheHandle, getEntryPath(selectedEntry.name))
     if (!entryHandle) return
     await loader.saveItem(entryHandle, selectedItem, data)
+
+    // In a dropped (Firefox) session nothing reached disk — the shim collected the
+    // bytes instead. Hand them over as a download; several files become one zip whose
+    // paths mirror the cache, so a texture save (which writes both
+    // texture_definitions/<id>.json and textures/<id>/<id>.json) still lands correctly.
+    if (writeCapture.current.size > 0) {
+      const files = writeCapture.current.take()
+      setDownloadNotice(await downloadCaptured(files, `${selectedEntry.name}-${selectedItem.id}`))
+    }
+
     if (selectedEntry.name === 'config_quests') {
       setSelectedItemContent(data as QuestContent)
     } else {
@@ -561,11 +627,27 @@ function App() {
     if (cacheHandle) await loadEntryItems(cacheHandle, entry, version)
   }
 
-  async function handleOpenCache() {
-    try {
-      const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
-      setCacheError(null)
+  // Folder problems are modal rather than a line of text in the sidebar: they always
+  // mean the same thing (this isn't an unpacked cache), and the explanation of what one
+  // is doesn't fit on a line. Not awaited, so the loading overlay can clear behind it.
+  function showFolderProblem(title: string, lead: string) {
+    void confirmDialog(
+      <>
+        <p className="folder-help-lead">{lead}</p>
+        <UnpackedFolderHelp />
+      </>,
+      { title, acknowledge: true, confirmLabel: 'Got it' },
+    )
+  }
 
+  // Everything past the picker is shared by both routes: the real handle and the
+  // dropped-folder shim expose the same interface.
+  async function adoptCacheRoot(dirHandle: FileSystemDirectoryHandle) {
+    // Resolving the ~50 entry folders takes a beat (longer over the drag-and-drop
+    // shim, which reads a directory at a time), and until it finishes the sidebar is
+    // still empty — so cover the whole scan rather than leaving the UI looking dead.
+    setOpeningStage('Opening cache folder…')
+    try {
       let targetHandle = dirHandle
       try {
         targetHandle = await dirHandle.getDirectoryHandle('unpacked')
@@ -575,13 +657,26 @@ function App() {
 
       for await (const handle of targetHandle.values()) {
         if (handle.kind === 'file') {
-          setCacheError('Please open your unpacked cache folder — the selected folder contains files, not just cache entries.')
+          showFolderProblem(
+            'That doesn\'t look like a cache folder',
+            `“${targetHandle.name}” has loose files in it. An unpacked cache contains only folders — one per cache index.`,
+          )
           return
         }
       }
 
+      setOpeningStage('Reading cache entries…')
       const loaded = await readCacheDir(targetHandle)
-      if (loaded.length === 0) return
+
+      // Previously a silent return: you'd pick the wrong folder and simply nothing
+      // would happen, with no clue why.
+      if (!loaded.some((e) => e.available)) {
+        showFolderProblem(
+          'No cache entries in that folder',
+          `Nothing in “${targetHandle.name}” matches a known cache index, so there's nothing to edit.`,
+        )
+        return
+      }
 
       const version = ++loadVersion.current
       setCacheHandle(targetHandle)
@@ -594,24 +689,178 @@ function App() {
 
       const first = loaded.find((e) => e.available)
       if (!first) return
+
+      // From here the sidebar is populated and the content panel's own "Loading…"
+      // takes over the item stream, so the overlay's job is done.
       setSelectedEntryId(first.id)
       setIsLoading(true)
       setLoadCount(0)
+      setOpeningStage(null)
       await loadEntryItems(targetHandle, first, version)
-    } catch {
-      // user cancelled
+      return
+    } finally {
+      setOpeningStage(null)
+    }
+  }
+
+  async function handleDropCache(e: React.DragEvent) {
+    e.preventDefault()
+    setIsDragging(false)
+    if (canPickFolder) return
+
+    const item = e.dataTransfer.items[0]
+    if (!item) return
+
+    const root = dropToDirectoryHandle(item, writeCapture.current)
+    if (!root) {
+      showFolderProblem(
+        'That wasn\'t a folder',
+        'Drag the unpacked cache folder itself, not a file or a selection of files from inside it.',
+      )
+      return
+    }
+
+    setIsDownloadMode(true)
+    try {
+      await adoptCacheRoot(root)
+    } catch (err) {
+      showFolderProblem(
+        'Couldn\'t read that folder',
+        err instanceof Error ? err.message : 'The folder couldn\'t be read.',
+      )
+    }
+  }
+
+  // Tracking the drag overlay on the app div doesn't work: dragenter/dragleave fire
+  // for every child the cursor crosses, and dragging back OUT of the window doesn't
+  // reliably fire dragleave on the div at all — so the overlay would get stuck on.
+  // Counting enters against leaves at the window level is the reliable way, with
+  // dragend/drop forcing it back to zero in case a leave goes missing.
+  useEffect(() => {
+    if (canPickFolder) return
+
+    let depth = 0
+    const show = () => setIsDragging(true)
+    const reset = () => {
+      depth = 0
+      setIsDragging(false)
+    }
+
+    const onEnter = (e: DragEvent) => {
+      e.preventDefault()
+      depth++
+      show()
+    }
+    // dragover must be prevented or the browser refuses the drop and opens the file
+    const onOver = (e: DragEvent) => e.preventDefault()
+    const onLeave = () => {
+      depth = Math.max(0, depth - 1)
+      if (depth === 0) setIsDragging(false)
+    }
+
+    // Also swallow a drop that lands outside the app div — otherwise the browser
+    // navigates away and opens the dropped folder.
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault()
+      reset()
+    }
+
+    window.addEventListener('dragenter', onEnter)
+    window.addEventListener('dragover', onOver)
+    window.addEventListener('dragleave', onLeave)
+    window.addEventListener('drop', onDrop)
+    window.addEventListener('dragend', reset)
+
+    return () => {
+      window.removeEventListener('dragenter', onEnter)
+      window.removeEventListener('dragover', onOver)
+      window.removeEventListener('dragleave', onLeave)
+      window.removeEventListener('drop', onDrop)
+      window.removeEventListener('dragend', reset)
+    }
+  }, [canPickFolder])
+
+  async function handleOpenCache() {
+    // The File System Access API is Chromium-only (Chrome, Edge, Brave, Opera — on
+    // Windows, Linux and macOS alike). Firefox doesn't implement it, and without this
+    // check the missing function threw a TypeError that landed in the "user cancelled"
+    // catch below, so the button silently did nothing. Firefox can still READ a folder
+    // if it's dragged in, so point it that way rather than turning it away.
+    if (!canPickFolder) {
+      void confirmDialog(
+        <>
+          <p className="folder-help-lead">
+            This browser has no folder picker. That needs the File System Access API, which only Chromium
+            browsers implement — Chrome, Edge, Brave and Opera, on Linux, macOS and Windows alike.
+          </p>
+          <p className="folder-help-para">
+            You can still <strong>drag your unpacked cache folder onto this window</strong>. Everything is
+            browsable that way, but saves will <strong>download</strong> the changed files instead of writing
+            them back, because Firefox has no way to write into a folder you picked.
+          </p>
+          <UnpackedFolderHelp />
+        </>,
+        { title: 'Drag the folder in instead', acknowledge: true, confirmLabel: 'Got it' },
+      )
+      return
+    }
+
+    try {
+      await adoptCacheRoot(await window.showDirectoryPicker!({ mode: 'readwrite' }))
+    } catch (e) {
+      // Dismissing the picker throws AbortError — that's not a failure. Anything
+      // else is, and used to be swallowed here.
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      showFolderProblem(
+        'Couldn\'t open that folder',
+        e instanceof Error ? e.message : 'The folder couldn\'t be opened.',
+      )
     }
   }
 
   return (
-    <div id="app">
+    <div
+      id="app"
+      data-download-mode={isDownloadMode ? 'true' : undefined}
+      onDrop={handleDropCache}
+    >
+      {isDragging && !canPickFolder && (
+        <div className="drop-overlay">
+          <p>Drop your <strong>unpacked</strong> cache folder here</p>
+        </div>
+      )}
+
+      {openingStage && (
+        <div className="loading-overlay" role="status" aria-live="polite">
+          <div className="loading-overlay-body">
+            <span className="loading-spinner" aria-hidden="true" />
+            <p className="loading-overlay-stage">{openingStage}</p>
+            <p className="loading-overlay-hint">
+              A full cache is around a million files, so the first scan can take a moment.
+            </p>
+          </div>
+        </div>
+      )}
+
       <aside id="sidebar">
         <div className="sidebar-header">
           <h1>Cryo Cache Editor</h1>
           <button type="button" className="open-cache-btn" onClick={handleOpenCache}>
-            {dirName ? `📁 ${dirName}` : 'Open Cache'}
+            {dirName ? `📁 ${dirName}` : canPickFolder ? 'Open Cache' : 'Drag your cache folder in'}
           </button>
-          {cacheError && <p className="cache-error">{cacheError}</p>}
+
+          {isDownloadMode && (
+            <p className="download-mode-note">
+              Read-only session — this browser can't write to the folder. Saves will
+              download the changed files instead.
+            </p>
+          )}
+          {downloadNotice && (
+            <p className="download-notice">
+              {downloadNotice}
+              <button type="button" className="download-notice-close" onClick={() => setDownloadNotice('')}>×</button>
+            </p>
+          )}
         </div>
         {entries.length === 0 ? (
           <p className="sidebar-empty">Open a cache folder to begin.</p>
@@ -706,7 +955,8 @@ function App() {
                 <button
                   type="button"
                   className="panel-action-btn"
-                  disabled={!currentLoader?.createItem}
+                  disabled={!currentLoader?.createItem || isDownloadMode}
+                  title={isDownloadMode ? CRUD_UNAVAILABLE : undefined}
                   onClick={handleAddItem}
                 >
                   Add
@@ -714,7 +964,8 @@ function App() {
                 <button
                   type="button"
                   className="panel-action-btn"
-                  disabled={!currentLoader?.deleteItem || !selectedItem}
+                  disabled={!currentLoader?.deleteItem || !selectedItem || isDownloadMode}
+                  title={isDownloadMode ? CRUD_UNAVAILABLE : undefined}
                   onClick={handleRemoveItem}
                 >
                   Remove
@@ -722,7 +973,8 @@ function App() {
                 <button
                   type="button"
                   className="panel-action-btn"
-                  disabled={!currentLoader?.cloneItem || !selectedItem}
+                  disabled={!currentLoader?.cloneItem || !selectedItem || isDownloadMode}
+                  title={isDownloadMode ? CRUD_UNAVAILABLE : undefined}
                   onClick={handleCloneItem}
                 >
                   Clone
@@ -798,6 +1050,8 @@ function App() {
                 ? <ModelViewer data={modelContent} />
                 : textureContent != null
                 ? <TextureViewer data={textureContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : particleContent != null
+                ? <ParticleViewer data={particleContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : enumContent != null
                 ? <EnumViewer data={enumContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : cursorContent != null
