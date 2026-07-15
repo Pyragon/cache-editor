@@ -9,7 +9,48 @@ import type { Effector } from './particleSim'
 import { useZoom } from './useZoom'
 import './ModelViewer.css'
 
-type Props = { data: ModelData }
+// An item's 2D display params (ItemDefinitions), applied as an "item pose":
+// how the client renders this model as an inventory icon. Rotations are in
+// 2048ths of a circle, resizes in 128ths, zoom is the camera distance.
+export type ModelDisplayParams = {
+  label: string
+  zoom: number
+  rotationX: number
+  rotationY: number
+  rotationZ: number
+  offsetX: number
+  offsetY: number
+  resizeX: number
+  resizeY: number
+  resizeZ: number
+  /** Lighting params (client: createMeshRasterizer(…, 64 + ambient, 768 + contrast·5)). */
+  ambient: number
+  contrast: number
+  /** Paired HSL16 face recolours (client recolour(from, to) on the icon mesh). */
+  recolorFrom: number[]
+  recolorTo: number[]
+  /** Paired texture swaps (client retexture(from, to) on the icon mesh). */
+  retextureFrom: number[]
+  retextureTo: number[]
+  /** Swap-target renders + scroll speeds, loaded by the opener — the model's
+      own loader only fetches textures the mesh itself references. */
+  retextureBlobs?: Map<number, Blob>
+  retextureSpeeds?: Map<number, { u: number; v: number }>
+}
+
+// The client projects icons through a 512-focal / 32px-tall viewport
+// (ItemDefinitions.getSprite → method6531(16, 16, 512, 512, ...)), i.e. a
+// near-orthographic 2·atan(16/512) ≈ 3.6° vertical FOV.
+const ICON_FOV = 2 * Math.atan(16 / 512) * (180 / Math.PI)
+
+// The palette RGB is a display (sRGB) value, but three's renderer works in
+// linear space and gamma-encodes on output — vertex colours fed in as-is get
+// double-encoded and wash out (~a whole gamma too bright vs the client).
+function srgbToLinear(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+}
+
+type Props = { data: ModelData; display?: ModelDisplayParams | null }
 
 // Per-particle size, tint and alpha need a shader — THREE.Points only supports a
 // uniform size. `uScale` converts a world-space diameter to gl_PointSize pixels.
@@ -109,10 +150,11 @@ function jagexNormalSpace(
   return space
 }
 
-export default function ModelViewer({ data }: Props) {
+export default function ModelViewer({ data, display }: Props) {
   const mountRef = useRef<HTMLDivElement>(null)
   const matsRef = useRef<THREE.MeshBasicMaterial[]>([])
   const [wireframe, setWireframe] = useState(false)
+  const [applyPose, setApplyPose] = useState(true)
   const [particles, setParticles] = useState(true)
   const particlesRef = useRef(true)
   const particleObjectsRef = useRef<THREE.Points[]>([])
@@ -125,6 +167,9 @@ export default function ModelViewer({ data }: Props) {
   useEffect(() => { particleFpsRef.current = particleFps }, [particleFps])
 
   const emitterCount = data.emitters?.filter((e) => data.emitterProducers.has(e.producerId)).length ?? 0
+
+  // A fresh navigation with display params starts posed.
+  useEffect(() => { setApplyPose(true) }, [display])
 
   useEffect(() => {
     const mount = mountRef.current
@@ -146,6 +191,68 @@ export default function ModelViewer({ data }: Props) {
     const { vertexCount, faceCount, vertexX, vertexY, vertexZ,
             triangleX, triangleY, triangleZ, faceColor,
             faceTextures, texturePos, textureP, textureM, textureN } = data
+
+    // Item pose (inventory-icon display params), resolved up front because the
+    // item's recolours dye the face colours during the geometry build below.
+    const pose = display && applyPose ? display : null
+    const recolor = new Map<number, number>()
+    if (pose) pose.recolorFrom.forEach((from, i) => recolor.set(from & 0xffff, pose.recolorTo[i] & 0xffff))
+    const faceHsl = (f: number) => {
+      const hsl = faceColor[f] & 0xffff
+      return recolor.get(hsl) ?? hsl
+    }
+    // Texture swaps ride the same toggle; swapped-in renders come from the pose
+    // (retextureBlobs) since data.textures only holds the mesh's own ids.
+    const retexture = new Map<number, number>()
+    if (pose) pose.retextureFrom.forEach((from, i) => retexture.set(from, pose.retextureTo[i]))
+    const textureBlob = (id: number): Blob | undefined =>
+      pose?.retextureBlobs?.get(id) ?? data.textures.get(id)
+
+    // Icon lighting (client MeshRasterizer): the base lightness is scaled by
+    // ambient/128 (64 + item ambient — the default *halves* it), then each
+    // corner is modulated by 1 + cos·(768 / (768 + 5·contrast)) with cos the
+    // averaged vertex normal against the icon light direction (−50, −10, −50).
+    // Baked in model space, exactly like the client (the pose matrix comes later).
+    let normSumX: Float32Array | null = null
+    let normSumY: Float32Array | null = null
+    let normSumZ: Float32Array | null = null
+    let normCount: Uint16Array | null = null
+    if (pose) {
+      normSumX = new Float32Array(vertexCount)
+      normSumY = new Float32Array(vertexCount)
+      normSumZ = new Float32Array(vertexCount)
+      normCount = new Uint16Array(vertexCount)
+      for (let f = 0; f < faceCount; f++) {
+        if (data.faceType && data.faceType[f] === 2) continue
+        const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
+        if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount)
+          continue
+        const e1x = vertexX[ib] - vertexX[ia], e1y = vertexY[ib] - vertexY[ia], e1z = vertexZ[ib] - vertexZ[ia]
+        const e2x = vertexX[ic] - vertexX[ia], e2y = vertexY[ic] - vertexY[ia], e2z = vertexZ[ic] - vertexZ[ia]
+        const nx = e1y * e2z - e2y * e1z
+        const ny = e1z * e2x - e2z * e1x
+        const nz = e1x * e2y - e2x * e1y
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz)
+        if (len === 0) continue
+        for (const v of [ia, ib, ic]) {
+          normSumX[v] += nx / len
+          normSumY[v] += ny / len
+          normSumZ[v] += nz / len
+          normCount[v]++
+        }
+      }
+    }
+    const LIGHT_LEN = Math.sqrt(50 * 50 + 10 * 10 + 50 * 50)
+    const LX = -50 / LIGHT_LEN, LY = -10 / LIGHT_LEN, LZ = -50 / LIGHT_LEN
+    const ambientScale = 64 + (pose?.ambient ?? 0)
+    const diffuseScale = 768 / (768 + 5 * (pose?.contrast ?? 0))
+    // Client method13538: rescale the HSL16's 7-bit lightness by ambient/128.
+    const litHsl = (hsl: number) => {
+      let lum = ((hsl & 0x7f) * ambientScale) >> 7
+      if (lum < 2) lum = 2
+      else if (lum > 126) lum = 126
+      return (hsl & 0xff80) + lum
+    }
 
     // Bucket faces by texture id; -1 = flat face colour. Textures whose PNG
     // is missing from the cache fall back to the colour bucket.
@@ -170,7 +277,8 @@ export default function ModelViewer({ data }: Props) {
       if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount)
         continue
       let tex = faceTextures?.[f] ?? -1
-      if (tex >= 0 && !data.textures.has(tex)) tex = -1
+      if (tex >= 0) tex = retexture.get(tex) ?? tex
+      if (tex >= 0 && !textureBlob(tex)) tex = -1
       const bucket = buckets.get(tex)
       if (bucket) bucket.push(f)
       else buckets.set(tex, [f])
@@ -416,11 +524,13 @@ export default function ModelViewer({ data }: Props) {
       for (const f of faces) {
         const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
 
-        // OSRS: Y is down, and models face away from the default camera — negate
-        // Y to flip upright and X/Z to spin 180° so the model faces the viewer.
-        const ax = -vertexX[ia], ay = -vertexY[ia], az = -vertexZ[ia]
-        const bx = -vertexX[ib], by = -vertexY[ib], bz = -vertexZ[ib]
-        const cx = -vertexX[ic], cy = -vertexY[ic], cz = -vertexZ[ic]
+        // RS → Three is (x, −y, −z): a pure 180° rotation about X. Y-down flips
+        // upright and the client's +z view direction becomes our −z, so the
+        // default camera sees exactly what the client camera sees. (Negating x
+        // as well — the old mapping — mirrors every model left-to-right.)
+        const ax = vertexX[ia], ay = -vertexY[ia], az = -vertexZ[ia]
+        const bx = vertexX[ib], by = -vertexY[ib], bz = -vertexZ[ib]
+        const cx = vertexX[ic], cy = -vertexY[ic], cz = -vertexZ[ic]
 
         const base = vert * 3
         positions[base]     = ax; positions[base + 1] = ay; positions[base + 2] = az
@@ -433,13 +543,34 @@ export default function ModelViewer({ data }: Props) {
 
         // Face colour tints the material texture — the dumped material images
         // are greyscale detail maps and the client multiplies them by face HSL.
-        const rgb = hslToRgb(faceColor[f])
-        const r = ((rgb >> 16) & 0xFF) / 255
-        const g = ((rgb >> 8)  & 0xFF) / 255
-        const b =  (rgb        & 0xFF) / 255
-        colors[base]     = r; colors[base + 1] = g; colors[base + 2] = b
-        colors[base + 3] = r; colors[base + 4] = g; colors[base + 5] = b
-        colors[base + 6] = r; colors[base + 7] = g; colors[base + 8] = b
+        if (pose) {
+          // Icon lighting: ambient-scaled base, per-corner diffuse from the
+          // smooth vertex normals (client vertex-lit path in MeshRasterizer).
+          const rgb = hslToRgb(litHsl(faceHsl(f)))
+          const br = (rgb >> 16) & 0xFF
+          const bg = (rgb >> 8)  & 0xFF
+          const bb =  rgb        & 0xFF
+          const cornerIdx = [ia, ib, ic]
+          for (let i = 0; i < 3; i++) {
+            const v = cornerIdx[i]
+            const n = normCount![v]
+            const cos = n > 0
+              ? (LX * normSumX![v] + LY * normSumY![v] + LZ * normSumZ![v]) / n
+              : 0
+            const f30 = 1 + cos * diffuseScale
+            colors[base + i * 3]     = srgbToLinear(Math.min(Math.max((br * f30) / 255, 0), 1))
+            colors[base + i * 3 + 1] = srgbToLinear(Math.min(Math.max((bg * f30) / 255, 0), 1))
+            colors[base + i * 3 + 2] = srgbToLinear(Math.min(Math.max((bb * f30) / 255, 0), 1))
+          }
+        } else {
+          const rgb = hslToRgb(faceHsl(f))
+          const r = srgbToLinear(((rgb >> 16) & 0xFF) / 255)
+          const g = srgbToLinear(((rgb >> 8)  & 0xFF) / 255)
+          const b = srgbToLinear((rgb         & 0xFF) / 255)
+          colors[base]     = r; colors[base + 1] = g; colors[base + 2] = b
+          colors[base + 3] = r; colors[base + 4] = g; colors[base + 5] = b
+          colors[base + 6] = r; colors[base + 7] = g; colors[base + 8] = b
+        }
 
         if (tex >= 0) writeUVs(f, ia, ib, ic, vert * 2)
 
@@ -472,8 +603,8 @@ export default function ModelViewer({ data }: Props) {
       materials.push(mat)
 
       if (g.tex >= 0) {
-        const blob = data.textures.get(g.tex)!
-        const speed = data.textureSpeeds.get(g.tex)
+        const blob = textureBlob(g.tex)!
+        const speed = pose?.retextureSpeeds?.get(g.tex) ?? data.textureSpeeds.get(g.tex)
         createImageBitmap(blob).then((bitmap) => {
           if (disposed) { bitmap.close(); return }
           const texture = new THREE.Texture(bitmap)
@@ -491,7 +622,11 @@ export default function ModelViewer({ data }: Props) {
 
     matsRef.current = materials
     const mesh = new THREE.Mesh(geo, materials)
-    scene.add(mesh)
+    // The pose group lets item display params rotate/scale around the mesh's
+    // centred pivot (mesh.position carries the centring offset).
+    const poseGroup = new THREE.Group()
+    poseGroup.add(mesh)
+    scene.add(poseGroup)
 
     // --- Billboards: camera-facing sprites at their host face's centroid,
     // sized size2d×2 by size3d×2 world units (sizes are half-extents), tinted
@@ -509,7 +644,7 @@ export default function ModelViewer({ data }: Props) {
         if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount) continue
 
         const smat = new THREE.SpriteMaterial({
-          color: def.blendType === 0 ? hslToRgb(faceColor[bb.face]) : 0xffffff,
+          color: def.blendType === 0 ? hslToRgb(faceHsl(bb.face)) : 0xffffff,
           transparent: true,
           depthWrite: false,
           blending: def.shape === 2 ? THREE.AdditiveBlending : THREE.NormalBlending,
@@ -517,7 +652,7 @@ export default function ModelViewer({ data }: Props) {
         spriteMaterials.push(smat)
         const sprite = new THREE.Sprite(smat)
         sprite.position.set(
-          -(vertexX[ia] + vertexX[ib] + vertexX[ic]) / 3,
+          (vertexX[ia] + vertexX[ib] + vertexX[ic]) / 3,
           -(vertexY[ia] + vertexY[ib] + vertexY[ic]) / 3,
           -(vertexZ[ia] + vertexZ[ib] + vertexZ[ic]) / 3,
         )
@@ -666,8 +801,8 @@ export default function ModelViewer({ data }: Props) {
           if (n >= PARTICLE_CAP) break
           const alpha = ((p.color >>> 24) & 0xff) / 255
           if (alpha <= 0.004) continue
-          // same axis negation the mesh vertices get
-          positions[n * 3]     = -(p.x / 4096)
+          // same (x, −y, −z) axis mapping the mesh vertices get
+          positions[n * 3]     = p.x / 4096
           positions[n * 3 + 1] = -(p.y / 4096)
           positions[n * 3 + 2] = -(p.z / 4096)
           colors[n * 4]     = ((p.color >> 16) & 0xff) / 255
@@ -698,7 +833,7 @@ export default function ModelViewer({ data }: Props) {
     // whole scene (particles included, as mesh children) vanishes.
     if (!isFinite(minX)) {
       for (let v = 0; v < vertexCount; v++) {
-        const x = -vertexX[v], y = -vertexY[v], z = -vertexZ[v]
+        const x = vertexX[v], y = -vertexY[v], z = -vertexZ[v]
         if (x < minX) minX = x; if (x > maxX) maxX = x
         if (y < minY) minY = y; if (y > maxY) maxY = y
         if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
@@ -712,10 +847,39 @@ export default function ModelViewer({ data }: Props) {
     mesh.position.set(-cx2, -cy2, -cz2)
 
     const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1)
-    camera.position.set(0, 0, span * 2.5)
-    camera.near = span * 0.001
-    camera.far  = span * 100
+
+    // Item pose: the client's inventory-icon transform (ItemDefinitions.getSprite).
+    // It rolls Z(-zan), yaws Y(yan), translates to (offX, offY − h/2, zoom·sin(xan),
+    // zoom·cos(xan) + offY), then pitches X(xan) — and since RX(xan)·(0, z·sin, z·cos)
+    // = (0, 0, z), the pitch collapses to rotating the model itself about its centre
+    // with the camera a straight zoom away. 2048 rotation units = a full circle.
+    // Conjugated through the (x, −y, −z) RS→Three mapping (a 180° rotation about X),
+    // yaw and roll angles negate, pitch is unchanged, and translations map to
+    // (tx, −ty, −tz).
+    if (pose) {
+      const rad = (units: number) => (units * Math.PI) / 1024
+      poseGroup.scale.set(pose.resizeX / 128, pose.resizeY / 128, pose.resizeZ / 128)
+      const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rad(pose.rotationX))
+      const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -rad(pose.rotationY))
+      const qz = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), rad(pose.rotationZ))
+      poseGroup.quaternion.copy(qx).multiply(qy).multiply(qz)
+      // Residual translation (offsets ride through the final pitch; offY feeds
+      // both the y and z components in the client code).
+      const t = new THREE.Vector3(pose.offsetX, -pose.offsetY, -pose.offsetY).applyQuaternion(qx)
+      poseGroup.position.copy(t)
+
+      const zoom = pose.zoom > 0 ? pose.zoom : span * 2.5
+      camera.fov = ICON_FOV
+      camera.position.set(0, 0, zoom)
+      camera.near = Math.max(zoom * 0.01, 0.1)
+      camera.far = zoom * 10 + span * 100
+    } else {
+      camera.position.set(0, 0, span * 2.5)
+      camera.near = span * 0.001
+      camera.far  = span * 100
+    }
     camera.updateProjectionMatrix()
+    updateParticleScale(h)
 
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
@@ -788,7 +952,7 @@ export default function ModelViewer({ data }: Props) {
       for (const texture of particleTextures) texture.dispose()
       mount.removeChild(renderer.domElement)
     }
-  }, [data])
+  }, [data, display, applyPose])
 
   useEffect(() => {
     for (const material of matsRef.current) material.wireframe = wireframe
@@ -806,6 +970,7 @@ export default function ModelViewer({ data }: Props) {
         <span className="model-stats">
           {data.vertexCount} verts · {data.faceCount} faces
           {emitterCount > 0 && ` · ${emitterCount} particle emitter${emitterCount > 1 ? 's' : ''}`}
+          {display && applyPose && ` · inventory pose from ${display.label}`}
         </span>
         <span className="model-hint">Drag to rotate · Scroll to zoom · Right-drag to pan</span>
       </div>
@@ -817,6 +982,15 @@ export default function ModelViewer({ data }: Props) {
         >
           Wireframe
         </button>
+        {display && (
+          <button
+            className={`model-toolbar-btn${applyPose ? ' active' : ''}`}
+            title="Apply the item's inventory-icon zoom, rotations, resizes and offsets"
+            onClick={() => setApplyPose(v => !v)}
+          >
+            Item Pose
+          </button>
+        )}
         {emitterCount > 0 && (
           <>
             <button

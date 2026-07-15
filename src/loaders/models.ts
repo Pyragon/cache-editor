@@ -3,35 +3,40 @@ import { streamDirItems } from './common'
 import { loadMaterialPng, loadProducer, loadTypes } from './particles'
 
 // ---------------------------------------------------------------------------
-// HSL → RGB lookup table (mirrors Java Utilities.HSL_2_RGB)
+// HSL → RGB lookup table — the RT5 engine's mesh palette, ported from the 727
+// client (Class540.anIntArray7136, built in CutsceneCameraMovement.method1365).
+// This is a true HSL-triangle conversion, NOT the HSV-style table in cryogen's
+// Utilities.HSL_2_RGB — the two differ in saturation shape (verified against
+// in-game inventory renders: the HSV table reads visibly washed out). The
+// client jitters gamma by ±0.015 per palette build; we use a fixed 0.7.
 // ---------------------------------------------------------------------------
 
 const HSL_2_RGB = new Int32Array(65536)
 ;(function buildHslTable() {
   const d = 0.7
-  let i = 0
-  for (let i1 = 0; i1 < 512; i1++) {
-    const h = ((i1 >> 3) / 64.0 + 0.0078125) * 360.0
-    const s = 0.0625 + (i1 & 7) / 8.0
-    for (let i2 = 0; i2 < 128; i2++) {
-      const v = i2 / 128.0
-      let r = 0, g = 0, b = 0
-      const hSect = h / 60.0
-      const sector = Math.floor(hSect) % 6
-      const f = hSect - Math.floor(hSect)
-      const p = v * (1 - s)
-      const q = v * (1 - f * s)
-      const t = v * (1 - (1 - f) * s)
-      if      (sector === 0) { r = v; g = t; b = p }
-      else if (sector === 1) { r = q; g = v; b = p }
-      else if (sector === 2) { r = p; g = v; b = t }
-      else if (sector === 3) { r = p; g = q; b = v }
-      else if (sector === 4) { r = t; g = p; b = v }
-      else                   { r = v; g = p; b = q }
-      HSL_2_RGB[i++] = (Math.pow(r, d) * 256 | 0) << 16
-                     | (Math.pow(g, d) * 256 | 0) << 8
-                     | (Math.pow(b, d) * 256 | 0)
+  for (let i = 0; i < 65536; i++) {
+    const hue = ((i >> 10) & 0x3f) / 64.0 + 0.0078125
+    const sat = 0.0625 + ((i >> 7) & 0x7) / 8.0
+    const lum = (i & 0x7f) / 128.0
+    let r = lum, g = lum, b = lum
+    if (sat !== 0.0) {
+      const q = lum < 0.5 ? lum * (1.0 + sat) : lum + sat - lum * sat
+      const p = 2.0 * lum - q
+      const channel = (t: number): number => {
+        if (t > 1.0) t--
+        else if (t < 0.0) t++
+        if (t * 6.0 < 1.0) return p + (q - p) * 6.0 * t
+        if (t * 2.0 < 1.0) return q
+        if (t * 3.0 < 2.0) return p + (q - p) * 6.0 * (2.0 / 3.0 - t)
+        return p
+      }
+      r = channel(hue + 1.0 / 3.0)
+      g = channel(hue)
+      b = channel(hue - 1.0 / 3.0)
     }
+    HSL_2_RGB[i] = (Math.trunc(Math.pow(r, d) * 256.0) << 16)
+                 | (Math.trunc(Math.pow(g, d) * 256.0) << 8)
+                 |  Math.trunc(Math.pow(b, d) * 256.0)
   }
 })()
 
