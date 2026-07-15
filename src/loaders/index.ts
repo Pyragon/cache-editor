@@ -5,6 +5,11 @@ import animations from './animations'
 import billboards from './billboards'
 import config_cursors from './config/cursors'
 import config_hitbars from './config/hitbars'
+import config_light_intensities from './config/light_intensities'
+import config_varc from './config/varc'
+import config_varc_string from './config/varc_string'
+import config_clan_var from './config/clan_var'
+import config_clan_var_settings from './config/clan_var_settings'
 import config_hitsplats from './config/hitsplats'
 import config_identikit from './config/identikit'
 import config_inventories from './config/inventories'
@@ -46,6 +51,11 @@ const registry: Record<string, CacheLoader> = {
   billboards,
   config_cursors,
   config_hitbars,
+  config_light_intensities,
+  config_varc,
+  config_varc_string,
+  config_clan_var,
+  config_clan_var_settings,
   config_hitsplats,
   config_identikit,
   config_inventories,

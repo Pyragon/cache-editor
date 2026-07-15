@@ -41,6 +41,15 @@ import type { VarData } from './loaders/config/vars'
 import InventoryViewer from './components/InventoryViewer'
 import type { InventoryData } from './loaders/config/inventories'
 import HitbarViewer from './components/HitbarViewer'
+import LightIntensityViewer from './components/LightIntensityViewer'
+import VarcViewer from './components/VarcViewer'
+import type { VarcData } from './loaders/config/varc'
+import VarcStringViewer from './components/VarcStringViewer'
+import type { VarcStringData } from './loaders/config/varc_string'
+import ClanVarViewer from './components/ClanVarViewer'
+import type { ClanVarData } from './loaders/config/clan_var'
+import type { ClanVarSettingsData } from './loaders/config/clan_var_settings'
+import type { LightIntensityData } from './loaders/config/light_intensities'
 import type { HitbarData } from './loaders/config/hitbars'
 import HitsplatViewer from './components/HitsplatViewer'
 import type { HitsplatData } from './loaders/config/hitsplats'
@@ -79,7 +88,8 @@ const GROUP_LABELS: Record<string, string> = {
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars', 'config_inventories',
-  'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas',
+  'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas', 'config_light_intensities',
+  'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
   'particles',
@@ -94,7 +104,7 @@ const DONE_ENTRIES = new Set([
 ])
 
 function unavailableReason(name: string): string {
-  return EMPTY_ENTRIES[name] ?? 'No data found for this cache entry'
+  return EMPTY_ENTRIES[name] ?? 'Not in this dump — cryogen has no dumper for this entry yet (the cache itself may still hold data)'
 }
 
 function entryStatusClass(entry: CacheEntry): string {
@@ -153,6 +163,13 @@ function buildSidebarRows(entries: CacheEntry[]): SidebarRow[] {
 // which is very slow on the big ones (models, sprites, items).
 const EMPTY_ENTRIES: Record<string, string> = {
   config_sun: 'No data — the sun index is empty in this cache (rev 727 ships no sun definitions).',
+  config_objects: 'Empty in this cache — object definitions moved to the top-level objects index long before rev 727.',
+  config_enums: 'Empty in this cache — enum definitions moved to the top-level enums index long before rev 727.',
+  config_npcs: 'Empty in this cache — NPC definitions moved to the top-level npcs index long before rev 727.',
+  config_items: 'Empty in this cache — item definitions moved to the top-level items index long before rev 727.',
+  config_varbits: 'Empty in this cache — varbit definitions moved to the top-level varbits index long before rev 727.',
+  config_animations: 'Empty in this cache — animation definitions moved to the top-level animations index long before rev 727.',
+  config_spot_anims: 'Empty in this cache — spot animation definitions moved to the top-level spot_animations index long before rev 727.',
 }
 
 // Add / Remove / Clone write to disk straight away rather than going through
@@ -344,6 +361,26 @@ function App() {
 
   const hitbarContent = selectedEntry?.name === 'config_hitbars' && selectedItemContent != null
     ? selectedItemContent as HitbarData
+    : null
+
+  const lightIntensityContent = selectedEntry?.name === 'config_light_intensities' && selectedItemContent != null
+    ? selectedItemContent as LightIntensityData
+    : null
+
+  const varcContent = selectedEntry?.name === 'config_varc' && selectedItemContent != null
+    ? selectedItemContent as VarcData
+    : null
+
+  const varcStringContent = selectedEntry?.name === 'config_varc_string' && selectedItemContent != null
+    ? selectedItemContent as VarcStringData
+    : null
+
+  const clanVarContent = selectedEntry?.name === 'config_clan_var' && selectedItemContent != null
+    ? selectedItemContent as ClanVarData
+    : null
+
+  const clanVarSettingsContent = selectedEntry?.name === 'config_clan_var_settings' && selectedItemContent != null
+    ? selectedItemContent as ClanVarSettingsData
     : null
 
   const hitsplatContent = selectedEntry?.name === 'config_hitsplats' && selectedItemContent != null
@@ -1152,6 +1189,16 @@ function App() {
                 ? <InventoryViewer data={inventoryContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : hitbarContent != null
                 ? <HitbarViewer data={hitbarContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : lightIntensityContent != null
+                ? <LightIntensityViewer data={lightIntensityContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : varcContent != null
+                ? <VarcViewer data={varcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : varcStringContent != null
+                ? <VarcStringViewer data={varcStringContent} />
+                : clanVarContent != null
+                ? <ClanVarViewer data={clanVarContent} title="Clan Var" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : clanVarSettingsContent != null
+                ? <ClanVarViewer data={clanVarSettingsContent} title="Clan Setting" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : hitsplatContent != null
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : defaultsContent != null

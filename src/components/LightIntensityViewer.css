@@ -1,0 +1,17 @@
+.light-preview-wrap {
+  display: inline-block;
+  margin-top: 12px; /* breathing room under the explanation note */
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #0a0c12;
+}
+
+.light-preview-canvas {
+  display: block;
+  max-width: 100%;
+}
+
+.light-effect-select {
+  width: 100%;
+}

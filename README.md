@@ -67,33 +67,33 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 
 | # | Entry | Status | Notes |
 |---|---|---|---|
-| 1 | `underlays` | Not dumped | |
+| 1 | `underlays` | Not dumped | 170 files in the cache (verified) — awaiting a cryogen dumper |
 | 3 | `identikits` | Not started | Folder-per-id `.lnk` dump format — needs flattening + re-dump like cursors |
-| 4 | `overlays` | Not dumped | |
+| 4 | `overlays` | Not dumped | 247 files in the cache (verified) — awaiting a cryogen dumper |
 | 5 | `inventories` | ✅ **Done** | Slot length + default-stock pairs with item-icon previews |
-| 6 | `objects` | Not dumped | Config sub-archive, distinct from the top-level `objects` index |
-| 8 | `enums` | Not dumped | Config sub-archive, distinct from the top-level `enums` index |
-| 9 | `npcs` | Not dumped | Config sub-archive, distinct from the top-level `npcs` index |
-| 10 | `items` | Not dumped | Config sub-archive, distinct from the top-level `items` index |
+| 6 | `objects` | Empty in cache | Config sub-archive, distinct from the top-level `objects` index — holds no data at rev 727 |
+| 8 | `enums` | Empty in cache | Config sub-archive, distinct from the top-level `enums` index — holds no data at rev 727 |
+| 9 | `npcs` | Empty in cache | Config sub-archive, distinct from the top-level `npcs` index — holds no data at rev 727 |
+| 10 | `items` | Empty in cache | Config sub-archive, distinct from the top-level `items` index — holds no data at rev 727 |
 | 11 | `params` | ✅ **Done** | Type-char dropdown, default int, auto-disable |
-| 12 | `animations` | Not dumped | |
-| 13 | `spot_anims` | Not dumped | |
-| 14 | `varbits` | Not dumped | Config sub-archive, distinct from the top-level `varbits` index |
-| 15 | `varc_string` | Not dumped | |
+| 12 | `animations` | Empty in cache | No archive in the CONFIG index at rev 727 (moved to the top-level animations index) |
+| 13 | `spot_anims` | Empty in cache | No archive in the CONFIG index at rev 727 (moved to the top-level spot_animations index) |
+| 14 | `varbits` | Empty in cache | Config sub-archive, distinct from the top-level `varbits` index — holds no data at rev 727 |
+| 15 | `varc_string` | Editor | Presence records only (the cache stores no fields) — Add/Remove manage which ids exist |
 | 16 | `vars` | ✅ **Done** | Param-type dropdown + client code (verified against darkan `VarpType`: only opcodes 1/5 exist, so the sparse data is correct) |
-| 19 | `varc` | Not dumped | |
+| 19 | `varc` | Editor | Client variables — type-char dropdown + persists-across-sessions toggle |
 | 26 | `structs` | ✅ **Done** | Param key→value table |
 | 29 | `skyboxes` | ✅ **Done** | material preview + sun ids + background mode (sun fields unused in this cache — sun table is empty at rev 727) |
 | 30 | `sun` | Not started | Empty in the current dump |
-| 31 | `light_intensities` | Not dumped | |
-| 32 | `bas` | Not dumped | |
+| 31 | `light_intensities` | Editor | Flickering point-light configs (waveform/speed/amplitude/base) with a live animated preview of the client formula — dumper + byte-verified repack added to cryogen (`LightIntensityDefinitions`) |
+| 32 | `bas` | Not dumped | 2,573 files in the cache (verified) — awaiting a cryogen dumper |
 | 33 | `cursors` | ✅ **Done** | Full editor — hotspot picking on the sprite preview, live "your mouse becomes the cursor" test area with RS-style click crosses, sprite download/upload (uploads allocate a new sprite id), add/remove/clone, save validation |
 | 34 | `map_sprites` | Editor | Sprite preview, background colour picker, upscaling toggle, sprite download/upload, add/remove/clone. (Held from Done pending a minimap-render preview — see TODO) |
 | 35 | `quests` | Editor | Reads/writes quest JSON and cache structs (start NPC, start location, slot ID, prereq quests, skill requirements) |
 | 36 | `areas` | ✅ **Done** | map element config (MECType) — sprites, colours, menu actions, visibility vars, params, static-element Placed At list (73,896 entries) |
 | 46 | `hitsplats` | ✅ **Done** | Field editor with a live splat preview whose damage number is rendered with the real cache font referenced by `fontId` (glyphs + advance widths from the cache, positioned exactly like the client) |
-| 47 | `clan_var` | Not dumped | |
-| 54 | `clan_var_settings` | Not dumped | |
+| 47 | `clan_var` | Editor | Clan variables — type char + varbit-style bit packing into a base clan var |
+| 54 | `clan_var_settings` | Editor | Clan settings variables — same editor as clan vars (identical shape, different cache opcode) |
 | 72 | `hitbars` | ✅ **Done** | Field editor with a live health-percentage bar preview, per-sprite previews + upload/download, and a slider tinted to the actual bar sprite colours |
 
 ## License
