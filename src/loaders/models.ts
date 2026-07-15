@@ -1,5 +1,6 @@
 import type { CacheLoader } from './types'
 import { streamDirItems } from './common'
+import { loadMaterialPng, loadProducer, loadTypes } from './particles'
 
 // ---------------------------------------------------------------------------
 // HSL → RGB lookup table (mirrors Java Utilities.HSL_2_RGB)
@@ -86,6 +87,52 @@ export type ModelData = {
   billboards: ModelBillboard[] | null
   // billboard type id → its config + rendered material PNG, resolved by the loader.
   billboardTypes: Map<number, { def: BillboardTypeDef; material: Blob | null }>
+  // Particle emitters (darkan Mesh.kt, footer flag 0x2): each binds a producer to
+  // one face of the mesh; particles spawn from random points on that triangle.
+  emitters: ModelEmitter[] | null
+  // producer id → everything the viewer needs to run it, resolved by the loader.
+  emitterProducers: Map<number, EmitterProducer>
+  // Effectors (same footer flag, second list) and their resolved particle types.
+  effectors: ModelEffector[] | null
+  effectorTypes: Map<number, EffectorType>
+}
+
+// Structural mirror of ParticleType (see loaders/particles.ts) — everything the
+// effector attraction math reads.
+export type EffectorType = {
+  id: number
+  offsetX: number
+  offsetY: number
+  offsetZ: number
+  currentOffset: number
+  sizeMultiplier: number
+  type: number
+  particleHandlingType: number
+  verticeCalculationType: number
+  zan: number
+  size3d: number
+  uid: number
+}
+
+export type ModelEmitter = {
+  producerId: number
+  face: number
+}
+
+// An effective vertex: binds a particle TYPE (archive 1) to one vertex, where it
+// pulls/pushes nearby particles whose producer lists that type in particleFileIds2
+// or effectiveVertexUids.
+export type ModelEffector = {
+  effectId: number
+  vertex: number
+}
+
+// Kept structural (like BillboardTypeDef) to avoid making every ModelData consumer
+// depend on the particles loader. `producer` is the full ParticleProducer JSON.
+export type EmitterProducer = {
+  producer: Record<string, unknown>
+  types: EffectorType[]
+  material: Blob | null
 }
 
 export type ModelBillboard = {
@@ -416,28 +463,47 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textureEndOff = speedsOff + complexCount + 2 * type2Count
   }
 
-  // Particle emitters/effectors (flag 0x2, skipped) then billboards (flag 0x4)
-  // trail the texture data — darkan Mesh.kt reads them sequentially from there.
+  // Particle emitters/effectors (flag 0x2) then billboards (flag 0x4) trail the
+  // texture data — darkan Mesh.kt reads them sequentially from there. Previously
+  // emitters were only SKIPPED, and only when the billboard flag was also set, so a
+  // model with emitters but no billboards lost them entirely.
   let billboards: ModelBillboard[] | null = null
-  if ((flags & 0x4) !== 0) {
+  let emitters: ModelEmitter[] | null = null
+  let effectors: ModelEffector[] | null = null
+  if ((flags & 0x2) !== 0 || (flags & 0x4) !== 0) {
     try {
       const footerStart = data.length - 23
       const tail = new BinReader(data).at(textureEndOff)
       if ((flags & 0x2) !== 0) {
         const emitterCount = tail.u8()
-        for (let i = 0; i < emitterCount; i++) { tail.u16(); tail.u16() }
+        if (emitterCount > 0) {
+          emitters = []
+          for (let i = 0; i < emitterCount; i++) {
+            emitters.push({ producerId: tail.u16(), face: tail.u16() })
+          }
+        }
         const effectorCount = tail.u8()
-        for (let i = 0; i < effectorCount; i++) { tail.u16(); tail.u16() }
+        if (effectorCount > 0) {
+          effectors = []
+          for (let i = 0; i < effectorCount; i++) {
+            effectors.push({ effectId: tail.u16(), vertex: tail.u16() })
+          }
+        }
       }
-      const count = tail.u8()
-      if (count > 0 && textureEndOff + count * 6 <= footerStart) {
-        billboards = []
-        for (let i = 0; i < count; i++) {
-          billboards.push({ typeId: tail.u16(), face: tail.u16(), depth: tail.u8(), distance: tail.s8() })
+      if ((flags & 0x4) !== 0) {
+        const count = tail.u8()
+        if (count > 0 && tail.pos + count * 6 <= footerStart) {
+          billboards = []
+          for (let i = 0; i < count; i++) {
+            billboards.push({ typeId: tail.u16(), face: tail.u16(), depth: tail.u8(), distance: tail.s8() })
+          }
         }
       }
     } catch {
-      // malformed/unexpected tail — model still renders, just without billboards
+      // malformed/unexpected tail — model still renders, just without attachments
+      emitters = null
+      effectors = null
+      billboards = null
     }
   }
 
@@ -459,6 +525,10 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textures: new Map(),
     billboards,
     billboardTypes: new Map(),
+    emitters,
+    emitterProducers: new Map(),
+    effectors,
+    effectorTypes: new Map(),
   }
 }
 
@@ -611,6 +681,10 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textures: new Map(),
     billboards: null, // old-format models predate billboards
     billboardTypes: new Map(),
+    emitters: null, // …and particle emitters
+    emitterProducers: new Map(),
+    effectors: null,
+    effectorTypes: new Map(),
   }
 }
 
@@ -658,6 +732,34 @@ const loader: CacheLoader = {
             // missing texture — face falls back to its flat colour
           }
         }))
+      }
+    }
+
+    // Resolve each emitter's producer: the producer JSON, the motion types its
+    // particles inherit, and the material PNG they're drawn with.
+    if (model.emitters && rootHandle) {
+      let particlesDir: FileSystemDirectoryHandle | null = null
+      try { particlesDir = await rootHandle.getDirectoryHandle('particles') } catch { /* not dumped */ }
+      if (particlesDir) {
+        const producerIds = new Set(model.emitters.map((e) => e.producerId))
+        await Promise.all([...producerIds].map(async (producerId) => {
+          const producer = await loadProducer(particlesDir!, producerId)
+          if (!producer) return
+          const types = await loadTypes(particlesDir!, producer.particleFileIds ?? [])
+          const material = await loadMaterialPng(rootHandle, producer.materialId)
+          model.emitterProducers.set(producerId, {
+            producer: producer as unknown as Record<string, unknown>,
+            types: [...types.values()],
+            material,
+          })
+        }))
+
+        // Effectors resolve to particle types too (their effectId IS a type id).
+        if (model.effectors) {
+          const effectIds = [...new Set(model.effectors.map((e) => e.effectId))]
+          const types = await loadTypes(particlesDir, effectIds)
+          for (const [id, type] of types) model.effectorTypes.set(id, type as EffectorType)
+        }
       }
     }
 

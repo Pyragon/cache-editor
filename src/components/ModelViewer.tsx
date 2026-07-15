@@ -3,9 +3,54 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { ModelData } from '../loaders/models'
 import { hslToRgb } from '../loaders/models'
+import type { ParticleProducer, ParticleType } from '../loaders/particles'
+import { PARTICLE_FPS_DEFAULT, PARTICLE_FPS_KEY, PARTICLE_FPS_OPTIONS, ParticleSim } from './particleSim'
+import type { Effector } from './particleSim'
+import { useZoom } from './useZoom'
 import './ModelViewer.css'
 
 type Props = { data: ModelData }
+
+// Per-particle size, tint and alpha need a shader — THREE.Points only supports a
+// uniform size. `uScale` converts a world-space diameter to gl_PointSize pixels.
+const PARTICLE_VERT = `
+  attribute float psize;
+  attribute vec4 pcolor;
+  varying vec4 vColor;
+  uniform float uScale;
+  void main() {
+    vColor = pcolor;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = psize * (uScale / -mv.z);
+    gl_Position = projectionMatrix * mv;
+  }
+`
+const PARTICLE_FRAG = `
+  uniform sampler2D map;
+  varying vec4 vColor;
+  void main() {
+    vec4 tex = texture2D(map, gl_PointCoord);
+    gl_FragColor = vec4(vColor.rgb * tex.rgb, vColor.a * tex.a);
+  }
+`
+
+// Fallback when a producer has no material: a soft radial dot, which is what most
+// particle materials look like anyway.
+function makeDotTexture(): THREE.Texture {
+  const canvas = document.createElement('canvas')
+  canvas.width = 64
+  canvas.height = 64
+  const ctx = canvas.getContext('2d')!
+  const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+  gradient.addColorStop(0, 'rgba(255,255,255,1)')
+  gradient.addColorStop(0.5, 'rgba(255,255,255,0.5)')
+  gradient.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.fillStyle = gradient
+  ctx.fillRect(0, 0, 64, 64)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  return texture
+}
 
 // Builds the 3×3 matrix transforming model space into texture-projection
 // space from a packed normal, rotation byte, and per-axis scale. Ported from
@@ -68,6 +113,18 @@ export default function ModelViewer({ data }: Props) {
   const mountRef = useRef<HTMLDivElement>(null)
   const matsRef = useRef<THREE.MeshBasicMaterial[]>([])
   const [wireframe, setWireframe] = useState(false)
+  const [particles, setParticles] = useState(true)
+  const particlesRef = useRef(true)
+  const particleObjectsRef = useRef<THREE.Points[]>([])
+
+  // Caps how often the particle sims step and re-upload their GPU buffers. The
+  // scene itself still renders every RAF so orbiting stays smooth; the sim keeps
+  // real-time speed by batching cycles. Shared setting with the particles page.
+  const [particleFps, setParticleFps] = useZoom(PARTICLE_FPS_KEY, PARTICLE_FPS_OPTIONS, PARTICLE_FPS_DEFAULT)
+  const particleFpsRef = useRef(particleFps)
+  useEffect(() => { particleFpsRef.current = particleFps }, [particleFps])
+
+  const emitterCount = data.emitters?.filter((e) => data.emitterProducers.has(e.producerId)).length ?? 0
 
   useEffect(() => {
     const mount = mountRef.current
@@ -104,6 +161,11 @@ export default function ModelViewer({ data }: Props) {
     const buckets = new Map<number, number[]>()
     for (let f = 0; f < faceCount; f++) {
       if (hiddenFaces.has(f)) continue
+      // faceAlpha -1 is 255 unsigned: fully transparent. Most particle-emitter faces
+      // are painted a garish marker green and hidden this way — rendering them is
+      // wrong for ANY invisible face, emitter or not. (Emitter faces with alpha 0
+      // stay visible: lava-style surfaces genuinely show while emitting.)
+      if (data.faceAlpha[f] === -1) continue
       const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
       if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount)
         continue
@@ -484,6 +546,161 @@ export default function ModelViewer({ data }: Props) {
       }
     }
 
+    // --- Particle emitters: run the client's emitter per attached face, spawning
+    // from random points on that triangle, and draw the live particles as a point
+    // cloud in the model's own space. Same 20ms cycle as the particles page preview.
+    type EmitterSystem = {
+      sim: ParticleSim
+      points: THREE.Points
+      positions: Float32Array
+      colors: Float32Array
+      sizes: Float32Array
+      geometry: THREE.BufferGeometry
+      material: THREE.ShaderMaterial
+    }
+    const emitterSystems: EmitterSystem[] = []
+    const particleTextures: THREE.Texture[] = []
+    const PARTICLE_CAP = 2048
+
+    if (data.emitters) {
+      // one texture per producer, shared by every emitter using it
+      const producerTextures = new Map<number, THREE.Texture>()
+
+      // Effectors: anchored particle types that pull/push this model's particles
+      // (wind sway, attractors). Shared by every sim; each pre-filters to the ones
+      // its producer actually listens to. Direction is the type's raw offset — the
+      // model matrix is identity here.
+      const effectors: Effector[] = []
+      if (data.effectors) {
+        for (const effector of data.effectors) {
+          const type = data.effectorTypes.get(effector.effectId)
+          if (!type || effector.vertex < 0 || effector.vertex >= vertexCount) continue
+          effectors.push({
+            x: vertexX[effector.vertex],
+            y: vertexY[effector.vertex],
+            z: vertexZ[effector.vertex],
+            effectId: effector.effectId,
+            type: type as ParticleType,
+            dirX: type.offsetX,
+            dirZ: type.offsetZ,
+          })
+        }
+      }
+
+      for (const emitter of data.emitters) {
+        const info = data.emitterProducers.get(emitter.producerId)
+        if (!info || emitter.face < 0 || emitter.face >= faceCount) continue
+        const ia = triangleX[emitter.face], ib = triangleY[emitter.face], ic = triangleZ[emitter.face]
+        if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount) continue
+
+        // the sim runs in raw model space; the render negates, same as the mesh
+        const sim = new ParticleSim(
+          info.producer as unknown as ParticleProducer,
+          info.types as ParticleType[],
+          {
+            ax: vertexX[ia], ay: vertexY[ia], az: vertexZ[ia],
+            bx: vertexX[ib], by: vertexY[ib], bz: vertexZ[ib],
+            cx: vertexX[ic], cy: vertexY[ic], cz: vertexZ[ic],
+          },
+          effectors,
+        )
+        sim.maxParticles = PARTICLE_CAP
+
+        let texture = producerTextures.get(emitter.producerId)
+        if (!texture) {
+          texture = makeDotTexture()
+          producerTextures.set(emitter.producerId, texture)
+          particleTextures.push(texture)
+          if (info.material) {
+            const target = texture
+            createImageBitmap(info.material).then((bitmap) => {
+              if (disposed) { bitmap.close(); return }
+              target.image = bitmap
+              target.needsUpdate = true
+            })
+          }
+        }
+
+        const positions = new Float32Array(PARTICLE_CAP * 3)
+        const colors = new Float32Array(PARTICLE_CAP * 4)
+        const sizes = new Float32Array(PARTICLE_CAP)
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+        geometry.setAttribute('pcolor', new THREE.BufferAttribute(colors, 4))
+        geometry.setAttribute('psize', new THREE.BufferAttribute(sizes, 1))
+        geometry.setDrawRange(0, 0)
+
+        const material = new THREE.ShaderMaterial({
+          vertexShader: PARTICLE_VERT,
+          fragmentShader: PARTICLE_FRAG,
+          uniforms: { map: { value: texture }, uScale: { value: 1 } },
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        })
+
+        const points = new THREE.Points(geometry, material)
+        // positions change every frame; the precomputed bounding sphere would cull it
+        points.frustumCulled = false
+        points.renderOrder = 2
+        mesh.add(points)
+
+        emitterSystems.push({ sim, points, positions, colors, sizes, geometry, material })
+      }
+    }
+    particleObjectsRef.current = emitterSystems.map((s) => s.points)
+    for (const s of emitterSystems) s.points.visible = particlesRef.current
+
+    function stepEmitters(ticks: number) {
+      for (const system of emitterSystems) {
+        for (let t = 0; t < ticks; t++) system.sim.step(1)
+
+        const { sim, positions, colors, sizes, geometry } = system
+        let n = 0
+        for (const p of sim.particles) {
+          if (n >= PARTICLE_CAP) break
+          const alpha = ((p.color >>> 24) & 0xff) / 255
+          if (alpha <= 0.004) continue
+          // same axis negation the mesh vertices get
+          positions[n * 3]     = -(p.x / 4096)
+          positions[n * 3 + 1] = -(p.y / 4096)
+          positions[n * 3 + 2] = -(p.z / 4096)
+          colors[n * 4]     = ((p.color >> 16) & 0xff) / 255
+          colors[n * 4 + 1] = ((p.color >> 8) & 0xff) / 255
+          colors[n * 4 + 2] = (p.color & 0xff) / 255
+          colors[n * 4 + 3] = alpha
+          // size is fixed-point like the coords; /4096 is the world half-extent
+          sizes[n] = Math.max((p.size / 4096) * 2, 1)
+          n++
+        }
+        geometry.setDrawRange(0, n)
+        geometry.attributes.position.needsUpdate = true
+        geometry.attributes.pcolor.needsUpdate = true
+        geometry.attributes.psize.needsUpdate = true
+      }
+    }
+
+    // world-diameter → pixel conversion for gl_PointSize, refreshed on resize
+    function updateParticleScale(height: number) {
+      const scale = height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)))
+      for (const system of emitterSystems) system.material.uniforms.uScale.value = scale
+    }
+    updateParticleScale(h)
+
+    // A model can have NO visible faces at all — pure particle rigs (e.g. 51222,
+    // the Christmas cupboard's sparkle rig) are nothing but invisible marker faces.
+    // Without this the bounds stay ±Infinity, the mesh position goes NaN, and the
+    // whole scene (particles included, as mesh children) vanishes.
+    if (!isFinite(minX)) {
+      for (let v = 0; v < vertexCount; v++) {
+        const x = -vertexX[v], y = -vertexY[v], z = -vertexZ[v]
+        if (x < minX) minX = x; if (x > maxX) maxX = x
+        if (y < minY) minY = y; if (y > maxY) maxY = y
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
+      }
+      if (!isFinite(minX)) { minX = maxX = minY = maxY = minZ = maxZ = 0 }
+    }
+
     const cx2 = (minX + maxX) / 2
     const cy2 = (minY + maxY) / 2
     const cz2 = (minZ + maxZ) / 2
@@ -500,12 +717,32 @@ export default function ModelViewer({ data }: Props) {
     controls.dampingFactor = 0.1
 
     let animId: number
-    function animate() {
+    let lastParticleTime = performance.now()
+    let tickCarry = 0
+    function animate(now: number) {
       animId = requestAnimationFrame(animate)
       controls.update()
+
+      // The FPS cap throttles sim stepping + buffer uploads only — the sim keeps
+      // real-time speed by accumulating 20ms client cycles across skipped frames,
+      // and the scene still renders every RAF for smooth orbiting.
+      if (emitterSystems.length > 0 && particleObjectsRef.current[0]?.visible) {
+        if (now - lastParticleTime >= 1000 / particleFpsRef.current) {
+          const elapsed = Math.min(now - lastParticleTime, 250)
+          lastParticleTime = now
+          tickCarry += elapsed / 20
+          const ticks = Math.floor(tickCarry)
+          tickCarry -= ticks
+          if (ticks > 0) stepEmitters(ticks)
+        }
+      } else {
+        // don't bank time while hidden, or re-enabling replays a burst
+        lastParticleTime = now
+      }
+
       renderer.render(scene, camera)
     }
-    animate()
+    animId = requestAnimationFrame(animate)
 
     const ro = new ResizeObserver(() => {
       const nw = mount.clientWidth
@@ -513,6 +750,7 @@ export default function ModelViewer({ data }: Props) {
       camera.aspect = nw / nh
       camera.updateProjectionMatrix()
       renderer.setSize(nw, nh)
+      updateParticleScale(nh)
     })
     ro.observe(mount)
 
@@ -527,6 +765,11 @@ export default function ModelViewer({ data }: Props) {
       for (const material of materials) material.dispose()
       for (const texture of spriteTextures) texture.dispose()
       for (const material of spriteMaterials) material.dispose()
+      for (const system of emitterSystems) {
+        system.geometry.dispose()
+        system.material.dispose()
+      }
+      for (const texture of particleTextures) texture.dispose()
       mount.removeChild(renderer.domElement)
     }
   }, [data])
@@ -535,11 +778,19 @@ export default function ModelViewer({ data }: Props) {
     for (const material of matsRef.current) material.wireframe = wireframe
   }, [wireframe])
 
+  useEffect(() => {
+    particlesRef.current = particles
+    for (const points of particleObjectsRef.current) points.visible = particles
+  }, [particles])
+
   return (
     <div className="model-viewer">
       <div className="model-header">
         <span className="model-id">Model {data.id}</span>
-        <span className="model-stats">{data.vertexCount} verts · {data.faceCount} faces</span>
+        <span className="model-stats">
+          {data.vertexCount} verts · {data.faceCount} faces
+          {emitterCount > 0 && ` · ${emitterCount} particle emitter${emitterCount > 1 ? 's' : ''}`}
+        </span>
         <span className="model-hint">Drag to rotate · Scroll to zoom · Right-drag to pan</span>
       </div>
       <div ref={mountRef} className="model-canvas" />
@@ -550,6 +801,25 @@ export default function ModelViewer({ data }: Props) {
         >
           Wireframe
         </button>
+        {emitterCount > 0 && (
+          <>
+            <button
+              className={`model-toolbar-btn${particles ? ' active' : ''}`}
+              onClick={() => setParticles(v => !v)}
+            >
+              Particles
+            </button>
+            {particles && PARTICLE_FPS_OPTIONS.map((f) => (
+              <button
+                key={f}
+                className={`model-toolbar-btn${particleFps === f ? ' active' : ''}`}
+                onClick={() => setParticleFps(f)}
+              >
+                {f} FPS
+              </button>
+            ))}
+          </>
+        )}
       </div>
     </div>
   )
