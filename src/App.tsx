@@ -57,6 +57,12 @@ import GameTipViewer from './components/GameTipViewer'
 import type { GameTipData } from './loaders/game_tips'
 import InterfaceViewer from './components/InterfaceViewer'
 import type { InterfaceData } from './loaders/interfaces'
+import SoundEffectViewer from './components/SoundEffectViewer'
+import type { SoundEffectData } from './loaders/sound_effects'
+import MidiInstrumentViewer from './components/MidiInstrumentViewer'
+import type { MidiInstrumentData } from './loaders/midi_instruments'
+import MusicViewer from './components/MusicViewer'
+import type { MusicData } from './loaders/music'
 import type { ClanVarData } from './loaders/config/clan_var'
 import type { ClanVarSettingsData } from './loaders/config/clan_var_settings'
 import type { LightIntensityData } from './loaders/config/light_intensities'
@@ -102,7 +108,8 @@ const SPECIALIZED_ENTRIES = new Set([
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
-  'particles', 'config_underlays', 'config_overlays', 'maps', 'game_tips', 'interfaces',
+  'particles', 'game_tips', 'config_underlays', 'config_overlays', 'maps', 'interfaces', 'sound_effects', 'midi_instruments',
+  'music', 'music2',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -417,6 +424,18 @@ function App() {
 
   const interfaceContent = selectedEntry?.name === 'interfaces' && selectedItemContent != null
     ? selectedItemContent as InterfaceData
+    : null
+
+  const soundEffectContent = selectedEntry?.name === 'sound_effects' && selectedItemContent != null
+    ? selectedItemContent as SoundEffectData
+    : null
+
+  const midiInstrumentContent = selectedEntry?.name === 'midi_instruments' && selectedItemContent != null
+    ? selectedItemContent as MidiInstrumentData
+    : null
+
+  const musicContent = (selectedEntry?.name === 'music' || selectedEntry?.name === 'music2') && selectedItemContent != null
+    ? selectedItemContent as MusicData
     : null
 
   const hitsplatContent = selectedEntry?.name === 'config_hitsplats' && selectedItemContent != null
@@ -1318,6 +1337,12 @@ function App() {
                 ? <GameTipViewer data={gameTipContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenTip={(id) => handleNavigateToItem('game_tips', id)} />
                 : interfaceContent != null
                 ? <InterfaceViewer data={interfaceContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
+                : soundEffectContent != null
+                ? <SoundEffectViewer data={soundEffectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : midiInstrumentContent != null
+                ? <MidiInstrumentViewer data={midiInstrumentContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : musicContent != null
+                ? <MusicViewer data={musicContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : hitsplatContent != null
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : defaultsContent != null

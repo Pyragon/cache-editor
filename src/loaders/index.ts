@@ -34,6 +34,7 @@ import interfaces from './interfaces'
 import items from './items'
 import map_areas from './map_areas'
 import midi_instruments from './midi_instruments'
+import music from './music'
 import models from './models'
 import native_libraries from './native_libraries'
 import npcs from './npcs'
@@ -84,6 +85,8 @@ const registry: Record<string, CacheLoader> = {
   items,
   map_areas,
   midi_instruments,
+  music,
+  music2: music,
   models,
   native_libraries,
   npcs,
