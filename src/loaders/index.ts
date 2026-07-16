@@ -10,6 +10,8 @@ import config_varc from './config/varc'
 import config_varc_string from './config/varc_string'
 import config_clan_var from './config/clan_var'
 import config_clan_var_settings from './config/clan_var_settings'
+import config_underlays from './config/underlays'
+import config_overlays from './config/overlays'
 import config_hitsplats from './config/hitsplats'
 import config_identikit from './config/identikit'
 import config_inventories from './config/inventories'
@@ -56,6 +58,8 @@ const registry: Record<string, CacheLoader> = {
   config_varc_string,
   config_clan_var,
   config_clan_var_settings,
+  config_underlays,
+  config_overlays,
   config_hitsplats,
   config_identikit,
   config_inventories,

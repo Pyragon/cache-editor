@@ -67,9 +67,9 @@ Ordered to match `FileType.java` (its numeric ids in parentheses). Many members 
 
 | # | Entry | Status | Notes |
 |---|---|---|---|
-| 1 | `underlays` | Not dumped | 170 files in the cache (verified) — awaiting a cryogen dumper |
+| 1 | `underlays` | Editor | Ground tile base colours — colour swatch (raw + client-quantised), texture, scale; dumper + repack added to cryogen (`UnderlayDefinitions`, 170/170 functional round-trip) |
 | 3 | `identikits` | Not started | Folder-per-id `.lnk` dump format — needs flattening + re-dump like cursors |
-| 4 | `overlays` | Not dumped | 247 files in the cache (verified) — awaiting a cryogen dumper |
+| 4 | `overlays` | Editor | Ground tile overlays (paths, water) — tile/minimap colour swatches, texture, water fields; dumper + repack added to cryogen (`OverlayDefinitions`, 247/247 functional round-trip) |
 | 5 | `inventories` | ✅ **Done** | Slot length + default-stock pairs with item-icon previews |
 | 6 | `objects` | Empty in cache | Config sub-archive, distinct from the top-level `objects` index — holds no data at rev 727 |
 | 8 | `enums` | Empty in cache | Config sub-archive, distinct from the top-level `enums` index — holds no data at rev 727 |

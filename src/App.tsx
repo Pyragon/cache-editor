@@ -47,6 +47,10 @@ import type { VarcData } from './loaders/config/varc'
 import VarcStringViewer from './components/VarcStringViewer'
 import type { VarcStringData } from './loaders/config/varc_string'
 import ClanVarViewer from './components/ClanVarViewer'
+import UnderlayViewer from './components/UnderlayViewer'
+import type { UnderlayData } from './loaders/config/underlays'
+import OverlayViewer from './components/OverlayViewer'
+import type { OverlayData } from './loaders/config/overlays'
 import type { ClanVarData } from './loaders/config/clan_var'
 import type { ClanVarSettingsData } from './loaders/config/clan_var_settings'
 import type { LightIntensityData } from './loaders/config/light_intensities'
@@ -92,7 +96,7 @@ const SPECIALIZED_ENTRIES = new Set([
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
-  'particles',
+  'particles', 'config_underlays', 'config_overlays',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -101,7 +105,7 @@ const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
   'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics',
   'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
-  'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests',
+  'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests', 'game_tips',
 ])
 
 function unavailableReason(name: string): string {
@@ -387,6 +391,14 @@ function App() {
 
   const clanVarSettingsContent = selectedEntry?.name === 'config_clan_var_settings' && selectedItemContent != null
     ? selectedItemContent as ClanVarSettingsData
+    : null
+
+  const underlayContent = selectedEntry?.name === 'config_underlays' && selectedItemContent != null
+    ? selectedItemContent as UnderlayData
+    : null
+
+  const overlayContent = selectedEntry?.name === 'config_overlays' && selectedItemContent != null
+    ? selectedItemContent as OverlayData
     : null
 
   const hitsplatContent = selectedEntry?.name === 'config_hitsplats' && selectedItemContent != null
@@ -1278,6 +1290,10 @@ function App() {
                 ? <ClanVarViewer data={clanVarContent} title="Clan Var" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenVar={(id) => handleNavigateToItem('config_clan_var', id)} />
                 : clanVarSettingsContent != null
                 ? <ClanVarViewer data={clanVarSettingsContent} title="Clan Setting" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenVar={(id) => handleNavigateToItem('config_clan_var_settings', id)} />
+                : underlayContent != null
+                ? <UnderlayViewer data={underlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : overlayContent != null
+                ? <OverlayViewer data={overlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : hitsplatContent != null
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : defaultsContent != null

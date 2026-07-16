@@ -44,6 +44,49 @@ export function hslToRgb(hsl: number): number {
   return HSL_2_RGB[hsl & 0xFFFF] & 0xFFFFFF
 }
 
+// Exact analytic inverse of the palette above, ported from darkan
+// ColorUtil.rgbToHsl24 (used by map underlay/overlay tile colours, which
+// store raw 24-bit RGB and convert to this packed HSL16 form at render
+// time). O(1) — unlike a nearest-match table search, this is cheap enough to
+// call per map tile.
+export function rgb24ToHsl16(rgb: number): number {
+  const r = ((rgb >> 16) & 0xff) / 256.0
+  const g = ((rgb >> 8) & 0xff) / 256.0
+  const b = (rgb & 0xff) / 256.0
+  const min = Math.min(r, g, b)
+  const max = Math.max(r, g, b)
+  let hue = 0.0
+  let sat = 0.0
+  const lightness = (max + min) / 2.0
+  if (max !== min) {
+    sat = lightness < 0.5 ? (max - min) / (max + min) : (max - min) / (2.0 - max - min)
+    if (r === max) hue = (g - b) / (max - min)
+    else if (g === max) hue = 2.0 + (b - r) / (max - min)
+    else hue = 4.0 + (r - g) / (max - min)
+  }
+  hue /= 6.0
+  const hueInt = Math.trunc(256.0 * hue)
+  let satInt = Math.trunc(sat * 256.0)
+  let lightInt = Math.trunc(lightness * 256.0)
+  if (satInt < 0) satInt = 0
+  else if (satInt > 255) satInt = 255
+  if (lightInt < 0) lightInt = 0
+  else if (lightInt > 255) lightInt = 255
+  if (lightInt > 243) satInt >>= 4
+  else if (lightInt > 217) satInt >>= 3
+  else if (lightInt > 192) satInt >>= 2
+  else if (lightInt > 179) satInt >>= 1
+  return (((hueInt & 0xff) >> 2) << 10) + (lightInt >> 1) + ((satInt >> 5) << 7)
+}
+
+// Raw 24-bit RGB (as stored in underlay/overlay defs) → CSS colour, through
+// the same lossy HSL16 palette quantisation the client actually renders
+// with — so the preview matches in-game, not just the raw uploaded colour.
+export function rgbToRenderedHex(rgb: number): string {
+  const quantised = hslToRgb(rgb24ToHsl16(rgb))
+  return `#${quantised.toString(16).padStart(6, '0')}`
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
