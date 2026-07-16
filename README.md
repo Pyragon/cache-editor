@@ -26,7 +26,7 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 2 | `config` | Grouped | Collapsible sidebar group of CONFIG-index sub-archives — see the table below |
 | 3 | `interfaces` | Not started | |
 | 4 | `sound_effects` | Not started | |
-| 5 | `maps` | Not implemented upstream | |
+| 5 | `maps` | Editor | World terrain (2,407 regions, 64×64×4 tiles) and XTEA-encrypted placed objects — top-down coloured preview per plane with click-to-edit tiles and object markers; dumper + repack added to cryogen (`MapDefinitions`, terrain functionally verified, locations byte-identical round-trip). Object placement editing and the client's terrain-noise default heights are out of scope for now (see TODO) |
 | 6 | `music` | Not implemented upstream | |
 | 7 | `models` | Viewer | Read-only 3D viewer (Three.js) with wireframe toggle |
 | 8 | `sprites` | Viewer | Displays PNG frames with zoom, upload/download per frame |

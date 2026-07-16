@@ -1,0 +1,35 @@
+.map-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 10px 0 12px;
+}
+
+.map-canvas-wrap {
+  position: relative;
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  line-height: 0;
+}
+
+.map-canvas {
+  display: block;
+  cursor: pointer;
+  image-rendering: pixelated;
+}
+
+.map-hover-tip {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  background: rgba(10, 12, 18, 0.95);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+}

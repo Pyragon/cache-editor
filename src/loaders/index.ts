@@ -12,6 +12,7 @@ import config_clan_var from './config/clan_var'
 import config_clan_var_settings from './config/clan_var_settings'
 import config_underlays from './config/underlays'
 import config_overlays from './config/overlays'
+import maps from './maps'
 import config_hitsplats from './config/hitsplats'
 import config_identikit from './config/identikit'
 import config_inventories from './config/inventories'
@@ -60,6 +61,7 @@ const registry: Record<string, CacheLoader> = {
   config_clan_var_settings,
   config_underlays,
   config_overlays,
+  maps,
   config_hitsplats,
   config_identikit,
   config_inventories,

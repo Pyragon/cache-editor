@@ -51,6 +51,8 @@ import UnderlayViewer from './components/UnderlayViewer'
 import type { UnderlayData } from './loaders/config/underlays'
 import OverlayViewer from './components/OverlayViewer'
 import type { OverlayData } from './loaders/config/overlays'
+import MapViewer from './components/MapViewer'
+import type { MapData } from './loaders/maps'
 import type { ClanVarData } from './loaders/config/clan_var'
 import type { ClanVarSettingsData } from './loaders/config/clan_var_settings'
 import type { LightIntensityData } from './loaders/config/light_intensities'
@@ -96,7 +98,7 @@ const SPECIALIZED_ENTRIES = new Set([
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
-  'particles', 'config_underlays', 'config_overlays',
+  'particles', 'config_underlays', 'config_overlays', 'maps',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -399,6 +401,10 @@ function App() {
 
   const overlayContent = selectedEntry?.name === 'config_overlays' && selectedItemContent != null
     ? selectedItemContent as OverlayData
+    : null
+
+  const mapContent = selectedEntry?.name === 'maps' && selectedItemContent != null
+    ? selectedItemContent as MapData
     : null
 
   const hitsplatContent = selectedEntry?.name === 'config_hitsplats' && selectedItemContent != null
@@ -1294,6 +1300,8 @@ function App() {
                 ? <UnderlayViewer data={underlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : overlayContent != null
                 ? <OverlayViewer data={overlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : mapContent != null
+                ? <MapViewer data={mapContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : hitsplatContent != null
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : defaultsContent != null
