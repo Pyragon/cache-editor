@@ -55,6 +55,8 @@ import MapViewer from './components/MapViewer'
 import type { MapData } from './loaders/maps'
 import GameTipViewer from './components/GameTipViewer'
 import type { GameTipData } from './loaders/game_tips'
+import InterfaceViewer from './components/InterfaceViewer'
+import type { InterfaceData } from './loaders/interfaces'
 import type { ClanVarData } from './loaders/config/clan_var'
 import type { ClanVarSettingsData } from './loaders/config/clan_var_settings'
 import type { LightIntensityData } from './loaders/config/light_intensities'
@@ -100,7 +102,7 @@ const SPECIALIZED_ENTRIES = new Set([
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
-  'particles', 'config_underlays', 'config_overlays', 'maps', 'game_tips',
+  'particles', 'config_underlays', 'config_overlays', 'maps', 'game_tips', 'interfaces',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -411,6 +413,10 @@ function App() {
 
   const gameTipContent = selectedEntry?.name === 'game_tips' && selectedItemContent != null
     ? selectedItemContent as GameTipData
+    : null
+
+  const interfaceContent = selectedEntry?.name === 'interfaces' && selectedItemContent != null
+    ? selectedItemContent as InterfaceData
     : null
 
   const hitsplatContent = selectedEntry?.name === 'config_hitsplats' && selectedItemContent != null
@@ -1310,6 +1316,8 @@ function App() {
                 ? <MapViewer data={mapContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : gameTipContent != null
                 ? <GameTipViewer data={gameTipContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenTip={(id) => handleNavigateToItem('game_tips', id)} />
+                : interfaceContent != null
+                ? <InterfaceViewer data={interfaceContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : hitsplatContent != null
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : defaultsContent != null
