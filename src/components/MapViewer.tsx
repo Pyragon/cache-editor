@@ -4,6 +4,7 @@ import { PLANES, SIZE, tileIndex } from '../loaders/maps'
 import { rgbToRenderedHex } from '../loaders/models'
 import { NumberInput } from './defFields'
 import { useZoom } from './useZoom'
+import MapSceneViewer from './MapSceneViewer'
 import './MapViewer.css'
 
 const ZOOM_LEVELS = [4, 6, 8, 10, 14]
@@ -28,6 +29,7 @@ export default function MapViewer({ data, onSave, onDirtyChange }: {
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [plane, setPlane] = useState(0)
+  const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d')
   const [zoom, setZoom] = useZoom('cache-editor:map-zoom', ZOOM_LEVELS, 8)
   const [selected, setSelected] = useState<SelectedTile | null>(null)
   const [hoverObj, setHoverObj] = useState<{ x: number; y: number; text: string } | null>(null)
@@ -183,8 +185,15 @@ export default function MapViewer({ data, onSave, onDirtyChange }: {
           {data.def.hasLocations && <span className="item-id-badge">{data.def.objects.length} objects</span>}
           {!data.def.hasLocations && <span className="item-id-badge">no location key</span>}
         </div>
+        <div className="map-mode-toggle">
+          <button type="button" className={viewMode === '2d' ? 'selected' : ''} onClick={() => setViewMode('2d')}>2D</button>
+          <button type="button" className={viewMode === '3d' ? 'selected' : ''} onClick={() => setViewMode('3d')}>3D</button>
+        </div>
       </div>
 
+      {viewMode === '3d' && <MapSceneViewer data={{ ...data, terrain }} />}
+
+      {viewMode === '2d' && <>
       <section className="item-section">
         <p className="tex-op-note">
           Top-down preview: tile colour blends the overlay (paths, water) over the underlay (ground
@@ -285,10 +294,11 @@ export default function MapViewer({ data, onSave, onDirtyChange }: {
           <p className="tex-op-note">
             Bit 0x1 of Tile Flags blocks the tile (the red tint above). Height is an explicit
             override — when off, the client derives a smooth default from its terrain noise
-            function, which this editor doesn't reproduce.
+            function (the 3D view reproduces it).
           </p>
         </section>
       )}
+      </>}
 
       {isDirty && (
         <div className="save-bar">

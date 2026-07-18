@@ -33,3 +33,26 @@
   color: var(--text);
   white-space: nowrap;
 }
+
+/* 2D/3D mode toggle */
+.map-mode-toggle {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.map-mode-toggle button {
+  padding: 4px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-dim, #8a90a0);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map-mode-toggle button.selected {
+  color: #fff;
+  background: rgba(0, 102, 255, 0.18);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}

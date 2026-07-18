@@ -86,6 +86,8 @@ export type MapData = {
   terrain: MapTerrain
   underlayColors: ColorLookup
   overlayColors: ColorLookup
+  /** Cache root, for the 3D scene view's on-demand config/model loads. */
+  rootHandle?: FileSystemDirectoryHandle
 }
 
 async function loadColorLookup(
@@ -161,7 +163,7 @@ const loader: CacheLoader = {
       ? await getColorLookups(rootHandle)
       : [new Map(), new Map()]
 
-    return { id: item.id, def, terrain, underlayColors, overlayColors } satisfies MapData
+    return { id: item.id, def, terrain, underlayColors, overlayColors, rootHandle } satisfies MapData
   },
 
   async saveItem(dirHandle, item, data) {
