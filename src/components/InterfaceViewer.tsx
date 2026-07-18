@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { InterfaceData, IComponentDefinition, ModelType, CS2Script } from '../loaders/interfaces'
 import { MODEL_TYPES } from '../loaders/interfaces'
-import { resolveLayout } from '../loaders/interfaceLayout'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getLoader } from '../loaders'
 import type { ModelData } from '../loaders/models'
 import ModelViewer from './ModelViewer'
 import { NumberInput, NumGrid, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
-import { loadSpriteMeta, renderFrameToCanvas } from './spriteRender'
+import { InterfaceAssets, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
 import './InterfaceViewer.css'
 
 // CS2 script hooks a component may carry — shown as a flat list of the ones
@@ -91,15 +90,6 @@ const CURSOR_FIELDS: NumFieldDef[] = [
   ['dragType', 'Drag Type'],
 ]
 
-function argbToCss(argb: number): string {
-  if (argb === 0) return 'transparent'
-  const a = ((argb >>> 24) & 0xff) / 255
-  const r = (argb >> 16) & 0xff
-  const g = (argb >> 8) & 0xff
-  const b = argb & 0xff
-  return `rgba(${r}, ${g}, ${b}, ${a || 1})`
-}
-
 function rgbInputHex(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`
 }
@@ -135,82 +125,6 @@ function depthOf(byId: Map<number, IComponentDefinition>, c: IComponentDefinitio
   return depth
 }
 
-function drawComponent(
-  ctx: CanvasRenderingContext2D,
-  c: IComponentDefinition,
-  rect: { x: number; y: number; width: number; height: number },
-  sprites: Map<number, HTMLCanvasElement>,
-  selected: boolean,
-) {
-  const { x, y, width, height } = rect
-  if (width <= 0 || height <= 0) return
-
-  switch (c.type) {
-    case 'CONTAINER':
-      ctx.strokeStyle = selected ? '#5ab0ff' : 'rgba(255,255,255,0.12)'
-      ctx.lineWidth = selected ? 2 : 1
-      ctx.strokeRect(x + 0.5, y + 0.5, width, height)
-      break
-    case 'SPRITE': {
-      const sprite = c.spriteId >= 0 ? sprites.get(c.spriteId) : undefined
-      if (sprite) {
-        ctx.drawImage(sprite, x, y, width, height)
-      } else {
-        ctx.fillStyle = 'rgba(120,120,140,0.25)'
-        ctx.fillRect(x, y, width, height)
-      }
-      break
-    }
-    case 'MODEL': {
-      ctx.fillStyle = 'rgba(90,140,255,0.15)'
-      ctx.fillRect(x, y, width, height)
-      ctx.strokeStyle = 'rgba(90,140,255,0.6)'
-      ctx.strokeRect(x + 0.5, y + 0.5, width, height)
-      if (width > 24 && height > 12) {
-        ctx.fillStyle = '#5ab0ff'
-        ctx.font = '10px sans-serif'
-        ctx.fillText('3D', x + 4, y + 12)
-      }
-      break
-    }
-    case 'FIGURE':
-      ctx.fillStyle = argbToCss(c.color)
-      if (c.filled) ctx.fillRect(x, y, width, height)
-      else ctx.strokeRect(x + 0.5, y + 0.5, width, height)
-      break
-    case 'LINE':
-      ctx.strokeStyle = argbToCss(c.color)
-      ctx.lineWidth = Math.max(1, c.lineWidth)
-      ctx.beginPath()
-      if (c.lineDirection) {
-        ctx.moveTo(x, y + height)
-        ctx.lineTo(x + width, y)
-      } else {
-        ctx.moveTo(x, y)
-        ctx.lineTo(x + width, y + height)
-      }
-      ctx.stroke()
-      break
-    case 'TEXT':
-      // Real glyph rendering needs the cache font loaded async; approximate
-      // with the browser's font here so the preview stays synchronous.
-      ctx.fillStyle = argbToCss(c.color || 0xffffffff)
-      ctx.font = `${Math.max(8, Math.min(height, 16))}px sans-serif`
-      ctx.textBaseline = 'top'
-      if (c.text) ctx.fillText(c.text, x + 1, y + 1, width)
-      break
-    default:
-      ctx.strokeStyle = 'rgba(255,255,255,0.08)'
-      ctx.strokeRect(x + 0.5, y + 0.5, width, height)
-  }
-
-  if (selected) {
-    ctx.strokeStyle = '#5ab0ff'
-    ctx.lineWidth = 2
-    ctx.strokeRect(x + 0.5, y + 0.5, width, height)
-  }
-}
-
 export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigate }: {
   data: InterfaceData
   onSave: (data: InterfaceData) => Promise<void>
@@ -223,10 +137,14 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [viewportW, setViewportW] = useState(765)
   const [viewportH, setViewportH] = useState(503)
-  const [zoom, setZoom] = useState(1)
+  const [showHidden, setShowHidden] = useState(false)
+  const [showOutlines, setShowOutlines] = useState(true)
+  /** null = fit the panel; a number = explicit scale with scrollable overflow. */
+  const [zoom, setZoom] = useState<number | null>(null)
+  const [activeSection, setActiveSection] = useState('layout')
   const [modelPreview, setModelPreview] = useState<{ modelId: number; loading: boolean; data: ModelData | null } | null>(null)
-  const [sprites, setSprites] = useState<Map<number, HTMLCanvasElement>>(new Map())
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const assetsRef = useRef<InterfaceAssets | null>(null)
 
   useEffect(() => {
     setComponents(data.components)
@@ -235,61 +153,73 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     setModelPreview(null)
   }, [data])
 
+  // One asset cache per opened cache root (sprites/fonts/model renders persist across interfaces).
+  useEffect(() => {
+    if (!data.rootHandle) return
+    const assets = new InterfaceAssets(data.rootHandle)
+    assetsRef.current = assets
+    return () => {
+      assets.dispose()
+      if (assetsRef.current === assets) assetsRef.current = null
+    }
+  }, [data.rootHandle])
+
   useEffect(() => {
     onDirtyChange?.(isDirty)
   }, [isDirty, onDirtyChange])
 
   const list = useMemo(() => components.filter((c): c is IComponentDefinition => c != null), [components])
   const byId = useMemo(() => new Map(list.map((c) => [c.componentId, c])), [list])
-  const layout = useMemo(() => resolveLayout(components, viewportW, viewportH), [components, viewportW, viewportH])
+  const layout = useMemo(() => resolveAbsoluteLayout(components, viewportW, viewportH), [components, viewportW, viewportH])
   const selected = selectedId != null ? byId.get(selectedId) ?? null : null
 
-  // --- sprite loading for the preview ---
-  useEffect(() => {
-    let cancelled = false
-    const ids = new Set<number>()
-    for (const c of list) if (c.type === 'SPRITE' && c.spriteId >= 0) ids.add(c.spriteId)
-    if (ids.size === 0 || !data.rootHandle) {
-      setSprites(new Map())
-      return
-    }
-    ;(async () => {
-      try {
-        const spritesDir = await resolveEntryHandle(data.rootHandle!, getEntryPath('sprites'))
-        if (!spritesDir) return
-        const map = new Map<number, HTMLCanvasElement>()
-        await Promise.all([...ids].map(async (id) => {
-          const meta = await loadSpriteMeta(spritesDir, id)
-          const canvas = meta && renderFrameToCanvas(meta)
-          if (canvas) map.set(id, canvas)
-        }))
-        if (!cancelled) setSprites(map)
-      } catch {
-        // sprites entry not dumped
-      }
-    })()
-    return () => { cancelled = true }
-  }, [list, data.rootHandle])
-
-  // --- draw preview ---
+  // --- draw preview: load whatever assets this frame needs, then paint ---
   useEffect(() => {
     const canvas = canvasRef.current
+    const assets = assetsRef.current
     if (!canvas) return
-    const ctx = canvas.getContext('2d')!
-    canvas.width = viewportW * zoom
-    canvas.height = viewportH * zoom
-    ctx.setTransform(zoom, 0, 0, zoom, 0, 0)
-    ctx.fillStyle = '#1b1d24'
-    ctx.fillRect(0, 0, viewportW, viewportH)
+    let cancelled = false
+    const opts = { showHidden, showContainerOutlines: showOutlines }
+    // Fixed 2× supersample: the canvas is CSS-fitted to its panel (the whole
+    // interface is always visible, never scrolled), so the buffer renders at
+    // 2× and downscales crisply.
+    const SCALE = 2
 
-    const sorted = [...list].sort((a, b) => depthOf(byId, a) - depthOf(byId, b))
-    for (const c of sorted) {
-      if (c.hidden) continue
-      const rect = layout.get(c.componentId)
-      if (!rect) continue
-      drawComponent(ctx, c, rect, sprites, c.componentId === selectedId)
+    function paintBase(ctx: CanvasRenderingContext2D) {
+      canvas!.width = viewportW * SCALE
+      canvas!.height = viewportH * SCALE
+      ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0)
+      ctx.imageSmoothingEnabled = false
+      ctx.fillStyle = '#14161d'
+      ctx.fillRect(0, 0, viewportW, viewportH)
     }
-  }, [list, byId, components, layout, sprites, selectedId, viewportW, viewportH, zoom])
+
+    function paintSelection(ctx: CanvasRenderingContext2D) {
+      if (selectedId == null) return
+      const rect = layout.get(selectedId)
+      if (!rect) return
+      ctx.strokeStyle = '#2f8fff'
+      ctx.lineWidth = 1.5
+      ctx.setLineDash([5, 3])
+      ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width, rect.height)
+      ctx.setLineDash([])
+    }
+
+    ;(async () => {
+      const ctx = canvas.getContext('2d')!
+      if (!assets) {
+        paintBase(ctx)
+        paintSelection(ctx)
+        return
+      }
+      const resolved = await loadPreviewAssets(assets, components, layout, viewportW, viewportH, opts)
+      if (cancelled) return
+      paintBase(ctx)
+      paintInterface(ctx, components, layout, resolved, viewportW, viewportH, opts)
+      paintSelection(ctx)
+    })()
+    return () => { cancelled = true }
+  }, [components, layout, selectedId, viewportW, viewportH, showHidden, showOutlines])
 
   function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
     const canvas = canvasRef.current
@@ -302,7 +232,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     let best: { id: number; depth: number } | null = null
     for (const c of list) {
       const rect = layout.get(c.componentId)
-      if (!rect || c.hidden) continue
+      if (!rect || (c.hidden && !showHidden)) continue
       if (px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height) {
         const depth = depthOf(byId, c)
         if (!best || depth >= best.depth) best = { id: c.componentId, depth }
@@ -347,6 +277,19 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     }
   }
 
+  const attachedScripts = selected ? SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null).length : 0
+  const hasTypeSection = selected != null && ['SPRITE', 'MODEL', 'TEXT', 'FIGURE', 'LINE'].includes(selected.type)
+  const sections: { key: string; label: string }[] = selected
+    ? [
+        { key: 'layout', label: 'Layout' },
+        ...(hasTypeSection ? [{ key: 'type', label: selected.type }] : []),
+        { key: 'ops', label: 'Ops & Cursors' },
+        { key: 'scripts', label: attachedScripts > 0 ? `CS2 Scripts (${attachedScripts})` : 'CS2 Scripts' },
+      ]
+    : []
+  // fall back when the selected component has no type-specific section
+  const active = activeSection === 'type' && !hasTypeSection ? 'layout' : activeSection
+
   return (
     <div className="iface-viewer">
       <div className="iface-header">
@@ -358,10 +301,24 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
           ×
           <NumberInput className="cell-input" value={viewportH} onChange={setViewportH} min={16} />
         </label>
+        <div className="iface-presets">
+          <button type="button" title="Classic fixed game screen" onClick={() => { setViewportW(765); setViewportH(503) }}>765×503</button>
+          <button type="button" title="Fixed-mode 3D viewport" onClick={() => { setViewportW(512); setViewportH(334) }}>512×334</button>
+          <button type="button" title="A resizable-mode window" onClick={() => { setViewportW(1024); setViewportH(768) }}>1024×768</button>
+        </div>
+        <label className="iface-toggle">
+          <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />
+          Show hidden
+        </label>
+        <label className="iface-toggle">
+          <input type="checkbox" checked={showOutlines} onChange={(e) => setShowOutlines(e.target.checked)} />
+          Container outlines
+        </label>
         <div className="iface-zoom">
-          <button type="button" onClick={() => setZoom((z) => Math.max(0.25, z - 0.25))}>−</button>
-          <span>{Math.round(zoom * 100)}%</span>
-          <button type="button" onClick={() => setZoom((z) => Math.min(3, z + 0.25))}>+</button>
+          <button type="button" onClick={() => setZoom((z) => Math.max(0.25, (z ?? 1) - 0.25))}>−</button>
+          <span>{zoom == null ? 'Fit' : `${Math.round(zoom * 100)}%`}</span>
+          <button type="button" onClick={() => setZoom((z) => Math.min(4, (z ?? 1) + 0.25))}>+</button>
+          {zoom != null && <button type="button" className="iface-zoom-fit" onClick={() => setZoom(null)}>Fit</button>}
         </div>
       </div>
 
@@ -386,7 +343,12 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
 
         <div className="iface-main">
           <div className="iface-canvas-wrap">
-            <canvas ref={canvasRef} className="iface-canvas" onClick={handleCanvasClick} />
+            <canvas
+              ref={canvasRef}
+              className="iface-canvas"
+              onClick={handleCanvasClick}
+              style={zoom == null ? undefined : { width: `${viewportW * zoom}px`, maxWidth: 'none', maxHeight: 'none' }}
+            />
           </div>
 
           {selected && (
@@ -396,25 +358,27 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                 {selected.parent !== -1 && <span className="iface-parent-note"> (parent {selected.parent & 0xffff})</span>}
               </div>
 
-              <section className="item-section">
-                <h3>Layout</h3>
-                <NumGrid fields={LAYOUT_FIELDS} values={selected} onChange={(k, v) => set(k as keyof IComponentDefinition, v)} />
-                <div className="iface-aspect-row">
-                  {(['aspectWidthType', 'aspectHeightType', 'aspectXType', 'aspectYType'] as const).map((key) => (
-                    <label key={key} className="item-field">
-                      <span className="item-field-label">{key}</span>
-                      <NumberInput value={selected[key]} onChange={(v) => set(key, v)} min={0} max={5} />
-                    </label>
-                  ))}
-                </div>
-                <ToggleGrid
-                  fields={[['hidden', 'Hidden'], ['preventClickThrough', 'Prevent Click-Through']]}
-                  values={selected}
-                  onChange={(k, v) => set(k as keyof IComponentDefinition, v)}
-                />
-              </section>
+              {active === 'layout' && (
+                <section className="item-section">
+                  <h3>Layout</h3>
+                  <NumGrid fields={LAYOUT_FIELDS} values={selected} onChange={(k, v) => set(k as keyof IComponentDefinition, v)} />
+                  <div className="iface-aspect-row">
+                    {(['aspectWidthType', 'aspectHeightType', 'aspectXType', 'aspectYType'] as const).map((key) => (
+                      <label key={key} className="item-field">
+                        <span className="item-field-label">{key}</span>
+                        <NumberInput value={selected[key]} onChange={(v) => set(key, v)} min={0} max={5} />
+                      </label>
+                    ))}
+                  </div>
+                  <ToggleGrid
+                    fields={[['hidden', 'Hidden'], ['preventClickThrough', 'Prevent Click-Through']]}
+                    values={selected}
+                    onChange={(k, v) => set(k as keyof IComponentDefinition, v)}
+                  />
+                </section>
+              )}
 
-              {selected.type === 'SPRITE' && (
+              {active === 'type' && selected.type === 'SPRITE' && (
                 <section className="item-section">
                   <h3>Sprite</h3>
                   <NumGrid
@@ -435,7 +399,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                 </section>
               )}
 
-              {selected.type === 'MODEL' && (
+              {active === 'type' && selected.type === 'MODEL' && (
                 <section className="item-section">
                   <h3>Model</h3>
                   <label className="item-field">
@@ -474,7 +438,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                 </section>
               )}
 
-              {selected.type === 'TEXT' && (
+              {active === 'type' && selected.type === 'TEXT' && (
                 <section className="item-section">
                   <h3>Text</h3>
                   <label className="item-field iface-text-field">
@@ -502,7 +466,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                 </section>
               )}
 
-              {(selected.type === 'FIGURE' || selected.type === 'LINE') && (
+              {active === 'type' && (selected.type === 'FIGURE' || selected.type === 'LINE') && (
                 <section className="item-section">
                   <h3>{selected.type === 'FIGURE' ? 'Figure' : 'Line'}</h3>
                   <NumGrid
@@ -522,51 +486,71 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                 </section>
               )}
 
-              <section className="item-section">
-                <h3>Options &amp; Cursors</h3>
-                <label className="item-field">
-                  <span className="item-field-label">Op Base</span>
-                  <input className="cell-input" value={selected.opBase} onChange={(e) => set('opBase', e.target.value)} />
-                </label>
-                <label className="item-field">
-                  <span className="item-field-label">Target Verb</span>
-                  <input className="cell-input" value={selected.targetVerb} onChange={(e) => set('targetVerb', e.target.value)} />
-                </label>
-                {(selected.options ?? []).map((opt, i) => (
-                  <label key={i} className="item-field">
-                    <span className="item-field-label">Option {i + 1}</span>
-                    <input
-                      className="cell-input"
-                      value={opt ?? ''}
-                      onChange={(e) => {
-                        const next = [...(selected.options ?? [])]
-                        next[i] = e.target.value
-                        set('options', next)
-                      }}
-                    />
+              {active === 'ops' && (
+                <section className="item-section">
+                  <h3>Options &amp; Cursors</h3>
+                  <label className="item-field">
+                    <span className="item-field-label">Op Base</span>
+                    <input className="cell-input" value={selected.opBase} onChange={(e) => set('opBase', e.target.value)} />
                   </label>
-                ))}
-                <NumGrid fields={CURSOR_FIELDS} values={selected} onChange={(k, v) => set(k as keyof IComponentDefinition, v)} />
-              </section>
+                  <label className="item-field">
+                    <span className="item-field-label">Target Verb</span>
+                    <input className="cell-input" value={selected.targetVerb} onChange={(e) => set('targetVerb', e.target.value)} />
+                  </label>
+                  {(selected.options ?? []).map((opt, i) => (
+                    <label key={i} className="item-field">
+                      <span className="item-field-label">Option {i + 1}</span>
+                      <input
+                        className="cell-input"
+                        value={opt ?? ''}
+                        onChange={(e) => {
+                          const next = [...(selected.options ?? [])]
+                          next[i] = e.target.value
+                          set('options', next)
+                        }}
+                      />
+                    </label>
+                  ))}
+                  <NumGrid fields={CURSOR_FIELDS} values={selected} onChange={(k, v) => set(k as keyof IComponentDefinition, v)} />
+                </section>
+              )}
 
-              <section className="item-section">
-                <h3>CS2 Scripts</h3>
-                {SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null).length === 0 && (
-                  <div className="iface-no-scripts">No scripts attached to this component.</div>
-                )}
-                {SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null).map(([key, label]) => (
-                  <label key={key} className="item-field iface-text-field">
-                    <span className="item-field-label">{label}</span>
-                    <input
-                      className="cell-input"
-                      value={scriptToText(selected[key] as CS2Script | null)}
-                      onChange={(e) => set(key, textToScript(e.target.value))}
-                    />
-                  </label>
-                ))}
-              </section>
+              {active === 'scripts' && (
+                <section className="item-section">
+                  <h3>CS2 Scripts</h3>
+                  {attachedScripts === 0 && (
+                    <div className="iface-no-scripts">No scripts attached to this component.</div>
+                  )}
+                  {SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null).map(([key, label]) => (
+                    <label key={key} className="item-field iface-text-field">
+                      <span className="item-field-label">{label}</span>
+                      <input
+                        className="cell-input"
+                        value={scriptToText(selected[key] as CS2Script | null)}
+                        onChange={(e) => set(key, textToScript(e.target.value))}
+                      />
+                    </label>
+                  ))}
+                </section>
+              )}
             </div>
           )}
+        </div>
+
+        <div className="iface-side">
+          {!selected && (
+            <div className="iface-side-hint">Click a component in the preview or the tree to inspect it.</div>
+          )}
+          {sections.map(({ key, label }) => (
+            <button
+              key={key}
+              type="button"
+              className={`iface-section-btn${active === key ? ' selected' : ''}`}
+              onClick={() => setActiveSection(key)}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 

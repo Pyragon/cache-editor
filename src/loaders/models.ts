@@ -93,6 +93,10 @@ export function rgbToRenderedHex(rgb: number): string {
 
 export type ModelData = {
   id: number
+  /** Mesh format version. Pre-13 meshes store coordinates at 1× — the client
+   *  upscales them <<2 into the version-13+ fixed-point space before
+   *  rendering (RSMesh.upscale / darkan Mesh.upscale). */
+  version: number
   vertexCount: number
   faceCount: number
   vertexX: Int32Array
@@ -147,6 +151,10 @@ export type ModelData = {
   // Effectors (same footer flag, second list) and their resolved particle types.
   effectors: ModelEffector[] | null
   effectorTypes: Map<number, EffectorType>
+  // Per-vertex bone-group id (darkan Mesh.kt vertexSkinBuf) — animation frame
+  // bases index vertex groups by these ids via their `labels` arrays. Absent
+  // on models with no skeletal animation (most static scenery).
+  vertexSkins: Uint8Array | null
 }
 
 // Structural mirror of ParticleType (see loaders/particles.ts) — everything the
@@ -285,6 +293,7 @@ function decodeVertices(
   vertexX: Int32Array,
   vertexY: Int32Array,
   vertexZ: Int32Array,
+  vertexSkins: Uint8Array | null,
 ) {
   let bx = 0, by = 0, bz = 0
   for (let v = 0; v < vertexCount; v++) {
@@ -295,7 +304,7 @@ function decodeVertices(
     vertexX[v] = bx
     vertexY[v] = by
     vertexZ[v] = bz
-    skinReader?.u8()
+    if (vertexSkins) vertexSkins[v] = skinReader!.u8()
   }
 }
 
@@ -385,6 +394,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceType = hasFaceRenderTypes ? new Int8Array(faceCount) : null
   const faceTextures = hasFaceTextures === 1 ? new Int32Array(faceCount) : null
   const texturePos = hasFaceTextures === 1 && texturedFaceCount > 0 ? new Int16Array(faceCount) : null
+  const vertexSkins = hasVertexSkins === 1 ? new Uint8Array(vertexCount) : null
 
   // Decode vertices
   decodeVertices(
@@ -393,7 +403,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     new BinReader(data).at(vertYOffset),
     new BinReader(data).at(vertZOffset),
     hasVertexSkins === 1 ? new BinReader(data).at(vertSkinsOffset) : null,
-    vertexCount, vertexX, vertexY, vertexZ,
+    vertexCount, vertexX, vertexY, vertexZ, vertexSkins,
   )
 
   // Decode face attributes
@@ -560,6 +570,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   }
 
   return {
+    version,
     vertexCount, faceCount,
     vertexX, vertexY, vertexZ,
     triangleX, triangleY, triangleZ,
@@ -582,6 +593,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     emitterProducers: new Map(),
     effectors,
     effectorTypes: new Map(),
+    vertexSkins,
   }
 }
 
@@ -641,6 +653,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceType = hasFaceInfo === 1 ? new Int8Array(fc) : null
   const faceTextures = hasFaceInfo === 1 ? new Int32Array(fc) : null
   const texturePos = hasFaceInfo === 1 ? new Int16Array(fc) : null
+  const vertexSkins = hasVertexSkins === 1 ? new Uint8Array(vc) : null
 
   // Decode vertices
   decodeVertices(
@@ -649,7 +662,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     new BinReader(data).at(vertYOff),
     new BinReader(data).at(vertZOff),
     hasVertexSkins === 1 ? new BinReader(data).at(vertSkinsOff) : null,
-    vc, vertexX, vertexY, vertexZ,
+    vc, vertexX, vertexY, vertexZ, vertexSkins,
   )
 
   // Decode face attributes
@@ -716,6 +729,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   }
 
   return {
+    version: 12, // the old format predates the version byte — always pre-13 scale
     vertexCount: vc, faceCount: fc,
     vertexX, vertexY, vertexZ,
     triangleX, triangleY, triangleZ,
@@ -739,6 +753,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     emitterProducers: new Map(),
     effectors: null,
     effectorTypes: new Map(),
+    vertexSkins,
   }
 }
 
@@ -750,6 +765,165 @@ export function parseModel(data: Uint8Array, id: number): ModelData {
   const isNew = data[data.length - 1] === 0xFF && data[data.length - 2] === 0xFF
   const parsed = isNew ? decodeNewFormat(data) : decodeOldFormat(data)
   return { id, ...parsed }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-model merge (identikit body/head composites, player equipment) —
+// ports cryogen's RSMesh(RSMesh[], size) constructor, used by
+// IdentiKitDefinitions.renderBody()/renderHead(). The Java version also
+// deduplicates shared vertices across sub-meshes (addVertexToMesh) for
+// skeletal-animation correctness, but ModelViewer already flattens every
+// face to its own 3 corners (no shared/indexed vertex buffer reaches
+// Three.js), so a plain concatenation with index-offsetting renders
+// identically without that complexity.
+export function mergeModels(models: ModelData[]): ModelData {
+  let vertexCount = 0, faceCount = 0, texturedFaceCount = 0
+  for (const m of models) { vertexCount += m.vertexCount; faceCount += m.faceCount; texturedFaceCount += m.textureRenderTypes?.length ?? 0 }
+
+  const vertexX = new Int32Array(vertexCount)
+  const vertexY = new Int32Array(vertexCount)
+  const vertexZ = new Int32Array(vertexCount)
+  const triangleX = new Int16Array(faceCount)
+  const triangleY = new Int16Array(faceCount)
+  const triangleZ = new Int16Array(faceCount)
+  const faceColor = new Uint16Array(faceCount)
+  const faceAlpha = new Int8Array(faceCount)
+
+  const anyFacePriorities = models.some((m) => m.facePriorities)
+  const facePriorities = anyFacePriorities ? new Int8Array(faceCount) : null
+  const anyFaceType = models.some((m) => m.faceType)
+  const faceType = anyFaceType ? new Int8Array(faceCount) : null
+  const anyFaceTextures = models.some((m) => m.faceTextures)
+  const faceTextures = anyFaceTextures ? new Int32Array(faceCount).fill(-1) : null
+  const anyTexturePos = models.some((m) => m.texturePos)
+  const texturePos = anyTexturePos ? new Int16Array(faceCount).fill(-1) : null
+  const anyVertexSkins = models.some((m) => m.vertexSkins)
+  const vertexSkins = anyVertexSkins ? new Uint8Array(vertexCount) : null
+
+  const textureRenderTypes = texturedFaceCount > 0 ? new Int8Array(texturedFaceCount) : null
+  const textureP = texturedFaceCount > 0 ? new Int32Array(texturedFaceCount) : null
+  const textureM = texturedFaceCount > 0 ? new Int32Array(texturedFaceCount) : null
+  const textureN = texturedFaceCount > 0 ? new Int32Array(texturedFaceCount) : null
+  const textureNormalX = texturedFaceCount > 0 ? new Int16Array(texturedFaceCount) : null
+  const textureNormalY = texturedFaceCount > 0 ? new Int16Array(texturedFaceCount) : null
+  const textureNormalZ = texturedFaceCount > 0 ? new Int16Array(texturedFaceCount) : null
+  const textureScaleX = texturedFaceCount > 0 ? new Int32Array(texturedFaceCount) : null
+  const textureScaleY = texturedFaceCount > 0 ? new Int32Array(texturedFaceCount) : null
+  const textureScaleZ = texturedFaceCount > 0 ? new Int32Array(texturedFaceCount) : null
+  const textureRotation = texturedFaceCount > 0 ? new Uint8Array(texturedFaceCount) : null
+  const textureDirection = texturedFaceCount > 0 ? new Int8Array(texturedFaceCount) : null
+  const textureSpeed = texturedFaceCount > 0 ? new Int8Array(texturedFaceCount) : null
+  const textureTransU = texturedFaceCount > 0 ? new Int8Array(texturedFaceCount) : null
+  const textureTransV = texturedFaceCount > 0 ? new Int8Array(texturedFaceCount) : null
+
+  const textures = new Map<number, Blob>()
+  const textureSpeeds = new Map<number, { u: number; v: number }>()
+  const billboards: ModelBillboard[] = []
+  const billboardTypes = new Map<number, { def: BillboardTypeDef; material: Blob | null }>()
+  const emitters: ModelEmitter[] = []
+  const emitterProducers = new Map<number, EmitterProducer>()
+  const effectors: ModelEffector[] = []
+  const effectorTypes = new Map<number, EffectorType>()
+
+  let vOff = 0, fOff = 0, tOff = 0
+  for (const m of models) {
+    for (let v = 0; v < m.vertexCount; v++) {
+      vertexX[vOff + v] = m.vertexX[v]
+      vertexY[vOff + v] = m.vertexY[v]
+      vertexZ[vOff + v] = m.vertexZ[v]
+      if (vertexSkins) vertexSkins[vOff + v] = m.vertexSkins?.[v] ?? 0
+    }
+    for (let f = 0; f < m.faceCount; f++) {
+      triangleX[fOff + f] = m.triangleX[f] + vOff
+      triangleY[fOff + f] = m.triangleY[f] + vOff
+      triangleZ[fOff + f] = m.triangleZ[f] + vOff
+      faceColor[fOff + f] = m.faceColor[f]
+      faceAlpha[fOff + f] = m.faceAlpha[f]
+      if (facePriorities) facePriorities[fOff + f] = m.facePriorities?.[f] ?? m.priority
+      if (faceType) faceType[fOff + f] = m.faceType?.[f] ?? 0
+      if (faceTextures && m.faceTextures) faceTextures[fOff + f] = m.faceTextures[f]
+      if (texturePos && m.texturePos) {
+        const pos = m.texturePos[f]
+        texturePos[fOff + f] = pos >= 0 ? pos + tOff : -1
+      }
+    }
+    if (m.textureRenderTypes) {
+      for (let t = 0; t < m.textureRenderTypes.length; t++) {
+        textureRenderTypes![tOff + t] = m.textureRenderTypes[t]
+        textureP![tOff + t] = (m.textureP?.[t] ?? 0) + vOff
+        textureM![tOff + t] = (m.textureM?.[t] ?? 0) + vOff
+        textureN![tOff + t] = (m.textureN?.[t] ?? 0) + vOff
+        textureNormalX![tOff + t] = m.textureNormalX?.[t] ?? 0
+        textureNormalY![tOff + t] = m.textureNormalY?.[t] ?? 0
+        textureNormalZ![tOff + t] = m.textureNormalZ?.[t] ?? 0
+        textureScaleX![tOff + t] = m.textureScaleX?.[t] ?? 0
+        textureScaleY![tOff + t] = m.textureScaleY?.[t] ?? 0
+        textureScaleZ![tOff + t] = m.textureScaleZ?.[t] ?? 0
+        textureRotation![tOff + t] = m.textureRotation?.[t] ?? 0
+        textureDirection![tOff + t] = m.textureDirection?.[t] ?? 0
+        textureSpeed![tOff + t] = m.textureSpeed?.[t] ?? 0
+        textureTransU![tOff + t] = m.textureTransU?.[t] ?? 0
+        textureTransV![tOff + t] = m.textureTransV?.[t] ?? 0
+      }
+    }
+    for (const [id, blob] of m.textures) textures.set(id, blob)
+    for (const [id, speed] of m.textureSpeeds) textureSpeeds.set(id, speed)
+    if (m.billboards) for (const b of m.billboards) billboards.push({ ...b, face: b.face + fOff })
+    for (const [id, info] of m.billboardTypes) billboardTypes.set(id, info)
+    if (m.emitters) for (const e of m.emitters) emitters.push({ ...e, face: e.face + fOff })
+    for (const [id, info] of m.emitterProducers) emitterProducers.set(id, info)
+    if (m.effectors) for (const e of m.effectors) effectors.push({ ...e, vertex: e.vertex + vOff })
+    for (const [id, type] of m.effectorTypes) effectorTypes.set(id, type)
+
+    vOff += m.vertexCount
+    fOff += m.faceCount
+    tOff += m.textureRenderTypes?.length ?? 0
+  }
+
+  return {
+    id: models[0]?.id ?? -1,
+    // max of the parts: a merged mesh containing any v13+ part must not be
+    // upscaled again by a consumer (mixed-version merges are inconsistent
+    // regardless — the client upscales each part before combining)
+    version: models.reduce((v, m) => Math.max(v, m.version), 12),
+    vertexCount, faceCount,
+    vertexX, vertexY, vertexZ,
+    triangleX, triangleY, triangleZ,
+    faceColor, faceAlpha,
+    priority: models[0]?.priority ?? 0,
+    facePriorities, faceType,
+    faceTextures, texturePos,
+    textureRenderTypes, textureP, textureM, textureN,
+    textureNormalX, textureNormalY, textureNormalZ,
+    textureScaleX, textureScaleY, textureScaleZ,
+    textureRotation, textureDirection, textureSpeed,
+    textureTransU, textureTransV,
+    textures, textureSpeeds,
+    billboards: billboards.length > 0 ? billboards : null,
+    billboardTypes,
+    emitters: emitters.length > 0 ? emitters : null,
+    emitterProducers,
+    effectors: effectors.length > 0 ? effectors : null,
+    effectorTypes,
+    vertexSkins,
+  }
+}
+
+// Exact-match face recolour/retexture, in place — ports RSMesh.recolour()/
+// retexture() (identikits apply these across the merged body/head mesh).
+export function applyRecolor(model: ModelData, recolorFrom: number[], recolorTo: number[], retextureFrom: number[], retextureTo: number[]): void {
+  for (let f = 0; f < model.faceCount; f++) {
+    const hsl = model.faceColor[f]
+    const idx = recolorFrom.indexOf(hsl)
+    if (idx >= 0) model.faceColor[f] = recolorTo[idx]
+  }
+  if (model.faceTextures) {
+    for (let f = 0; f < model.faceCount; f++) {
+      const tex = model.faceTextures[f]
+      const idx = retextureFrom.indexOf(tex)
+      if (idx >= 0) model.faceTextures[f] = retextureTo[idx]
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
