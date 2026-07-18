@@ -43,6 +43,7 @@ import particles from './particles'
 import quick_chat_menus from './quick_chat_menus'
 import quick_chat_messages from './quick_chat_messages'
 import sound_effects from './sound_effects'
+import sound_effects_midi from './sound_effects_midi'
 import spot_animations from './spot_animations'
 import sprites from './sprites'
 import texture_definitions from './texture_definitions'
@@ -95,6 +96,7 @@ const registry: Record<string, CacheLoader> = {
   quick_chat_menus,
   quick_chat_messages,
   sound_effects,
+  sound_effects_midi,
   spot_animations,
   sprites,
   texture_definitions,

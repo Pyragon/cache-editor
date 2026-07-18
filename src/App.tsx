@@ -63,6 +63,18 @@ import MidiInstrumentViewer from './components/MidiInstrumentViewer'
 import type { MidiInstrumentData } from './loaders/midi_instruments'
 import MusicViewer from './components/MusicViewer'
 import type { MusicData } from './loaders/music'
+import SoundEffectMidiViewer from './components/SoundEffectMidiViewer'
+import type { SoundEffectMidiData } from './loaders/sound_effects_midi'
+import IdentikitViewer from './components/IdentikitViewer'
+import type { IdentikitData } from './loaders/config/identikit'
+import AnimationViewer from './components/AnimationViewer'
+import type { AnimationData } from './loaders/animations'
+import AnimationFrameBaseViewer from './components/AnimationFrameBaseViewer'
+import type { AnimationFrameBaseData } from './loaders/animation_frame_bases'
+import AnimationFrameSetViewer from './components/AnimationFrameSetViewer'
+import type { AnimationFrameSetData } from './loaders/animation_frame_sets'
+import SpotAnimationViewer from './components/SpotAnimationViewer'
+import type { SpotAnimationData } from './loaders/spot_animations'
 import type { ClanVarData } from './loaders/config/clan_var'
 import type { ClanVarSettingsData } from './loaders/config/clan_var_settings'
 import type { LightIntensityData } from './loaders/config/light_intensities'
@@ -109,7 +121,8 @@ const SPECIALIZED_ENTRIES = new Set([
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
   'particles', 'game_tips', 'config_underlays', 'config_overlays', 'maps', 'interfaces', 'sound_effects', 'midi_instruments',
-  'music', 'music2',
+  'music', 'music2', 'sound_effects_midi', 'config_identikit',
+  'animations', 'animation_frame_bases', 'animation_frame_sets', 'spot_animations',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -436,6 +449,30 @@ function App() {
 
   const musicContent = (selectedEntry?.name === 'music' || selectedEntry?.name === 'music2') && selectedItemContent != null
     ? selectedItemContent as MusicData
+    : null
+
+  const soundEffectMidiContent = selectedEntry?.name === 'sound_effects_midi' && selectedItemContent != null
+    ? selectedItemContent as SoundEffectMidiData
+    : null
+
+  const identikitContent = selectedEntry?.name === 'config_identikit' && selectedItemContent != null
+    ? selectedItemContent as IdentikitData
+    : null
+
+  const animationContent = selectedEntry?.name === 'animations' && selectedItemContent != null
+    ? selectedItemContent as AnimationData
+    : null
+
+  const animationFrameBaseContent = selectedEntry?.name === 'animation_frame_bases' && selectedItemContent != null
+    ? selectedItemContent as AnimationFrameBaseData
+    : null
+
+  const animationFrameSetContent = selectedEntry?.name === 'animation_frame_sets' && selectedItemContent != null
+    ? selectedItemContent as AnimationFrameSetData
+    : null
+
+  const spotAnimationContent = selectedEntry?.name === 'spot_animations' && selectedItemContent != null
+    ? selectedItemContent as SpotAnimationData
     : null
 
   const hitsplatContent = selectedEntry?.name === 'config_hitsplats' && selectedItemContent != null
@@ -1343,6 +1380,18 @@ function App() {
                 ? <MidiInstrumentViewer data={midiInstrumentContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : musicContent != null
                 ? <MusicViewer data={musicContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : soundEffectMidiContent != null
+                ? <SoundEffectMidiViewer data={soundEffectMidiContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
+                : identikitContent != null
+                ? <IdentikitViewer data={identikitContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : animationContent != null
+                ? <AnimationViewer data={animationContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
+                : animationFrameBaseContent != null
+                ? <AnimationFrameBaseViewer data={animationFrameBaseContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : animationFrameSetContent != null
+                ? <AnimationFrameSetViewer data={animationFrameSetContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
+                : spotAnimationContent != null
+                ? <SpotAnimationViewer data={spotAnimationContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : hitsplatContent != null
                 ? <HitsplatViewer data={hitsplatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : defaultsContent != null
