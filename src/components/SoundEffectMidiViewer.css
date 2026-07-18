@@ -1,0 +1,181 @@
+/* Sound Effect Midi ("gfx instrument bank") viewer — piano keymap, zone
+   cards with envelope graphs, vibrato indicator. Shares the global editor
+   vocabulary (.item-section, .save-bar, .cell-input etc.); everything here
+   is prefixed sem-. The env-graph classes are shared with the sound_effects
+   synth viewer. */
+
+.sem-gain-field {
+  margin-left: auto;
+  max-width: 160px;
+}
+
+.sem-keyboard-wrap {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #0a0c12;
+}
+
+.sem-keyboard-scroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--grey-light) transparent;
+}
+
+.sem-key {
+  cursor: pointer;
+}
+
+.sem-key:hover {
+  filter: brightness(1.18);
+}
+
+.sem-octave-label {
+  fill: var(--text-dim);
+  font-size: 9px;
+  font-family: inherit;
+  user-select: none;
+}
+
+.sem-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 10px;
+}
+
+.sem-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sem-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.sem-swatch-unmapped {
+  background: linear-gradient(135deg, #f2f3f5 50%, #1a1c22 50%);
+  border: 1px solid var(--border);
+}
+
+.sem-detail {
+  border: 1px solid rgba(47, 143, 255, 0.35);
+  border-radius: 10px;
+  padding: 12px 16px;
+  background: rgba(0, 102, 255, 0.05);
+}
+
+.sem-zone-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+}
+
+.sem-zone-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.sem-zone-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.sem-zone-title {
+  font-weight: 600;
+}
+
+.sem-graphs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sem-graphs .env-graph {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+
+.sem-vibrato-row {
+  margin: 10px 0 2px;
+}
+
+.sem-vibrato {
+  display: block;
+  max-width: 100%;
+}
+
+.sem-points-details {
+  margin-top: 10px;
+}
+
+.sem-points-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.sem-points-details > summary:hover {
+  color: var(--text);
+}
+
+/* Shared envelope graph (also used by the sound_effects synth viewer) */
+
+.env-graph {
+  min-width: 0;
+}
+
+.env-graph-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.env-graph-title {
+  fill: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  font-family: inherit;
+}
+
+.env-graph-domain {
+  fill: var(--text-dim);
+  font-size: 8.5px;
+  font-family: inherit;
+}
+
+.env-graph-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 72px;
+  border-radius: 8px;
+  background: #0a0c12;
+  border: 1px dashed var(--border);
+}
+
+.env-graph-empty .env-graph-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.env-graph-none {
+  font-size: 11px;
+  color: var(--text-dim);
+}
