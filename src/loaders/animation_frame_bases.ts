@@ -1,20 +1,25 @@
-import type { CacheLoader, LoadedItem } from './types'
+import { makeJsonDefLoader } from './common'
+import type { JsonDefData } from './common'
 
-const loader: CacheLoader = {
-  async *streamItems(dirHandle) {
-    for await (const handle of dirHandle.values()) {
-      if (handle.kind === 'file' && handle.name.endsWith('.dat')) {
-        const id = parseInt(handle.name.slice(0, -4), 10)
-        if (!isNaN(id)) yield { id, name: String(id) } satisfies LoadedItem
-      }
-    }
-  },
-
-  async loadItem(dirHandle, item) {
-    const fileHandle = await dirHandle.getFileHandle(`${item.id}.dat`)
-    const file = await fileHandle.getFile()
-    return { id: item.id, byteLength: file.size }
-  },
+// A "skeleton": the bone-group structure animation frames transform
+// against. Ported from darkan AnimBase.kt via cryogen's AnimationFrameBase —
+// labels[i] is the set of vertex-group ids transformationTypes[i] applies
+// to (a model's own mesh carries a per-vertex group id — see
+// ModelData.vertexSkins — which frame data indexes into via these labels).
+export type AnimationFrameBaseDef = {
+  id: number
+  count: number
+  transformationTypes: number[]
+  /** Bitmask of submesh(es) this transform applies to — gates equipment-piece-specific animation. */
+  submeshes: number[]
+  shadowed: boolean[]
+  labels: number[][]
+  /** A couple of real archives reference orphaned data past what count implies — preserved verbatim, not editable. */
+  trailingUnreadBytes?: number[]
 }
 
-export default loader
+export type AnimationFrameBaseData = JsonDefData<AnimationFrameBaseDef>
+
+export default makeJsonDefLoader<AnimationFrameBaseDef>((id) => ({
+  id, count: 0, transformationTypes: [], submeshes: [], shadowed: [], labels: [],
+}))
