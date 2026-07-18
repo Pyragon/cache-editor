@@ -3,8 +3,8 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { MapData, MapRegionDef } from '../loaders/maps'
 import { SIZE, decodeTerrain } from '../loaders/maps'
-import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildRegionOutline, loadSceneConfigs, LocAssets, SceneMosaic, MARKER_COLORS } from './mapScene'
-import type { SceneConfigs, LocRef, MarkerInfo } from './mapScene'
+import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildRegionOutline, buildSkyboxMesh, loadRegionEnvironment, loadSceneConfigs, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS } from './mapScene'
+import type { SceneConfigs, LocRef, MarkerInfo, SunConfig } from './mapScene'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import './MapSceneViewer.css'
 
@@ -25,6 +25,8 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
   const [showNeighbors, setShowNeighbors] = useState(true)
   const [showOutlines, setShowOutlines] = useState(true)
   const [showMarkers, setShowMarkers] = useState(true)
+  const [showSky, setShowSky] = useState(true)
+  const skyMeshRef = useRef<THREE.Mesh | null>(null)
   const [status, setStatus] = useState('building terrain…')
   const [hoverText, setHoverText] = useState('')
   const [selection, setSelection] = useState<{
@@ -253,6 +255,8 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
     let frame = 0
     function animate() {
       controls.update()
+      // the sky dome stays centred on the camera so it reads as infinitely far
+      if (skyMeshRef.current) skyMeshRef.current.position.copy(camera.position)
       if (scrollMaterials.length > 0 || waterMaterials.length > 0) {
         const seconds = (performance.now() % 512000) / 1000
         for (const { map, u, v } of scrollMaterials) {
@@ -337,9 +341,39 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
             }
           }
         }
+        // region environment (map_environments dump): fog, sun, skybox
+        const env = await loadRegionEnvironment(data.rootHandle, data.id)
+        const sun: SunConfig = env?.environment
+          ? {
+              x: env.environment.sunPosition?.[0] ?? DEFAULT_SUN.x,
+              y: env.environment.sunPosition?.[1] ?? DEFAULT_SUN.y,
+              z: env.environment.sunPosition?.[2] ?? DEFAULT_SUN.z,
+              ambient: env.environment.sunAmbient ?? DEFAULT_SUN.ambient,
+            }
+          : DEFAULT_SUN
+        if (env?.environment?.fogColour !== undefined) {
+          const fogColor = env.environment.fogColour & 0xffffff
+          renderer.setClearColor(fogColor)
+          const density = Math.min(env.environment.fogDepth ?? 0, 1200) / 1200
+          const scale = 1 - density * 0.5
+          scene.fog = new THREE.Fog(fogColor, REGION_UNITS * 2 * scale, REGION_UNITS * 5 * scale)
+        }
+
         setStatus('computing mosaic…')
-        const mosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs)
+        const mosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun)
         if (disposed) return
+
+        if (env?.skybox) {
+          const sky = await buildSkyboxMesh(data.rootHandle, assets, env.skybox.id, env.skybox.rotation)
+          if (sky && !disposed) {
+            // dome model hangs below the origin in three-space (RS y-down
+            // authoring) — mirror it up, and blow it up to read as distant
+            sky.scale.set(24, -24, 24)
+            track(sky)
+            scene.add(sky)
+            skyMeshRef.current = sky
+          }
+        }
 
         for (const { dx, dy, def, terrain } of cells) {
           const isCenter = dx === 0 && dy === 0
@@ -398,6 +432,25 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
           outlines.add(outline)
           taggedRef.current.push({ obj: outline, neighbor: !isCenter, kind: 'outline' })
         }
+
+        // sun colour tint (fixed-function diffuse): scale terrain/loc
+        // materials by the environment sun relative to the default 0xDDCCBB
+        const sunColour = env?.environment?.sunColour
+        if (sunColour !== undefined && (sunColour & 0xffffff) !== 0xddccbb) {
+          const tintR = Math.min(1.6, ((sunColour >> 16) & 0xff) / 0xdd)
+          const tintG = Math.min(1.6, ((sunColour >> 8) & 0xff) / 0xcc)
+          const tintB = Math.min(1.6, (sunColour & 0xff) / 0xbb)
+          for (const { obj, kind } of taggedRef.current) {
+            if (kind !== 'terrain' && kind !== 'loc') continue
+            obj.traverse((o) => {
+              const mesh = o as THREE.Mesh
+              if (!mesh.material) return
+              for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+                (m as THREE.MeshBasicMaterial).color.setRGB(tintR, tintG, tintB)
+              }
+            })
+          }
+        }
         setStatus('')
       } catch (e) {
         setStatus(`scene build failed: ${e}`)
@@ -420,8 +473,13 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
       mount.removeChild(renderer.domElement)
       planeGroupsRef.current = [null, null, null, null]
       taggedRef.current = []
+      skyMeshRef.current = null
     }
   }, [data])
+
+  useEffect(() => {
+    if (skyMeshRef.current) skyMeshRef.current.visible = showSky
+  }, [showSky, status])
 
   // visibility = plane toggle (via group) AND per-kind toggle AND neighbour toggle
   useEffect(() => {
@@ -458,6 +516,10 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showOutlines} onChange={(e) => setShowOutlines(e.target.checked)} />
           Region outlines
+        </label>
+        <label className="mapscene-toggle">
+          <input type="checkbox" checked={showSky} onChange={(e) => setShowSky(e.target.checked)} />
+          Sky
         </label>
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showMarkers} onChange={(e) => setShowMarkers(e.target.checked)} />

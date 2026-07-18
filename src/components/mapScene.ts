@@ -319,15 +319,29 @@ export function averageHeight(heights: Int32Array, sceneX: number, sceneY: numbe
 // Terrain geometry
 // ---------------------------------------------------------------------------
 
+/** Region sun parameters (from the map environment tail), client defaults. */
+export type SunConfig = {
+  /** RS-space direction, environment `sunPosition` (client shifts <<2). */
+  x: number
+  y: number
+  z: number
+  /** environment sunAmbient — client: intensity = (0.7 + brightness·0.1) · ambient · 65535 */
+  ambient: number
+}
+
+export const DEFAULT_SUN: SunConfig = { x: -50, y: -60, z: -50, ambient: 1.1523438 }
+
 /** GroundSM init — slope-directional light per vertex, 2..126, over an
  *  arbitrary square vertex grid. */
-function computeVertexLightGrid(heights: Int32Array, verts: number): Uint8Array {
-  // client defaults: lightIntensity 75518, sun dir (-50,-60,-50) << 2 normalised ×65535
-  const baseLight = 75518 >> 9
-  const mag = Math.sqrt(200 * 200 + 240 * 240 + 200 * 200)
-  const lightX = Math.trunc((-200 * 65535) / mag)
-  const lightY = Math.trunc((-240 * 65535) / mag)
-  const lightZ = Math.trunc((-200 * 65535) / mag)
+function computeVertexLightGrid(heights: Int32Array, verts: number, sun: SunConfig = DEFAULT_SUN): Uint8Array {
+  // client: EnvironmentManager applies (0.7 + brightness·0.1) · sunAmbient;
+  // mid brightness (0.2) gives the default 75518 for ambient 1.1523438
+  const baseLight = Math.trunc(0.9 * sun.ambient * 65535) >> 9
+  const sx = sun.x << 2, sy = sun.y << 2, sz = sun.z << 2
+  const mag = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1
+  const lightX = Math.trunc((sx * 65535) / mag)
+  const lightY = Math.trunc((sy * 65535) / mag)
+  const lightZ = Math.trunc((sz * 65535) / mag)
   const light = new Uint8Array(verts * verts).fill(84)
   for (let x = 0; x < verts; x++) {
     for (let y = 0; y < verts; y++) {
@@ -389,6 +403,7 @@ export class SceneMosaic {
     regionX: number,
     regionY: number,
     configs: SceneConfigs,
+    sun: SunConfig = DEFAULT_SUN,
   ) {
     this.regions = regions
     this.regionX = regionX
@@ -426,7 +441,7 @@ export class SceneMosaic {
         }
       }
       this.heights.push(h)
-      this.lights.push(computeVertexLightGrid(h, MVERTS))
+      this.lights.push(computeVertexLightGrid(h, MVERTS, sun))
     }
   }
 
@@ -1095,6 +1110,78 @@ export function buildMarkersMesh(markers: MarkerInfo[]): THREE.Group | null {
     group.add(new THREE.LineSegments(stemGeometry, new THREE.LineBasicMaterial({ color: MARKER_COLORS[kind], transparent: true, opacity: 0.6 })))
   }
   return group
+}
+
+/** Region environment JSON (map_environments/<regionId>.json — the terrain
+ *  archive's environment tail, dumped by cryogen MapEnvironmentDumper). */
+export type RegionEnvironment = {
+  environment?: {
+    flags: number
+    sunColour?: number
+    sunAmbient?: number
+    sunLight?: number
+    sunBacklight?: number
+    sunPosition?: [number, number, number]
+    fogColour?: number
+    fogDepth?: number
+    cubeTexture?: number[]
+  }
+  skybox?: { id: number; x: number; y: number; z: number; rotation: number }
+  lights?: unknown[]
+  hdr?: { bloom: number; brightpass: number; whitePoint: number }
+}
+
+export async function loadRegionEnvironment(
+  rootHandle: FileSystemDirectoryHandle,
+  regionId: number,
+): Promise<RegionEnvironment | null> {
+  try {
+    const dir = await rootHandle.getDirectoryHandle('map_environments')
+    const file = await (await dir.getFileHandle(`${regionId}.json`)).getFile()
+    return JSON.parse(await file.text()) as RegionEnvironment
+  } catch {
+    return null
+  }
+}
+
+/** The region's sky dome (config/skyboxes → archiveId model, textured with
+ *  its own sky/cloud materials), built for rendering around the camera. */
+export async function buildSkyboxMesh(
+  rootHandle: FileSystemDirectoryHandle,
+  assets: LocAssets,
+  skyboxId: number,
+  rotation: number,
+): Promise<THREE.Mesh | null> {
+  try {
+    const configDir = await rootHandle.getDirectoryHandle('config')
+    const dir = await configDir.getDirectoryHandle('skyboxes')
+    const file = await (await dir.getFileHandle(`${skyboxId}.json`)).getFile()
+    const def = JSON.parse(await file.text()) as { archiveId?: number }
+    if (def.archiveId === undefined || def.archiveId < 0) return null
+    const model = await assets.getModel(def.archiveId)
+    if (!model) return null
+
+    const acc = new ModelAccumulator()
+    acc.addModel(model, new THREE.Matrix4())
+    const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id))
+    if (!mesh) return null
+    for (const m of mesh.material as THREE.MeshBasicMaterial[]) {
+      m.fog = false // the dome must not be fogged out
+      m.depthWrite = false
+      m.side = THREE.DoubleSide
+      // sky textures draw untinted — the dome model's face colours are junk
+      // (they'd tint the clouds green); untextured faces keep vertex colours
+      if (m.map) m.vertexColors = false
+      m.needsUpdate = true
+    }
+    mesh.renderOrder = -1000
+    mesh.frustumCulled = false
+    // skybox rotation is in 16384ths of a turn like everything else
+    mesh.rotation.y = -(rotation / 16384) * Math.PI * 2
+    return mesh
+  } catch {
+    return null
+  }
 }
 
 /** A terrain-following outline around one region's perimeter (plane-0
