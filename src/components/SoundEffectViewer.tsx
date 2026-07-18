@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SoundEffectData, SoundEffectDef, InstrumentDef, EnvelopeDef, FilterDef } from '../loaders/sound_effects'
 import { emptyInstrument } from '../loaders/sound_effects'
+import { mixToFloat, SAMPLE_RATE } from '../loaders/soundSynth'
 import { NumberInput, NumGrid } from './defFields'
+import EnvelopeGraph from './EnvelopeGraph'
 import './SoundEffectViewer.css'
 
 const FORM_OPTIONS = [
@@ -16,10 +18,194 @@ function emptyEnvelope(): EnvelopeDef {
   return { form: 1, start: 0, end: 0, numPhases: 2, phaseDuration: [0, 65535], phasePeak: [0, 65535] }
 }
 
-function EnvelopeEditor({ label, envelope, onChange }: {
+// ---------------------------------------------------------------------------
+// Live synthesis + waveform preview. The TS port of the client's synth
+// engine (soundSynth.ts, verified sample-exact against the dumped WAVs)
+// re-renders the audio ~instantly after every edit — no re-dump needed.
+// ---------------------------------------------------------------------------
+
+let sharedAudioContext: AudioContext | null = null
+function audioContext(): AudioContext {
+  if (!sharedAudioContext) sharedAudioContext = new AudioContext({ sampleRate: SAMPLE_RATE })
+  return sharedAudioContext
+}
+
+function WaveformPreview({ def, dumpedWavUrl }: { def: SoundEffectDef; dumpedWavUrl: string | null }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [pcm, setPcm] = useState<Float32Array | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const playRef = useRef<{ source: AudioBufferSourceNode; startedAt: number; duration: number } | null>(null)
+  const [isPlaying, setIsPlaying] = useState(false)
+
+  // Debounced re-synthesis on every edit.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        setPcm(mixToFloat(def))
+        setError(null)
+      } catch (e) {
+        setPcm(null)
+        setError(String(e))
+      }
+    }, 200)
+    return () => clearTimeout(timer)
+  }, [def])
+
+  // Waveform + loop markers + (while playing) the moving playhead.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const w = canvas.width, h = canvas.height
+    let raf = 0
+
+    function draw() {
+      const c = ctx!
+      c.clearRect(0, 0, w, h)
+      c.fillStyle = '#0a0c12'
+      c.beginPath()
+      c.roundRect(0, 0, w, h, 10)
+      c.fill()
+
+      const mid = h / 2
+      c.strokeStyle = 'rgba(255,255,255,0.08)'
+      c.beginPath()
+      c.moveTo(8, mid)
+      c.lineTo(w - 8, mid)
+      c.stroke()
+
+      if (!pcm || pcm.length === 0) {
+        c.fillStyle = 'rgba(139,147,163,0.8)'
+        c.font = '12px system-ui'
+        c.textAlign = 'center'
+        c.fillText(error ? 'synthesis failed — see note below' : 'no audio (all instrument slots empty)', w / 2, mid + 4)
+        return
+      }
+
+      // min/max column rendering, audio-editor style
+      const usable = w - 16
+      const perPx = pcm.length / usable
+      c.strokeStyle = 'rgba(47,143,255,0.9)'
+      c.lineWidth = 1
+      c.beginPath()
+      for (let x = 0; x < usable; x++) {
+        const from = Math.floor(x * perPx)
+        const to = Math.min(pcm.length, Math.max(from + 1, Math.floor((x + 1) * perPx)))
+        let lo = 1, hi = -1
+        for (let i = from; i < to; i++) {
+          if (pcm[i] < lo) lo = pcm[i]
+          if (pcm[i] > hi) hi = pcm[i]
+        }
+        c.moveTo(x + 8, mid - hi * (mid - 8))
+        c.lineTo(x + 8, mid - lo * (mid - 8))
+      }
+      c.stroke()
+
+      // loop markers (loopBegin/loopEnd are milliseconds)
+      const totalMs = (pcm.length / SAMPLE_RATE) * 1000
+      if (def.loopEnd > def.loopBegin && totalMs > 0) {
+        for (const [ms, label] of [[def.loopBegin, 'loop start'], [def.loopEnd, 'loop end']] as const) {
+          const x = 8 + (ms / totalMs) * usable
+          if (x < 8 || x > w - 8) continue
+          c.strokeStyle = 'rgba(255,196,0,0.75)'
+          c.setLineDash([4, 3])
+          c.beginPath()
+          c.moveTo(x, 6)
+          c.lineTo(x, h - 6)
+          c.stroke()
+          c.setLineDash([])
+          c.fillStyle = 'rgba(255,196,0,0.9)'
+          c.font = '9px system-ui'
+          c.textAlign = 'left'
+          c.fillText(label, x + 3, 14)
+        }
+      }
+
+      // playhead
+      const playing = playRef.current
+      if (playing) {
+        const elapsed = audioContext().currentTime - playing.startedAt
+        if (elapsed <= playing.duration) {
+          const x = 8 + (elapsed / playing.duration) * usable
+          c.strokeStyle = '#fff'
+          c.lineWidth = 1.5
+          c.beginPath()
+          c.moveTo(x, 4)
+          c.lineTo(x, h - 4)
+          c.stroke()
+          raf = requestAnimationFrame(draw)
+        }
+      }
+    }
+
+    draw()
+    return () => cancelAnimationFrame(raf)
+  }, [pcm, error, def.loopBegin, def.loopEnd, isPlaying, def])
+
+  function stop() {
+    playRef.current?.source.stop()
+    playRef.current = null
+    setIsPlaying(false)
+  }
+
+  function play() {
+    if (!pcm || pcm.length === 0) return
+    stop()
+    const ctx = audioContext()
+    void ctx.resume()
+    const buffer = ctx.createBuffer(1, pcm.length, SAMPLE_RATE)
+    buffer.copyToChannel(new Float32Array(pcm), 0)
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    source.connect(ctx.destination)
+    source.onended = () => {
+      if (playRef.current?.source === source) {
+        playRef.current = null
+        setIsPlaying(false)
+      }
+    }
+    source.start()
+    playRef.current = { source, startedAt: ctx.currentTime, duration: pcm.length / SAMPLE_RATE }
+    setIsPlaying(true)
+  }
+
+  useEffect(() => () => playRef.current?.source.stop(), [])
+
+  const durationMs = pcm ? Math.round((pcm.length / SAMPLE_RATE) * 1000) : 0
+
+  return (
+    <div className="sfx-wave-wrap">
+      <canvas ref={canvasRef} width={860} height={150} className="sfx-wave-canvas" />
+      <div className="sfx-wave-controls">
+        <button type="button" className="sfx-play-btn" onClick={isPlaying ? stop : play} disabled={!pcm || pcm.length === 0}>
+          {isPlaying ? '■ Stop' : '▶ Play'}
+        </button>
+        <span className="sfx-wave-meta">
+          {pcm ? `${durationMs} ms · ${pcm.length.toLocaleString()} samples @ ${SAMPLE_RATE} Hz` : '—'}
+          {' · synthesized live from the current edits'}
+        </span>
+        {dumpedWavUrl && (
+          <span className="sfx-dumped">
+            <span className="sfx-wave-meta">dumped preview:</span>
+            <audio controls src={dumpedWavUrl} className="sfx-audio" />
+          </span>
+        )}
+      </div>
+      {error && <p className="tex-op-note">Synthesis failed: {error}</p>}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Envelope editor — drawn curve + the editable breakpoint table
+// ---------------------------------------------------------------------------
+
+function EnvelopeEditor({ label, envelope, onChange, accent }: {
   label: string
   envelope: EnvelopeDef
   onChange: (next: EnvelopeDef) => void
+  accent?: string
 }) {
   function setPhase(i: number, which: 'phaseDuration' | 'phasePeak', value: number) {
     const arr = [...envelope[which]]
@@ -40,40 +226,49 @@ function EnvelopeEditor({ label, envelope, onChange }: {
     onChange({ ...envelope, numPhases: phaseDuration.length, phaseDuration, phasePeak })
   }
 
+  const points = envelope.phaseDuration.map((d, i) => ({ x: d, y: envelope.phasePeak[i] ?? 0 }))
+
   return (
     <div className="sfx-envelope">
       <div className="sfx-envelope-title">{label}</div>
-      <div className="item-grid">
-        <label className="item-field">
-          <span className="item-field-label">Wave Form</span>
-          <select value={envelope.form} onChange={(e) => onChange({ ...envelope, form: Number(e.target.value) })}>
-            {FORM_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-          </select>
-        </label>
-        <label className="item-field">
-          <span className="item-field-label">Start</span>
-          <NumberInput value={envelope.start} onChange={(v) => onChange({ ...envelope, start: v })} />
-        </label>
-        <label className="item-field">
-          <span className="item-field-label">End</span>
-          <NumberInput value={envelope.end} onChange={(v) => onChange({ ...envelope, end: v })} />
-        </label>
+      <div className="sfx-envelope-body">
+        <div className="sfx-envelope-graph">
+          <EnvelopeGraph points={points} xMax={65535} yDomain={[0, 65535]} color={accent ?? 'var(--electric-blue-bright)'} label={`peak over time (maps to ${envelope.start} → ${envelope.end})`} />
+        </div>
+        <div className="sfx-envelope-fields">
+          <div className="item-grid">
+            <label className="item-field">
+              <span className="item-field-label">Wave Form</span>
+              <select value={envelope.form} onChange={(e) => onChange({ ...envelope, form: Number(e.target.value) })}>
+                {FORM_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </label>
+            <label className="item-field">
+              <span className="item-field-label">Start</span>
+              <NumberInput value={envelope.start} onChange={(v) => onChange({ ...envelope, start: v })} />
+            </label>
+            <label className="item-field">
+              <span className="item-field-label">End</span>
+              <NumberInput value={envelope.end} onChange={(v) => onChange({ ...envelope, end: v })} />
+            </label>
+          </div>
+          <div className="quest-table-wrap uniform">
+            <table className="quest-table">
+              <thead><tr><th>Time (0–65535)</th><th>Peak (0–65535)</th><th></th></tr></thead>
+              <tbody>
+                {envelope.phaseDuration.map((d, i) => (
+                  <tr key={i}>
+                    <td><NumberInput className="cell-input" value={d} onChange={(v) => setPhase(i, 'phaseDuration', v)} min={0} max={65535} /></td>
+                    <td><NumberInput className="cell-input" value={envelope.phasePeak[i] ?? 0} onChange={(v) => setPhase(i, 'phasePeak', v)} min={0} max={65535} /></td>
+                    <td><button type="button" className="row-remove-btn" disabled={envelope.phaseDuration.length <= 1} onClick={() => removePhase(i)}>×</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button type="button" className="add-row-btn" onClick={addPhase}>+ Add phase</button>
+        </div>
       </div>
-      <div className="quest-table-wrap uniform">
-        <table className="quest-table">
-          <thead><tr><th>Phase Duration</th><th>Phase Peak</th><th>Remove</th></tr></thead>
-          <tbody>
-            {envelope.phaseDuration.map((d, i) => (
-              <tr key={i}>
-                <td><NumberInput className="cell-input" value={d} onChange={(v) => setPhase(i, 'phaseDuration', v)} min={0} max={65535} /></td>
-                <td><NumberInput className="cell-input" value={envelope.phasePeak[i] ?? 0} onChange={(v) => setPhase(i, 'phasePeak', v)} min={0} max={65535} /></td>
-                <td><button type="button" className="row-remove-btn" disabled={envelope.phaseDuration.length <= 1} onClick={() => removePhase(i)}>×</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <button type="button" className="add-row-btn" onClick={addPhase}>+ Add phase</button>
     </div>
   )
 }
@@ -100,8 +295,8 @@ function OptionalEnvelopePair({ title, a, b, onSetA, onSetB, labelA = 'Modifier'
   return (
     <section className="item-section">
       <h3>{title}</h3>
-      <EnvelopeEditor label={labelA} envelope={a} onChange={onSetA} />
-      <EnvelopeEditor label={labelB} envelope={b ?? emptyEnvelope()} onChange={onSetB} />
+      <EnvelopeEditor label={labelA} envelope={a} onChange={onSetA} accent="hsl(280 70% 65%)" />
+      <EnvelopeEditor label={labelB} envelope={b ?? emptyEnvelope()} onChange={onSetB} accent="hsl(320 70% 65%)" />
       <button type="button" className="row-remove-btn sfx-remove-pair" onClick={() => { onSetA(null); onSetB(null) }}>
         Remove {title}
       </button>
@@ -187,7 +382,7 @@ function FilterEditor({ filter, filterEnvelope, onChangeFilter, onChangeEnvelope
           </table>
         </div>
       ))}
-      <EnvelopeEditor label="Filter Envelope" envelope={filterEnvelope} onChange={onChangeEnvelope} />
+      <EnvelopeEditor label="Filter Envelope" envelope={filterEnvelope} onChange={onChangeEnvelope} accent="hsl(160 70% 55%)" />
       <button type="button" className="row-remove-btn sfx-remove-pair" onClick={() => onChangeFilter({ numPairs: [0, 0], pairPhase: filter.pairPhase, pairMagnitude: filter.pairMagnitude, unity: [0, 0], migrated: 0 })}>
         Remove Filter
       </button>
@@ -222,6 +417,7 @@ function InstrumentEditor({ instrument, onChange, onRemove }: {
 
       <section className="item-section">
         <h3>Oscillators</h3>
+        <p className="tex-op-note">Up to 5 additive voices — volume in %, pitch in semitone-ish steps relative to the pitch envelope, delay in ms.</p>
         <div className="quest-table-wrap uniform">
           <table className="quest-table">
             <thead><tr><th>#</th><th>Volume</th><th>Pitch</th><th>Delay</th></tr></thead>
@@ -241,12 +437,12 @@ function InstrumentEditor({ instrument, onChange, onRemove }: {
 
       <section className="item-section">
         <h3>Pitch Envelope</h3>
-        <EnvelopeEditor label="Pitch" envelope={instrument.pitch} onChange={(e) => set('pitch', e)} />
+        <EnvelopeEditor label="Pitch (Hz sweep)" envelope={instrument.pitch} onChange={(e) => set('pitch', e)} accent="hsl(38 90% 60%)" />
       </section>
 
       <section className="item-section">
         <h3>Volume Envelope</h3>
-        <EnvelopeEditor label="Volume" envelope={instrument.volume} onChange={(e) => set('volume', e)} />
+        <EnvelopeEditor label="Volume" envelope={instrument.volume} onChange={(e) => set('volume', e)} accent="var(--electric-blue-bright)" />
       </section>
 
       <OptionalEnvelopePair
@@ -351,20 +547,19 @@ export default function SoundEffectViewer({ data, onSave, onDirtyChange }: {
     <div className="sfx-viewer">
       <div className="sfx-header">
         <span className="item-id-badge">Sound Effect {data.id}</span>
-        {data.wavUrl
-          ? <audio controls src={data.wavUrl} className="sfx-audio" />
-          : <span className="sfx-no-preview">No dumped preview — live re-synthesis after edits isn't implemented yet (see TODO); re-dump the cache to hear changes.</span>}
       </div>
+
+      <WaveformPreview def={def} dumpedWavUrl={data.wavUrl} />
 
       <section className="item-section">
         <h3>Loop</h3>
         <div className="item-grid">
           <label className="item-field">
-            <span className="item-field-label">Loop Begin (ticks)</span>
+            <span className="item-field-label">Loop Begin (ms)</span>
             <NumberInput value={def.loopBegin} onChange={(v) => setLoop('loopBegin', v)} min={0} max={65535} />
           </label>
           <label className="item-field">
-            <span className="item-field-label">Loop End (ticks)</span>
+            <span className="item-field-label">Loop End (ms)</span>
             <NumberInput value={def.loopEnd} onChange={(v) => setLoop('loopEnd', v)} min={0} max={65535} />
           </label>
         </div>
