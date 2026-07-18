@@ -62,12 +62,27 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
     controls.update()
 
     const disposables: { dispose(): void }[] = []
+    // materials with animated UVs: data-driven scroll (waterfalls, lava —
+    // offset = seconds*speed/64, OpenGlToolkit convention) and still water
+    // (client ripple effect approximated by a gentle drifting wobble)
+    const scrollMaterials: { map: THREE.Texture; u: number; v: number }[] = []
+    const waterMaterials: THREE.Texture[] = []
     const track = (obj: THREE.Object3D) => {
       obj.traverse((o) => {
         const mesh = o as THREE.Mesh
         if (mesh.geometry) disposables.push(mesh.geometry)
         if (mesh.material) {
-          for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) disposables.push(m)
+          for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+            disposables.push(m)
+            const basic = m as THREE.MeshBasicMaterial
+            if (basic.map && m.userData.scroll) {
+              scrollMaterials.push({ map: basic.map, u: m.userData.scroll.u, v: m.userData.scroll.v })
+              disposables.push(basic.map) // per-material texture clone
+            } else if (basic.map && m.userData.water) {
+              waterMaterials.push(basic.map)
+              disposables.push(basic.map)
+            }
+          }
         }
       })
       return obj
@@ -238,6 +253,16 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
     let frame = 0
     function animate() {
       controls.update()
+      if (scrollMaterials.length > 0 || waterMaterials.length > 0) {
+        const seconds = (performance.now() % 512000) / 1000
+        for (const { map, u, v } of scrollMaterials) {
+          map.offset.set(((seconds * u) / 64) % 1, ((seconds * v) / 64) % 1)
+        }
+        // still water: slow diagonal drift with a subtle swell
+        const wu = (seconds * 0.022 + Math.sin(seconds * 0.8) * 0.012) % 1
+        const wv = (seconds * 0.031 + Math.cos(seconds * 0.6) * 0.012) % 1
+        for (const map of waterMaterials) map.offset.set(wu, wv)
+      }
       // hover raycast every other frame — cheap enough, keeps orbit smooth
       if (pointerInside && (frame++ & 1) === 0) {
         const hit = pick()

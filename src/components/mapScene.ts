@@ -564,6 +564,15 @@ function computeUnderlayPalette(terrain: MapTerrain, plane: number, configs: Sce
 // Texture-bucketed geometry assembly
 // ---------------------------------------------------------------------------
 
+/** Still water (rivers/sea): a self-coloured blue material with no scroll —
+ *  the client animates these with its rippling-water effect; the viewer uses
+ *  a gentle UV drift instead. Blue band of the 6-bit HSL16 hue wheel. */
+function isWaterMaterial(meta: MaterialMeta): boolean {
+  if (meta.detailsOnly || meta.colorHsl < 0) return false
+  const hue = (meta.colorHsl >> 10) & 0x3f
+  return hue >= 34 && hue <= 45
+}
+
 type Bucket = { positions: number[]; colors: number[]; uvs: number[]; owners: number[] }
 
 class BucketSet {
@@ -577,8 +586,14 @@ class BucketSet {
 
   /** One mesh with a material group per texture (index -1 = plain vertex
    *  colours). Per-triangle owner ids (whatever the producer pushed) end up
-   *  in mesh.userData.triangleOwners, aligned with raycast faceIndex. */
-  async toMesh(getTexture: (id: number) => Promise<THREE.Texture | null>): Promise<THREE.Mesh | null> {
+   *  in mesh.userData.triangleOwners, aligned with raycast faceIndex.
+   *  Materials with a UV scroll speed get userData.scroll (client convention:
+   *  offset = seconds*speed/64); still-water materials (blue-hued,
+   *  non-detail, no scroll) get userData.water for the ripple drift. */
+  async toMesh(
+    getTexture: (id: number) => Promise<THREE.Texture | null>,
+    getMeta?: (id: number) => Promise<MaterialMeta | null>,
+  ): Promise<THREE.Mesh | null> {
     const entries = [...this.buckets.entries()].filter(([, b]) => b.positions.length > 0)
     if (entries.length === 0) return null
     let total = 0
@@ -601,10 +616,19 @@ class BucketSet {
       if (textureId >= 0) {
         const texture = await getTexture(textureId)
         if (texture) {
-          material.map = texture
+          // each animated material needs its own texture instance so offsets
+          // don't leak across materials sharing a cached THREE.Texture
+          const meta = getMeta ? await getMeta(textureId) : null
+          const animated = meta && (meta.speedU !== 0 || meta.speedV !== 0 || isWaterMaterial(meta))
+          material.map = animated ? texture.clone() : texture
           // foliage/fence textures use hard alpha cutouts
           material.alphaTest = 0.35
           material.needsUpdate = true
+          if (meta && (meta.speedU !== 0 || meta.speedV !== 0)) {
+            material.userData.scroll = { u: meta.speedU, v: meta.speedV }
+          } else if (meta && isWaterMaterial(meta)) {
+            material.userData.water = true
+          }
         }
       }
       materials.push(material)
@@ -756,7 +780,7 @@ export async function buildTerrainMesh(
     }
   }
 
-  const mesh = await buckets.toMesh((id) => assets.getTexture(id))
+  const mesh = await buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id))
   if (mesh) mesh.userData.isTerrain = true
   return mesh
 }
@@ -789,12 +813,20 @@ export type ObjectDefJson = {
   mapCategoryId?: number
 }
 
+export type MaterialMeta = {
+  detailsOnly: boolean
+  avgLuma: number
+  speedU: number
+  speedV: number
+  colorHsl: number
+}
+
 export class LocAssets {
   private root: FileSystemDirectoryHandle
   private defs = new Map<number, Promise<ObjectDefJson | null>>()
   private models = new Map<number, Promise<ModelData | null>>()
   private textures = new Map<number, Promise<THREE.Texture | null>>()
-  private materialMeta = new Map<number, Promise<{ detailsOnly: boolean; avgLuma: number } | null>>()
+  private materialMeta = new Map<number, Promise<MaterialMeta | null>>()
   private objectsDir: FileSystemDirectoryHandle | null | undefined
   private modelsDir: FileSystemDirectoryHandle | null | undefined
 
@@ -835,20 +867,28 @@ export class LocAssets {
     return p
   }
 
-  /** Material metadata for terrain colour decisions: detailsOnly (greyscale
-   *  detail map tinted by the tile colour) vs a self-coloured texture, plus
-   *  the PNG's average luma for brightness normalisation. */
-  getMaterialMeta(id: number): Promise<{ detailsOnly: boolean; avgLuma: number } | null> {
+  /** Material metadata: detailsOnly (greyscale detail map tinted by the tile
+   *  colour) vs self-coloured, the PNG's average luma for brightness
+   *  normalisation, UV scroll speed (waterfalls/lava — client scrolls
+   *  offset = seconds*speed/64), and the material's average HSL (used to
+   *  recognise still water for the ripple drift). */
+  getMaterialMeta(id: number): Promise<MaterialMeta | null> {
     let p = this.materialMeta.get(id)
     if (!p) {
       p = (async () => {
         try {
           let detailsOnly = false
+          let speedU = 0
+          let speedV = 0
+          let colorHsl = -1
           try {
             const defsDir = await this.root.getDirectoryHandle('texture_definitions')
             const file = await (await defsDir.getFileHandle(`${id}.json`)).getFile()
             const def = JSON.parse(await file.text())
             detailsOnly = def.detailsOnly === true
+            speedU = def.textureSpeedU ?? 0
+            speedV = def.textureSpeedV ?? 0
+            colorHsl = def.colorHsl ?? -1
           } catch { /* definition missing — treat as self-coloured */ }
           let avgLuma = 128
           try {
@@ -872,7 +912,7 @@ export class LocAssets {
             }
             if (n > 0) avgLuma = sum / n
           } catch { /* keep default */ }
-          return { detailsOnly, avgLuma: Math.max(32, avgLuma) }
+          return { detailsOnly, avgLuma: Math.max(32, avgLuma), speedU, speedV, colorHsl }
         } catch {
           return null
         }
@@ -1184,7 +1224,7 @@ export async function buildLocsMesh(
       markers.push({ x: sceneX, y: -avgHeight, z: -sceneY, objectId, kind, tileX: x, tileY: y })
     }
   }
-  const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id))
+  const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id))
   if (mesh) mesh.userData.locs = locRefs
   return { mesh, markers }
 }
