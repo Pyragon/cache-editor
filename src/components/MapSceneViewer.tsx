@@ -27,6 +27,7 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
   const [showMarkers, setShowMarkers] = useState(true)
   const [showSky, setShowSky] = useState(true)
   const skyMeshRef = useRef<THREE.Mesh | null>(null)
+  const highlightClearRef = useRef<(() => void) | null>(null)
   const [status, setStatus] = useState('building terrain…')
   const [hoverText, setHoverText] = useState('')
   const [selection, setSelection] = useState<{
@@ -111,6 +112,61 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
     const hoverOutline = tileOutline(0xffe14d)
     const selectOutline = tileOutline(0xff5ad2)
 
+    // --- picked-loc highlight: the loc's own triangles, pulled from the
+    // merged geometry via triangleOwners, as a pulsing fill + edge outline
+    let highlightGroup: THREE.Group | null = null
+    let highlightFill: THREE.MeshBasicMaterial | null = null
+    function clearLocHighlight() {
+      if (!highlightGroup) return
+      scene.remove(highlightGroup)
+      highlightGroup.traverse((o) => {
+        const m = o as THREE.Mesh
+        if (m.geometry) m.geometry.dispose()
+        if (m.material) for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mat.dispose()
+      })
+      highlightGroup = null
+      highlightFill = null
+    }
+    highlightClearRef.current = clearLocHighlight
+
+    function highlightLoc(mesh: THREE.Mesh, owner: number) {
+      clearLocHighlight()
+      const owners = mesh.userData.triangleOwners as Int32Array
+      const positions = (mesh.geometry.getAttribute('position') as THREE.BufferAttribute).array as Float32Array
+      const tri: number[] = []
+      for (let t = 0; t < owners.length; t++) {
+        if (owners[t] !== owner) continue
+        const base = t * 9
+        for (let k = 0; k < 9; k++) tri.push(positions[base + k])
+      }
+      if (tri.length === 0) return
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(tri), 3))
+      highlightFill = new THREE.MeshBasicMaterial({
+        color: 0x2f8fff,
+        transparent: true,
+        opacity: 0.3,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      })
+      const fill = new THREE.Mesh(geometry, highlightFill)
+      fill.renderOrder = 900
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geometry, 25),
+        new THREE.LineBasicMaterial({ color: 0xb7e0ff, transparent: true, opacity: 0.95 }),
+      )
+      edges.renderOrder = 901
+      highlightGroup = new THREE.Group()
+      highlightGroup.add(fill, edges)
+      highlightGroup.position.copy(mesh.position)
+      // never pickable — clicks must pass through to the loc beneath
+      highlightGroup.traverse((o) => { o.raycast = () => {} })
+      scene.add(highlightGroup)
+    }
+
     function pick(): THREE.Intersection | null {
       raycaster.setFromCamera(pointer, camera)
       const hits = raycaster.intersectObjects(scene.children, true)
@@ -154,10 +210,11 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
       if (!hit) {
         setSelection(null)
         selectOutline.visible = false
+        clearLocHighlight()
         return
       }
       const mesh = hit.object as THREE.Mesh
-      const { wx, wy, tx, ty } = worldTileOf(hit.point)
+      const { wx, wy } = worldTileOf(hit.point)
       const faceIndex = hit.faceIndex ?? -1
 
       if (mesh.userData.markers && faceIndex >= 0) {
@@ -176,6 +233,7 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
           })
           selectOutline.position.set(gp.x + marker.tileX * TILE, gp.y + marker.y + 8, gp.z - marker.tileY * TILE)
           selectOutline.visible = true
+          clearLocHighlight()
           void (async () => {
             const def = await assetsRef.current?.getDef(marker.objectId)
             if (def) {
@@ -211,8 +269,8 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
               `shape ${loc.shape}, rotation ${loc.rotation}`,
             ],
           })
-          selectOutline.position.set(mesh.position.x + loc.x * TILE, hit.point.y + 10, mesh.position.z - loc.y * TILE)
-          selectOutline.visible = true
+          selectOutline.visible = false
+          highlightLoc(mesh, owner)
           void (async () => {
             const def = await assetsRef.current?.getDef(loc.objectId)
             if (def) {
@@ -231,19 +289,11 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
         }
       }
 
-      if (mesh.userData.isTerrain) {
-        setSelection({
-          kind: 'tile',
-          title: `Tile ${wx}, ${wy}`,
-          lines: [`region ${Math.floor(wx / 64)}, ${Math.floor(wy / 64)} — local ${((wx % 64) + 64) % 64}, ${((wy % 64) + 64) % 64}`],
-        })
-        selectOutline.position.set(tx * TILE, hit.point.y + 10, -ty * TILE)
-        selectOutline.visible = true
-        return
-      }
-
+      // terrain clicks intentionally don't select (locs only, for now)
+      void wx; void wy
       setSelection(null)
       selectOutline.visible = false
+      clearLocHighlight()
     }
 
     renderer.domElement.addEventListener('pointermove', onPointerMove)
@@ -257,6 +307,8 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
       controls.update()
       // the sky dome stays centred on the camera so it reads as infinitely far
       if (skyMeshRef.current) skyMeshRef.current.position.copy(camera.position)
+      // pulse the picked-loc highlight
+      if (highlightFill) highlightFill.opacity = 0.24 + Math.sin(performance.now() / 170) * 0.12
       if (scrollMaterials.length > 0 || waterMaterials.length > 0) {
         const seconds = (performance.now() % 512000) / 1000
         for (const { map, u, v } of scrollMaterials) {
@@ -471,11 +523,18 @@ export default function MapSceneViewer({ data }: { data: MapData }) {
       assetsRef.current = null
       renderer.dispose()
       mount.removeChild(renderer.domElement)
+      clearLocHighlight()
+      highlightClearRef.current = null
       planeGroupsRef.current = [null, null, null, null]
       taggedRef.current = []
       skyMeshRef.current = null
     }
   }, [data])
+
+  // close-button / cleared selection also drops the loc highlight
+  useEffect(() => {
+    if (!selection) highlightClearRef.current?.()
+  }, [selection])
 
   useEffect(() => {
     if (skyMeshRef.current) skyMeshRef.current.visible = showSky
