@@ -1,8 +1,14 @@
 import { useEffect, useState } from 'react'
 import type { BasData, BasDef } from '../loaders/config/bas'
 import { OBJ_SLOT_COUNT } from '../loaders/config/bas'
+import { DEFAULT_PLAYER_BAS, RENDER_ANIM_PARAM, buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
+import type { NpcUse } from '../loaders/animCompat'
+import type { AnimationDef } from '../loaders/animations'
+import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { IntListInput, NumberInput, NumGrid, PairTable, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
+import { ItemUseTable, NpcFitTable } from './AnimCompatTables'
+import AnimationPlaybackViewer from './AnimationPlaybackViewer'
 import './BasViewer.css'
 
 type Props = {
@@ -10,6 +16,8 @@ type Props = {
   onSave: (data: BasData) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
   onOpenAnimation: (id: number) => void
+  cacheRoot?: FileSystemDirectoryHandle | null
+  onNavigate?: (entryName: string, itemId: number) => void
 }
 
 // Movement matrix rows. The dirN columns replace the main sequence when the
@@ -114,10 +122,45 @@ function SlotTable({ title, hint, cols, slots, onSet, onAdd, onRemove }: {
   )
 }
 
-export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation }: Props) {
+export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation, cacheRoot, onNavigate }: Props) {
   const [draft, setDraft] = useState<BasDef>(data.def)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [compatReady, setCompatReady] = useState(peekAnimCompatIndex() != null)
+  const [compatProgress, setCompatProgress] = useState<{ done: number; total: number } | null>(null)
+  const [preview, setPreview] = useState<{ animation: AnimationDef; modelId: number } | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+
+  // Preview this BAS on an NPC's model: load the stand (else walk/run)
+  // sequence's def and hand it to the playback modal with the model preloaded.
+  async function handlePreviewAnim(npc: NpcUse) {
+    if (!cacheRoot) return
+    const seqId = [draft.standAnimation, draft.walkAnimation, draft.runningAnimation].find((s) => s >= 0)
+    if (seqId == null) {
+      setPreviewError('This BAS has no stand/walk/run sequence to preview.')
+      return
+    }
+    try {
+      const dir = await resolveEntryHandle(cacheRoot, getEntryPath('animations'))
+      const file = await (await dir!.getFileHandle(`${seqId}.json`)).getFile()
+      const animation = JSON.parse(await file.text()) as AnimationDef
+      setPreview({ animation, modelId: npc.modelIds[0] })
+      setPreviewError(null)
+    } catch {
+      setPreviewError(`Couldn't load animation ${seqId} from the animations entry.`)
+    }
+  }
+
+  async function handleCompatScan() {
+    if (!cacheRoot) return
+    setCompatProgress({ done: 0, total: 0 })
+    try {
+      await buildAnimCompatIndex(cacheRoot, (done, total) => setCompatProgress({ done, total }))
+      setCompatReady(true)
+    } finally {
+      setCompatProgress(null)
+    }
+  }
 
   useEffect(() => {
     setDraft(data.def)
@@ -317,6 +360,46 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
         />
       </section>
 
+      <section className="item-section">
+        <h3>Used By</h3>
+        {compatProgress != null ? (
+          <p className="map-sprite-none">
+            Scanning… {compatProgress.done.toLocaleString()}{compatProgress.total > 0 ? ` / ${compatProgress.total.toLocaleString()}` : ''}
+          </p>
+        ) : !compatReady ? (
+          <div className="map-sprite-uses-scan">
+            <button type="button" className="cursor-pick-btn" disabled={!cacheRoot} onClick={handleCompatScan}>
+              Scan usages
+            </button>
+            <span className="map-sprite-hint">
+              builds the session-wide animation-compatibility index once (~68k files — shared with the
+              animation viewer's fit tables, which is why it reads more than just NPC and item defs)
+            </span>
+          </div>
+        ) : (
+          <>
+            <h4 className="anim-fit-subhead">NPCs</h4>
+            {previewError && <p className="cursor-sprite-error">{previewError}</p>}
+            <NpcFitTable
+              npcs={peekAnimCompatIndex()!.npcsByBas.get(data.id) ?? []}
+              emptyText="No NPC uses this BAS as its render anim."
+              onNavigate={onNavigate}
+              onPreviewAnim={handlePreviewAnim}
+            />
+            <h4 className="anim-fit-subhead">Items (weapon stance)</h4>
+            <p className="map-sprite-hint">
+              Items name their wielded render anim in param {RENDER_ANIM_PARAM}
+              {data.id === DEFAULT_PLAYER_BAS && ' — and this BAS is additionally the implicit default stance for every item without that param'}.
+            </p>
+            <ItemUseTable
+              items={peekAnimCompatIndex()!.itemsByBas.get(data.id) ?? []}
+              emptyText="No item names this BAS in its render-anim param."
+              onNavigate={onNavigate}
+            />
+          </>
+        )}
+      </section>
+
       <details className="item-unknown bas-slots">
         <summary>Per-slot overrides & unused fields</summary>
         <p className="bas-slot-hint">
@@ -373,6 +456,15 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
           onChange={(key, v) => set(key, key === 'unusedOpcode37' ? v : v < 0 ? undefined : v)}
         />
       </details>
+
+      {preview && (
+        <AnimationPlaybackViewer
+          animation={preview.animation}
+          rootHandle={cacheRoot ?? undefined}
+          initialModelId={preview.modelId}
+          onClose={() => setPreview(null)}
+        />
+      )}
 
       {isDirty && (
         <div className="save-bar">

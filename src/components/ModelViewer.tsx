@@ -50,7 +50,16 @@ function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
 }
 
-type Props = { data: ModelData; display?: ModelDisplayParams | null }
+export type CameraState = { position: [number, number, number]; target: [number, number, number] }
+
+type Props = {
+  data: ModelData
+  display?: ModelDisplayParams | null
+  /** When set, the orbit camera saves into / restores from this ref across
+   *  scene rebuilds — so stepping animation frames keeps the user's rotation
+   *  instead of resetting to the default view. */
+  cameraStateRef?: React.MutableRefObject<CameraState | null>
+}
 
 // Per-particle size, tint and alpha need a shader — THREE.Points only supports a
 // uniform size. `uScale` converts a world-space diameter to gl_PointSize pixels.
@@ -150,7 +159,7 @@ function jagexNormalSpace(
   return space
 }
 
-export default function ModelViewer({ data, display }: Props) {
+export default function ModelViewer({ data, display, cameraStateRef }: Props) {
   const mountRef = useRef<HTMLDivElement>(null)
   const matsRef = useRef<THREE.MeshBasicMaterial[]>([])
   const [wireframe, setWireframe] = useState(false)
@@ -885,6 +894,13 @@ export default function ModelViewer({ data, display }: Props) {
     controls.enableDamping = true
     controls.dampingFactor = 0.1
 
+    // restore the previous rebuild's orbit state (animation frame stepping)
+    if (cameraStateRef?.current) {
+      camera.position.set(...cameraStateRef.current.position)
+      controls.target.set(...cameraStateRef.current.target)
+      controls.update()
+    }
+
     let animId: number
     let lastParticleTime = performance.now()
     let tickCarry = 0
@@ -936,6 +952,12 @@ export default function ModelViewer({ data, display }: Props) {
 
     return () => {
       disposed = true
+      if (cameraStateRef) {
+        cameraStateRef.current = {
+          position: [camera.position.x, camera.position.y, camera.position.z],
+          target: [controls.target.x, controls.target.y, controls.target.z],
+        }
+      }
       cancelAnimationFrame(animId)
       ro.disconnect()
       controls.dispose()
@@ -952,6 +974,9 @@ export default function ModelViewer({ data, display }: Props) {
       for (const texture of particleTextures) texture.dispose()
       mount.removeChild(renderer.domElement)
     }
+    // cameraStateRef is a mutable ref (stable identity, read at cleanup) —
+    // deliberately not a dependency
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, display, applyPose])
 
   useEffect(() => {

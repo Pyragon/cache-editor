@@ -62,6 +62,12 @@
   background: #14161d;
 }
 
+/* multi-line cells (model chip lists) must not push single-line neighbours
+   (View buttons, ids) out of alignment */
+.map-sprite-uses-wrap td {
+  vertical-align: middle;
+}
+
 .map-sprite-use-id {
   color: #6b7280;
   font-size: 12px;

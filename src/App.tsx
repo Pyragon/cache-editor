@@ -1361,7 +1361,7 @@ function App() {
                 : hitbarContent != null
                 ? <HitbarViewer data={hitbarContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : basContent != null
-                ? <BasViewer data={basContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenAnimation={(id) => handleNavigateToItem('animations', id)} />
+                ? <BasViewer data={basContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenAnimation={(id) => handleNavigateToItem('animations', id)} cacheRoot={cacheHandle} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : lightIntensityContent != null
                 ? <LightIntensityViewer data={lightIntensityContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : varcContent != null

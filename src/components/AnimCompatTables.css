@@ -1,0 +1,15 @@
+.anim-fit-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 320px;
+}
+
+.anim-fit-subhead {
+  margin: 14px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
