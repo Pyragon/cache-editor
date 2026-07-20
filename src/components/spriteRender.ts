@@ -74,8 +74,8 @@ export function downloadSpritePng(meta: SpriteMeta, filename: string) {
   }, 'image/png')
 }
 
-// Decode an uploaded image file to raw RGBA pixels.
-export async function imageDataFromFile(file: File): Promise<ImageData> {
+// Decode an uploaded image file (or any image Blob) to raw RGBA pixels.
+export async function imageDataFromFile(file: Blob): Promise<ImageData> {
   const bitmap = await createImageBitmap(file)
   const offscreen = document.createElement('canvas')
   offscreen.width  = bitmap.width
@@ -188,6 +188,58 @@ export function applyImageToMeta(
     subWidths:    newSubWidths,
     subHeights:   newSubHeights,
   }
+}
+
+/** Render one frame at its own sub-frame size with no canvas offsets — the
+ *  exact image cryogen's dumper writes as `<id>_<frame>.png` (getBufferedImage
+ *  is called with the SUB dimensions), so regenerated PNGs match the dump. */
+export function renderSubFrame(canvas: HTMLCanvasElement, meta: SpriteMeta, frameIndex: number) {
+  const subWidth = meta.subWidths[frameIndex] ?? 0
+  const subHeight = meta.subHeights[frameIndex] ?? 0
+  const framePixels = meta.pixelIndices[frameIndex]
+  const frameAlpha = meta.alpha?.[frameIndex]
+  const hasAlpha = meta.usesAlpha[frameIndex] && frameAlpha != null
+  canvas.width = Math.max(1, subWidth)
+  canvas.height = Math.max(1, subHeight)
+  const ctx = canvas.getContext('2d')!
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  if (subWidth <= 0 || subHeight <= 0) return
+  const imageData = ctx.createImageData(subWidth, subHeight)
+  const px = imageData.data
+  for (let x = 0; x < subWidth; x++) {
+    const col = framePixels?.[x]
+    if (!col) continue
+    for (let y = 0; y < subHeight; y++) {
+      const paletteIdx = col[y] & 0xff
+      const pos = (y * subWidth + x) * 4
+      if (hasAlpha) {
+        const a = frameAlpha[y * subWidth + x] & 0xff
+        if (a === 0) continue
+        const rgb = meta.palette[paletteIdx] ?? 0
+        px[pos] = (rgb >> 16) & 0xff
+        px[pos + 1] = (rgb >> 8) & 0xff
+        px[pos + 2] = rgb & 0xff
+        px[pos + 3] = a
+      } else {
+        if (paletteIdx === 0) continue
+        const rgb = meta.palette[paletteIdx] ?? 0
+        px[pos] = (rgb >> 16) & 0xff
+        px[pos + 1] = (rgb >> 8) & 0xff
+        px[pos + 2] = rgb & 0xff
+        px[pos + 3] = 255
+      }
+    }
+  }
+  ctx.putImageData(imageData, 0, 0)
+}
+
+/** PNG blob of a frame's dump-convention image (sub-frame size). */
+export function spriteFramePngBlob(meta: SpriteMeta, frameIndex: number): Promise<Blob> {
+  const canvas = document.createElement('canvas')
+  renderSubFrame(canvas, meta, frameIndex)
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('PNG encode failed'))), 'image/png')
+  })
 }
 
 export function renderFrame(canvas: HTMLCanvasElement, meta: SpriteMeta, frameIndex: number) {

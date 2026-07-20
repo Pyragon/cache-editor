@@ -68,9 +68,35 @@
   background: rgba(0, 102, 255, 0.12);
 }
 
+/* Segmented pill group: the buttons share one pill-shaped border and are
+   separated by thin dividers instead of each carrying its own box. */
+.btn-pill {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.btn-pill .zoom-btn {
+  border: none;
+  border-radius: 0;
+  padding: 4px 12px;
+}
+
+.btn-pill .zoom-btn + .zoom-btn {
+  border-left: 1px solid var(--border);
+}
+
+.upload-note {
+  color: #8b93a1;
+  font-size: 12px;
+}
+
 .sprite-frames {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 24px;
 }
 
@@ -111,6 +137,12 @@
   color: var(--text);
   background: rgba(255, 255, 255, 0.05);
   border-color: rgba(255, 255, 255, 0.2);
+}
+
+.replace-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  pointer-events: none;
 }
 
 .upload-error {
@@ -176,6 +208,78 @@
 
 .sprite-meta-card .stat-input:focus {
   border-bottom-color: var(--electric-blue-bright);
+}
+
+.sprite-bg-swatch {
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  margin-right: 8px;
+}
+
+.sprite-bg-swatch.active {
+  border-color: rgba(126, 184, 255, 0.6);
+  box-shadow: 0 0 4px rgba(47, 143, 255, 0.5);
+}
+
+.sprite-remove-btn:hover {
+  border-color: #ff5a5a;
+  color: #ff8080;
+}
+
+.sprite-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sprite-palette-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.sprite-palette-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sprite-palette-swatch:hover {
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.sprite-palette-transparent {
+  background: repeating-linear-gradient(45deg, #23262f 0 4px, #171a21 4px 8px);
+  cursor: default;
+}
+
+.sprite-add-frame {
+  align-self: flex-start;
+  padding: 18px 26px;
+  border-radius: 8px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.sprite-add-frame:hover {
+  color: var(--text);
+  border-color: rgba(126, 184, 255, 0.5);
 }
 
 /* Toggle */

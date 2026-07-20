@@ -1,0 +1,155 @@
+/* Pixel editor modal — mirrors ConfirmDialog's dialog chrome. */
+
+.pixel-editor-dialog {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #1a1d26;
+  color: var(--text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+.pixel-editor-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.pixel-editor-body {
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: min(90vw, 820px);
+}
+
+.pixel-editor-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The size NumberInputs: compact fixed width (3 digits + the hover steppers),
+   boxed like the URL input rather than the transparent in-card field style.
+   Scoped as .pixel-editor-toolbar descendants so the (0,2,0) specificity beats
+   the shared .num-input/.item-field-input rules regardless of bundle order;
+   padding-right is left alone so the stepper hover reveal keeps working. */
+.pixel-editor-toolbar .num-input {
+  width: calc(4ch + 10px + 52px);
+}
+
+.pixel-editor-toolbar .num-input-field {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  padding-left: 8px;
+}
+
+.pixel-editor-toolbar .num-input-field:focus {
+  border-color: var(--electric-blue-bright);
+  outline: none;
+}
+
+/* keep the −/+ steppers off the input's right border */
+.pixel-editor-toolbar .num-input-steps {
+  right: 4px;
+}
+
+.pixel-editor-x,
+.pixel-editor-dims {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.pixel-editor-url {
+  flex: 1;
+  min-width: 220px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.pixel-editor-url:focus {
+  border-color: var(--electric-blue-bright);
+  outline: none;
+}
+
+.pixel-editor-note {
+  margin: -6px 0 0;
+  color: #8b93a1;
+  font-size: 11px;
+}
+
+.pixel-editor-canvas-wrap {
+  align-self: flex-start;
+  max-width: 100%;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: repeating-conic-gradient(#2a2a3a 0% 25%, #1e1e2e 0% 50%) 0 0 / 16px 16px;
+}
+
+.pixel-editor-canvas {
+  display: block;
+  image-rendering: pixelated;
+  cursor: crosshair;
+}
+
+.pixel-editor-tool-pick {
+  cursor: copy;
+}
+
+.pixel-editor-tool-move {
+  cursor: move;
+}
+
+.pixel-editor-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Swatches are buttons here (select-to-paint), unlike the viewer's recolour
+   inputs — keep the same look, add a selection ring. */
+.pixel-editor-swatch {
+  cursor: pointer;
+}
+
+.pixel-editor-swatch.selected {
+  outline: 2px solid #7eb8ff;
+  outline-offset: 1px;
+}
+
+/* the transparent swatch is selectable here, unlike the viewer's info-only one */
+.pixel-editor-swatch.sprite-palette-transparent {
+  cursor: pointer;
+}
+
+/* "+" label with the real colour input hidden inside (label click opens it) */
+.pixel-editor-add-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  border-style: dashed;
+  cursor: pointer;
+}
+
+.pixel-editor-add-swatch input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
