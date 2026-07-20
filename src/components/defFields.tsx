@@ -83,6 +83,39 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
 
 export type NumFieldDef = [key: string, label: string]
 
+// Clickable sorting header for read-only tables: first click sorts ascending,
+// clicking the active column flips direction. (Editable tables deliberately
+// don't use this — their edit handlers address rows by index.)
+export type SortState = { key: string; dir: 1 | -1 }
+
+export function SortableTh({ label, sortKey, sort, onSort }: {
+  label: string
+  sortKey: string
+  sort: SortState | null
+  onSort: (next: SortState) => void
+}) {
+  const [hovered, setHovered] = useState(false)
+  const active = sort?.key === sortKey
+  // The arrow always previews what a click gives you: inactive columns show a
+  // faded ascending arrow on hover (CSS opacity), the active column flips its
+  // arrow to the other direction while hovered.
+  const arrow = active
+    ? ((hovered ? -sort!.dir : sort!.dir) === 1 ? '▲' : '▼')
+    : '▲'
+  return (
+    <th
+      className={`sortable-th${active ? ' active' : ''}`}
+      title={`Sort by ${label.toLowerCase()}`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => onSort(active ? { key: sortKey, dir: -sort!.dir as 1 | -1 } : { key: sortKey, dir: 1 })}
+    >
+      {label}
+      <span className="sortable-th-arrow">{arrow}</span>
+    </th>
+  )
+}
+
 // A cell's id link to another entry's viewer (e.g. modelId → the model
 // viewer), rendered as a small button in the cell's top-right corner.
 export type FieldLink = { label: string; onOpen: (value: number) => void }

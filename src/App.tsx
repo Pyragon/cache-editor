@@ -131,7 +131,7 @@ const SPECIALIZED_ENTRIES = new Set([
 // the user has manually reviewed and signed off go in here.
 const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
-  'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics', 'sprites',
+  'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics', 'sprites', 'config_map_sprites',
   'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests', 'game_tips',
 ])
@@ -1341,7 +1341,7 @@ function App() {
                 : cursorContent != null
                 ? <CursorViewer data={cursorContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : mapSpriteContent != null
-                ? <MapSpriteViewer data={mapSpriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <MapSpriteViewer data={mapSpriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenObject={(id) => handleNavigateToItem('objects', id)} />
                 : itemContent != null
                 ? <ItemViewer data={itemContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenModel={handleOpenItemModel} onOpenCursor={(id) => handleNavigateToItem('config_cursors', id)} />
                 : objectContent != null

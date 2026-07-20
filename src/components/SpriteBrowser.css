@@ -1,0 +1,81 @@
+/* Sprite picker modal — same dialog chrome as ConfirmDialog / the pixel editor. */
+
+.sprite-browser-dialog {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #1a1d26;
+  color: var(--text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+.sprite-browser-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.sprite-browser-body {
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(90vw, 620px);
+}
+
+.sprite-browser-status {
+  color: #8b93a1;
+  font-size: 12px;
+}
+
+.sprite-browser-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+  overflow-y: auto;
+  max-height: 55vh;
+  min-height: 120px;
+  padding: 2px;
+}
+
+.sprite-browser-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.sprite-browser-item:hover {
+  border-color: rgba(126, 184, 255, 0.5);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sprite-browser-item.selected {
+  border-color: rgba(126, 184, 255, 0.7);
+  background: rgba(0, 102, 255, 0.12);
+}
+
+.sprite-browser-thumb {
+  width: 40px;
+  height: 40px;
+  image-rendering: pixelated;
+  background: repeating-conic-gradient(#2a2a3a 0% 25%, #1e1e2e 0% 50%) 0 0 / 10px 10px;
+  border-radius: 3px;
+}
+
+.sprite-browser-item-id {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.sprite-browser-empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}

@@ -16,6 +16,9 @@ export type MapSpriteData = {
   // Handle to the top-level sprites/ entry so the viewer can preview the
   // referenced sprite (and re-load it live when spriteId is edited).
   spritesDir: FileSystemDirectoryHandle | null
+  // Handle to the top-level objects/ entry for the "used by objects" scan
+  // (object defs reference map sprites via mapSpriteId).
+  objectsDir: FileSystemDirectoryHandle | null
   // Set by the viewer when the user uploads a replacement image. Uploads
   // never overwrite the existing sprite — the viewer allocates the next
   // free sprite id and saveItem creates the new sprite folder.
@@ -55,15 +58,21 @@ const loader: CacheLoader = {
     const mapSprite = JSON.parse(await file.text()) as MapSpriteDef
 
     let spritesDir: FileSystemDirectoryHandle | null = null
+    let objectsDir: FileSystemDirectoryHandle | null = null
     if (rootHandle) {
       try {
         spritesDir = await rootHandle.getDirectoryHandle('sprites')
       } catch {
         // no sprites entry in this dump — viewer falls back to no preview
       }
+      try {
+        objectsDir = await rootHandle.getDirectoryHandle('objects')
+      } catch {
+        // no objects entry — the used-by scan is simply unavailable
+      }
     }
 
-    return { id: item.id, mapSprite, spritesDir } satisfies MapSpriteData
+    return { id: item.id, mapSprite, spritesDir, objectsDir } satisfies MapSpriteData
   },
 
   async saveItem(dirHandle, item, data) {

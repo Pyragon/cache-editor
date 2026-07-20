@@ -225,6 +225,45 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* Clickable sorting headers (SortableTh in defFields) */
+.sortable-th {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.sortable-th:hover {
+  color: var(--text);
+}
+
+.sortable-th.active {
+  color: #7eb8ff;
+}
+
+.sortable-th-arrow {
+  display: inline-block;
+  width: 14px;
+  padding-left: 4px;
+  font-size: 9px;
+}
+
+/* Inactive columns carry a hidden ascending arrow that fades in on hover, so
+   sortability is discoverable before the first click. */
+.sortable-th:not(.active) .sortable-th-arrow {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.sortable-th:not(.active):hover .sortable-th-arrow {
+  opacity: 0.45;
+}
+
+/* The active column's hover arrow is a preview of the flipped direction —
+   dimmed a touch so it reads as "what you'd get", not the current state. */
+.sortable-th.active:hover .sortable-th-arrow {
+  opacity: 0.65;
+}
+
 .quest-table td {
   padding: 6px 10px;
   color: var(--text);
