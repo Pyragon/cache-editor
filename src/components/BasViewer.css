@@ -1,0 +1,79 @@
+/* BAS viewer — everything else reuses the shared item/quest-table styles. */
+
+/* Shrink the matrix to what its cells actually need instead of page width:
+   room for a 5-digit sequence id (plus sign), the input's own side padding,
+   the 36px −/+ steppers, and the View Anim link. */
+.bas-matrix-wrap {
+  width: fit-content;
+  max-width: 100%;
+}
+
+.bas-matrix {
+  width: auto;
+}
+
+.bas-matrix td {
+  white-space: nowrap;
+}
+
+.bas-matrix .num-input {
+  width: calc(6ch + 14px + 36px);
+}
+
+/* Random Stand Sequences uses the shared PairTable (fixed 380px wrap) —
+   scope the same shrink-to-content sizing onto it without touching the
+   shared styles. */
+.bas-pair .item-pair-wrap {
+  width: fit-content;
+}
+
+.bas-pair .quest-table {
+  width: auto;
+}
+
+.bas-pair .quest-table td {
+  white-space: nowrap;
+}
+
+.bas-pair .num-input {
+  width: calc(6ch + 14px + 36px);
+}
+
+.bas-seq-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bas-cell-na {
+  color: #555;
+  padding: 0 8px;
+}
+
+.bas-slot-label {
+  font-weight: 600;
+  color: #9aa4b2;
+  padding: 0 10px;
+}
+
+.bas-slot-hint {
+  margin: 4px 0 10px;
+  color: #8b93a1;
+  font-size: 12px;
+}
+
+/* The collapsed details stacks several sections (slot tables, obj visibility,
+   the unused-fields grid) with no parent flex gap — space them out so each
+   "+ Add slot" button doesn't sit flush against the next header, and the obj
+   visibility field doesn't touch the grid below it. */
+.bas-slots .item-section {
+  margin-bottom: 20px;
+}
+
+/* .def-int-list sizes itself with flex: 1, but the obj visibility section
+   isn't a flex row, so the input collapses to the browser's ~180px intrinsic
+   width — too short for even its placeholder. Size it explicitly. */
+.bas-slots .def-int-list {
+  width: 260px;
+  max-width: 100%;
+}

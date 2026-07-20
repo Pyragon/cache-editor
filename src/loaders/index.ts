@@ -4,6 +4,7 @@ import animation_frame_sets from './animation_frame_sets'
 import animations from './animations'
 import billboards from './billboards'
 import config_cursors from './config/cursors'
+import config_bas from './config/bas'
 import config_hitbars from './config/hitbars'
 import config_light_intensities from './config/light_intensities'
 import config_varc from './config/varc'
@@ -55,6 +56,7 @@ const registry: Record<string, CacheLoader> = {
   animation_frame_sets,
   animations,
   billboards,
+  config_bas,
   config_cursors,
   config_hitbars,
   config_light_intensities,
