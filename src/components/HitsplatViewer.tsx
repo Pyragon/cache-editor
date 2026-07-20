@@ -308,16 +308,18 @@ export default function HitsplatViewer({ data, onSave, onDirtyChange }: Props) {
       <div className="hit-zoom-bar">
         <span className="hit-zoom-label">Zoom</span>
         <div className="hit-zoom-buttons">
-          {ZOOM_LEVELS.map((z) => (
-            <button
-              key={z}
-              type="button"
-              className={`zoom-btn${zoom === z ? ' active' : ''}`}
-              onClick={() => setZoom(z)}
-            >
-              {z}×
-            </button>
-          ))}
+          <span className="btn-pill">
+            {ZOOM_LEVELS.map((z) => (
+              <button
+                key={z}
+                type="button"
+                className={`zoom-btn${zoom === z ? ' active' : ''}`}
+                onClick={() => setZoom(z)}
+              >
+                {z}×
+              </button>
+            ))}
+          </span>
         </div>
       </div>
 

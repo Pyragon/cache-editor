@@ -187,11 +187,13 @@ export default function ParticlePreview({ producer, data }: Props) {
         <button type="button" className={`zoom-btn${additive ? ' active' : ''}`} onClick={() => setAdditive((a) => !a)}>
           Additive
         </button>
-        {PARTICLE_FPS_OPTIONS.map((f) => (
-          <button key={f} type="button" className={`zoom-btn${fps === f ? ' active' : ''}`} onClick={() => setFps(f)}>
-            {f} FPS
-          </button>
-        ))}
+        <span className="btn-pill">
+          {PARTICLE_FPS_OPTIONS.map((f) => (
+            <button key={f} type="button" className={`zoom-btn${fps === f ? ' active' : ''}`} onClick={() => setFps(f)}>
+              {f} FPS
+            </button>
+          ))}
+        </span>
         <span className="tex-op-hint">{count} particles</span>
       </div>
 

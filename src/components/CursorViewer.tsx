@@ -268,16 +268,18 @@ export default function CursorViewer({ data, onSave, onDirtyChange }: Props) {
         </div>
         <div className="sprite-zoom-row">
           <span className="sprite-zoom-label">Zoom</span>
-          {ZOOM_LEVELS.map((z) => (
-            <button
-              key={z}
-              type="button"
-              className={`zoom-btn${zoom === z ? ' active' : ''}`}
-              onClick={() => setZoom(z)}
-            >
-              {z}×
-            </button>
-          ))}
+          <span className="btn-pill">
+            {ZOOM_LEVELS.map((z) => (
+              <button
+                key={z}
+                type="button"
+                className={`zoom-btn${zoom === z ? ' active' : ''}`}
+                onClick={() => setZoom(z)}
+              >
+                {z}×
+              </button>
+            ))}
+          </span>
         </div>
       </div>
 

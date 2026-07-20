@@ -191,16 +191,18 @@ export default function LightIntensityViewer({ data, onSave, onDirtyChange }: Pr
         <div className="hit-zoom-bar">
           <span className="hit-zoom-label">Preview FPS</span>
           <div className="hit-zoom-buttons">
-            {LIGHT_FPS_OPTIONS.map((f) => (
-              <button
-                key={f}
-                type="button"
-                className={`zoom-btn${fps === f ? ' active' : ''}`}
-                onClick={() => setFps(f)}
-              >
-                {f}
-              </button>
-            ))}
+            <span className="btn-pill">
+              {LIGHT_FPS_OPTIONS.map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  className={`zoom-btn${fps === f ? ' active' : ''}`}
+                  onClick={() => setFps(f)}
+                >
+                  {f}
+                </button>
+              ))}
+            </span>
           </div>
         </div>
       </section>
