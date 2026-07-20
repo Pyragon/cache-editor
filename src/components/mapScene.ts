@@ -104,6 +104,16 @@ function repackHsl(hsl: number, light: number): number {
   return (hsl & 0xff80) + l
 }
 
+/** ColorUtil.blend — interpolate two packed HSL16 colours, factor 0-128. */
+function blendHsl16(colorA: number, colorB: number, factor: number): number {
+  if (colorA === colorB) return colorA
+  const inv = 128 - factor
+  const light = (inv * (colorA & 0x7f) + factor * (colorB & 0x7f)) >> 7
+  const sat = (inv * (colorA & 0x380) + factor * (colorB & 0x380)) >> 7
+  const hue = (inv * (colorA & 0xfc00) + factor * (colorB & 0xfc00)) >> 7
+  return (hue & 0xfc00) | (sat & 0x380) | (light & 0x7f)
+}
+
 function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
 }
@@ -198,6 +208,34 @@ const SHAPE_VERTEX_C = [
 const VERTEX_DELTA_X = [0, 256, 512, 512, 512, 256, 0, 0, 128, 256, 128, 384, 256]
 const VERTEX_DELTA_Y = [0, 0, 0, 256, 512, 512, 512, 256, 256, 384, 128, 128, 256]
 
+// MapLoader.OVERLAY_SHAPE_SUPPORTS_HEIGHT — per shape, which vertex ids (in
+// UNROTATED shape space) belong to the overlay portion of the tile.
+const OVERLAY_SHAPE_COVERS: boolean[][] = [
+  [true, true, true, true, true, true, true, true, true, true, true, true, true],
+  [true, true, true, false, false, false, true, true, false, false, false, false, true],
+  [true, false, false, false, false, true, true, true, false, false, false, false, false],
+  [false, false, true, true, true, true, false, false, false, false, false, false, false],
+  [true, true, true, true, true, true, false, false, false, false, false, false, false],
+  [true, true, true, false, false, true, true, true, false, false, false, false, false],
+  [true, true, false, false, false, true, true, true, false, false, false, false, true],
+  [true, true, false, false, false, false, false, true, false, false, false, false, false],
+  [false, true, true, true, true, true, true, true, false, false, false, false, false],
+  [true, false, false, false, true, true, true, true, true, true, false, false, false],
+  [true, true, true, true, true, false, false, false, true, true, false, false, false],
+  [true, true, true, false, false, false, false, false, false, false, true, true, false],
+  [false, false, false, false, false, false, false, false, false, false, false, false, false],
+  [true, true, true, true, true, true, true, true, true, true, true, true, true],
+  [false, false, false, false, false, false, false, false, false, false, false, false, false],
+]
+
+/** Does a tile's overlay (shape+rotation) cover the tile corner? Corner ids
+ *  in position space: 0=SW(0,0), 2=SE(512,0), 4=NE(512,512), 6=NW(0,512);
+ *  the client's rotation algebra maps a position back to the unrotated
+ *  vertex id as (corner + 2·rotation) & 7. */
+function overlayCoversCorner(shape: number, rotation: number, cornerId: number): boolean {
+  return OVERLAY_SHAPE_COVERS[shape]?.[(cornerId + 2 * rotation) & 0x7] === true
+}
+
 // ---------------------------------------------------------------------------
 // Config inputs
 // ---------------------------------------------------------------------------
@@ -211,11 +249,23 @@ export type FloJson = {
   minimapColorRgb?: number
   waterColor?: number
   blendsWithUnderlay?: boolean
+  /** layering priority for corner-colour blending between overlays. */
+  slot?: number
 }
 
 export type SceneConfigs = {
   underlays: Map<number, FluJson>
   overlays: Map<number, FloJson>
+}
+
+/** Does this overlay's colour bleed into neighbouring ground vertices? */
+function isCornerBlendable(flo: FloJson | undefined): boolean {
+  return flo !== undefined && flo.blendsWithUnderlay === true
+}
+
+/** Client slot priority is a composite: (slot << 8) | overlayId (FloType.postDecode). */
+function floSlotKey(flo: FloJson, id: number): number {
+  return ((flo.slot ?? 8) << 8) | id
 }
 
 export async function loadSceneConfigs(rootHandle: FileSystemDirectoryHandle): Promise<SceneConfigs> {
@@ -245,6 +295,123 @@ export async function loadSceneConfigs(rootHandle: FileSystemDirectoryHandle): P
 
 // The magic RGB that means "no colour" for flo colours (16711935 = pure magenta).
 const NO_COLOR = 16711935
+
+// The map dumper's hand-made 4×4 overlay pixel masks (cryogen-website
+// MapImageDumper/MapConstants.TILE_SHAPES) — row-major with rows TOP-DOWN
+// (canvas order), indexed by overlay shape 0-11; TILE_ROTATIONS permutes
+// pixel indices per rotation. Missing shapes fall back to a full square.
+const DUMP_TILE_SHAPES: number[][] = [
+  [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+  [1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1],
+  [1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+  [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+  [0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0],
+  [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0],
+  [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1],
+  [1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1],
+  [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1],
+]
+const DUMP_TILE_ROTATIONS: number[][] = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+  [12, 8, 4, 0, 13, 9, 5, 1, 14, 10, 6, 2, 15, 11, 7, 3],
+  [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+  [3, 7, 11, 15, 2, 6, 10, 14, 1, 5, 9, 13, 0, 4, 8, 12],
+]
+
+/** Map-style minimap ground for one region+plane, 4px per tile — ported from
+ *  cryogen-website's MapImageDumper (the /map route): per-tile underlay RGBs
+ *  box-blurred in plain RGB space (no lighting/shadows/HSL — the clean
+ *  classic map look, with no quantisation steps to see), then overlays
+ *  painted flat through the dumper's hand-made pixel masks. Bridge tiles
+ *  (linked/visible-below on the plane above) draw the plane-above overlay.
+ *  `blurred` comes from SceneMosaic.underlayRgbBlurFor (cross-region, so no
+ *  seams at region borders). 256×256 RGBA. */
+export async function renderMinimapGround(
+  terrain: MapTerrain,
+  configs: SceneConfigs,
+  plane: number,
+  blurred: Int32Array,
+  assets: LocAssets,
+): Promise<Uint8ClampedArray> {
+  const W = SIZE * 4
+  const out = new Uint8ClampedArray(W * W * 4)
+
+  // per-overlay colour — the dumper's getOverlayRGB rule: colorRgb unless
+  // invalid (absent/0/-1/magenta), else minimapColorRgb; the texture's
+  // average colour only when still unresolved
+  const invalidCol = (c: number | undefined): boolean => c === undefined || c === 0 || c === -1 || c === NO_COLOR
+  const overlayCol = new Map<number, number>()
+  const overlayIdsUsed = new Set<number>()
+  for (let i = 0; i < terrain.overlayIds.length; i++) {
+    const id = terrain.overlayIds[i] & 0xff
+    if (id !== 0) overlayIdsUsed.add(id)
+  }
+  for (const id of overlayIdsUsed) {
+    const flo = configs.overlays.get(id - 1)
+    let col = !flo || invalidCol(flo.colorRgb) ? (flo?.minimapColorRgb ?? -1) : flo.colorRgb!
+    if (invalidCol(col)) col = 0
+    if (col === 0 && flo?.texture !== undefined && flo.texture >= 0) {
+      const meta = await assets.getMaterialMeta(flo.texture)
+      if (meta && meta.avgRgb !== -1) col = meta.avgRgb
+    }
+    overlayCol.set(id, col)
+  }
+
+  // ground: the blurred underlay colour, flat per tile (empty tiles stay black)
+  for (let x = 0; x < SIZE; x++) {
+    for (let y = 0; y < SIZE; y++) {
+      const rgb = blurred[x * SIZE + y]
+      const rowBase = (SIZE - 1 - y) * 4 // north up
+      for (let py = 0; py < 4; py++) {
+        for (let px = 0; px < 4; px++) {
+          const o = ((rowBase + py) * W + x * 4 + px) * 4
+          if (rgb >= 0) {
+            out[o] = (rgb >> 16) & 0xff
+            out[o + 1] = (rgb >> 8) & 0xff
+            out[o + 2] = rgb & 0xff
+          }
+          out[o + 3] = 255
+        }
+      }
+    }
+  }
+
+  // overlays through the dumper masks (rows are canvas top-down)
+  const drawOverlay = (x: number, y: number, p: number) => {
+    const idx = tileIndex(p, x, y)
+    const overlayId = terrain.overlayIds[idx] & 0xff
+    if (overlayId === 0) return
+    const col = overlayCol.get(overlayId) ?? 0
+    // fully colourless overlays (e.g. the invisible plane-1 marker overlay
+    // 42, all channels magenta) — the dumper paints these black, but the
+    // ground showing through is what the client does
+    if (col === 0) return
+    const shapeRot = terrain.overlayShapeRot[idx] & 0xff
+    const shapeMask = DUMP_TILE_SHAPES[shapeRot >> 2]
+    const rotIdx = DUMP_TILE_ROTATIONS[shapeRot & 0x3]
+    const rowBase = (SIZE - 1 - y) * 4
+    for (let si = 0; si < 16; si++) {
+      if (shapeMask !== undefined && shapeMask[rotIdx[si]] === 0) continue
+      const o = ((rowBase + (si >> 2)) * W + x * 4 + (si & 0x3)) * 4
+      out[o] = (col >> 16) & 0xff
+      out[o + 1] = (col >> 8) & 0xff
+      out[o + 2] = col & 0xff
+      out[o + 3] = 255
+    }
+  }
+  // linked below (0x2, bridges) or visible below (0x8)
+  const belowFlagged = (p: number, x: number, y: number) => (terrain.tileFlags[tileIndex(p, x, y)] & 0xa) !== 0
+  for (let x = 0; x < SIZE; x++) {
+    for (let y = 0; y < SIZE; y++) {
+      if (plane === 0 || !belowFlagged(plane, x, y)) drawOverlay(x, y, plane)
+      if (plane < 3 && belowFlagged(plane + 1, x, y)) drawOverlay(x, y, plane + 1)
+    }
+  }
+  return out
+}
 
 function floTileHsl(flo: FloJson | undefined): number {
   if (!flo) return -1
@@ -471,11 +638,15 @@ export class SceneMosaic {
     return cached
   }
 
-  /** Cross-region 11×11 blurred underlay palette for one region+plane. */
+  /** Cross-region 11×11 blurred underlay palette for one region+plane.
+   *  65×65 (VERTS²): entry [x][y] is the blur centred on tile (x, y), with
+   *  the 65th row/column sampled from the neighbouring region — tile corner
+   *  vertices blend between the palettes of the 4 tiles meeting there
+   *  (addUnderlayTiles), so consumers need one tile beyond the region. */
   paletteFor(dx: number, dy: number, plane: number): Int32Array {
     const baseX = (dx + 1) * SIZE
     const baseY = (dy + 1) * SIZE
-    const palette = new Int32Array(SIZE * SIZE).fill(-1)
+    const palette = new Int32Array(VERTS * VERTS).fill(-1)
     const fluCache = new Map<number, { hue: number; saturation: number; lightness: number; divisor: number }>()
     const compAt = (gx: number, gy: number) => {
       if (gx < 0 || gy < 0 || gx >= MOSAIC || gy >= MOSAIC) return null
@@ -493,8 +664,8 @@ export class SceneMosaic {
       }
       return c
     }
-    for (let x = 0; x < SIZE; x++) {
-      for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < VERTS; x++) {
+      for (let y = 0; y < VERTS; y++) {
         let hue = 0, sat = 0, light = 0, div = 0, n = 0
         for (let ox = -5; ox <= 5; ox++) {
           for (let oy = -5; oy <= 5; oy++) {
@@ -509,7 +680,7 @@ export class SceneMosaic {
           }
         }
         if (div > 0 && n > 0) {
-          palette[x * SIZE + y] = packBlurredHsl(
+          palette[x * VERTS + y] = packBlurredHsl(
             Math.trunc((hue * 256) / div),
             Math.trunc(sat / n),
             Math.trunc(light / n),
@@ -519,11 +690,191 @@ export class SceneMosaic {
     }
     return palette
   }
+
+  /** Cross-region blendable-overlay corner field (VERTS²): for each tile
+   *  corner, the id of the highest-slot `blendsWithUnderlay` overlay whose
+   *  shape covers that corner among the 4 tiles meeting there, or -1. Ground
+   *  vertices at these corners take the overlay's colour instead of the
+   *  blurred palette (the client's calculateOverlayDisplay slot machinery) —
+   *  this is what melts roads/mud patches into the surrounding ground. */
+  overlayCornerFor(dx: number, dy: number, plane: number): Int32Array {
+    const baseX = (dx + 1) * SIZE
+    const baseY = (dy + 1) * SIZE
+    const out = new Int32Array(VERTS * VERTS).fill(-1)
+    const tileAt = (gx: number, gy: number): number => {
+      if (gx < 0 || gy < 0 || gx >= MOSAIC || gy >= MOSAIC) return 0
+      const rdx = Math.floor(gx / SIZE)
+      const rdy = Math.floor(gy / SIZE)
+      const terrain = this.regions[rdx]?.[rdy]
+      if (!terrain) return 0
+      const idx = tileIndex(plane, gx - rdx * SIZE, gy - rdy * SIZE)
+      const oid = terrain.overlayIds[idx] & 0xff
+      if (oid === 0) return 0
+      // pack id + shapeRot so the caller-side check has both
+      return oid | ((terrain.overlayShapeRot[idx] & 0xff) << 8)
+    }
+    for (let x = 0; x < VERTS; x++) {
+      for (let y = 0; y < VERTS; y++) {
+        const gx = baseX + x
+        const gy = baseY + y
+        let best = -1
+        let bestSlot = -Infinity
+        // (tile dx, tile dy, corner id of this vertex within that tile)
+        const candidates: [number, number, number][] = [
+          [gx - 1, gy - 1, 4], // vertex is that tile's NE corner
+          [gx, gy - 1, 6],     // NW
+          [gx - 1, gy, 2],     // SE
+          [gx, gy, 0],         // SW
+        ]
+        for (const [tx, ty, corner] of candidates) {
+          const packed = tileAt(tx, ty)
+          if (packed === 0) continue
+          const oid = packed & 0xff
+          const flo = this.configs.overlays.get(oid - 1)
+          if (!flo || !isCornerBlendable(flo)) continue
+          const shapeRot = packed >> 8
+          if (!overlayCoversCorner(shapeRot >> 2, shapeRot & 0x3, corner)) continue
+          const slot = floSlotKey(flo, oid)
+          if (slot >= bestSlot) {
+            bestSlot = slot
+            best = oid
+          }
+        }
+        out[x * VERTS + y] = best
+      }
+    }
+    return out
+  }
+
+  /** Per-tile underlay RGB box-blurred in plain RGB space — the map dumper's
+   *  blendUnderlay (cryogen-website MapImageDumper), with its exact window
+   *  (canvas [-3,+2] each axis → tile x [-3,+2], tile y [-2,+3]) and its
+   *  skip-empties rule, but sampling neighbour regions through the mosaic so
+   *  region borders don't seam. -1 = tile has no underlay (stays black). */
+  underlayRgbBlurFor(dx: number, dy: number, plane: number): Int32Array {
+    const baseX = (dx + 1) * SIZE
+    const baseY = (dy + 1) * SIZE
+    const out = new Int32Array(SIZE * SIZE).fill(-1)
+    const rgbCache = new Map<number, number>()
+    const rgbAt = (gx: number, gy: number): number => {
+      if (gx < 0 || gy < 0 || gx >= MOSAIC || gy >= MOSAIC) return -1
+      const rdx = Math.floor(gx / SIZE)
+      const rdy = Math.floor(gy / SIZE)
+      const terrain = this.regions[rdx]?.[rdy]
+      if (!terrain) return -1
+      const id = terrain.underlayIds[tileIndex(plane, gx - rdx * SIZE, gy - rdy * SIZE)] & 0xff
+      if (id === 0) return -1
+      let c = rgbCache.get(id)
+      if (c === undefined) {
+        c = this.configs.underlays.get(id - 1)?.rgb ?? -1
+        rgbCache.set(id, c)
+      }
+      return c
+    }
+    for (let x = 0; x < SIZE; x++) {
+      for (let y = 0; y < SIZE; y++) {
+        // (the dumper skips tiles with no own underlay, leaving black
+        // pinholes under some trees — averaging the window regardless fills
+        // them with the surrounding ground instead)
+        let r = 0, g = 0, b = 0, n = 0
+        for (let ox = -3; ox <= 2; ox++) {
+          for (let oy = -2; oy <= 3; oy++) {
+            const c = rgbAt(baseX + x + ox, baseY + y + oy)
+            if (c === -1) continue
+            r += (c >> 16) & 0xff
+            g += (c >> 8) & 0xff
+            b += c & 0xff
+            n++
+          }
+        }
+        if (n > 0) out[x * SIZE + y] = (Math.trunc(r / n) << 16) | (Math.trunc(g / n) << 8) | Math.trunc(b / n)
+      }
+    }
+    return out
+  }
+
+  /** Cross-region per-tile underlay ids at 65×65 (the 65th row/column from
+   *  the neighbouring region) — each terrain vertex renders the TEXTURE of
+   *  the tile whose origin sits at that corner (addUnderlayTiles), which the
+   *  splatting passes crossfade between. */
+  underlayCornerFor(dx: number, dy: number, plane: number): Int32Array {
+    const baseX = (dx + 1) * SIZE
+    const baseY = (dy + 1) * SIZE
+    const out = new Int32Array(VERTS * VERTS)
+    for (let x = 0; x < VERTS; x++) {
+      for (let y = 0; y < VERTS; y++) {
+        const gx = Math.min(baseX + x, MOSAIC - 1)
+        const gy = Math.min(baseY + y, MOSAIC - 1)
+        const rdx = Math.floor(gx / SIZE)
+        const rdy = Math.floor(gy / SIZE)
+        const terrain = this.regions[rdx]?.[rdy]
+        out[x * VERTS + y] = terrain
+          ? terrain.underlayIds[tileIndex(plane, gx - rdx * SIZE, gy - rdy * SIZE)] & 0xff
+          : 0
+      }
+    }
+    return out
+  }
 }
 
-/** MapLoader.calculateUnderlayPalette — 11×11 box-blurred underlay HSL16 per tile. */
+/** Single-region fallback of SceneMosaic.underlayCornerFor (edges clamp). */
+function computeUnderlayCornerIds(terrain: MapTerrain, plane: number): Int32Array {
+  const out = new Int32Array(VERTS * VERTS)
+  for (let x = 0; x < VERTS; x++) {
+    for (let y = 0; y < VERTS; y++) {
+      const tx = Math.min(x, SIZE - 1)
+      const ty = Math.min(y, SIZE - 1)
+      out[x * VERTS + y] = terrain.underlayIds[tileIndex(plane, tx, ty)] & 0xff
+    }
+  }
+  return out
+}
+
+/** Single-region fallback of SceneMosaic.overlayCornerFor (edges clamp). */
+function computeOverlayCorners(terrain: MapTerrain, plane: number, configs: SceneConfigs): Int32Array {
+  const out = new Int32Array(VERTS * VERTS).fill(-1)
+  const tileAt = (tx: number, ty: number): number => {
+    if (tx < 0 || ty < 0 || tx >= SIZE || ty >= SIZE) return 0
+    const idx = tileIndex(plane, tx, ty)
+    const oid = terrain.overlayIds[idx] & 0xff
+    if (oid === 0) return 0
+    return oid | ((terrain.overlayShapeRot[idx] & 0xff) << 8)
+  }
+  for (let x = 0; x < VERTS; x++) {
+    for (let y = 0; y < VERTS; y++) {
+      let best = -1
+      let bestSlot = -Infinity
+      const candidates: [number, number, number][] = [
+        [x - 1, y - 1, 4],
+        [x, y - 1, 6],
+        [x - 1, y, 2],
+        [x, y, 0],
+      ]
+      for (const [tx, ty, corner] of candidates) {
+        const packed = tileAt(tx, ty)
+        if (packed === 0) continue
+        const oid = packed & 0xff
+        const flo = configs.overlays.get(oid - 1)
+        if (!flo || !isCornerBlendable(flo)) continue
+        const shapeRot = packed >> 8
+        if (!overlayCoversCorner(shapeRot >> 2, shapeRot & 0x3, corner)) continue
+        const slot = floSlotKey(flo, oid)
+        if (slot >= bestSlot) {
+          bestSlot = slot
+          best = oid
+        }
+      }
+      out[x * VERTS + y] = best
+    }
+  }
+  return out
+}
+
+/** MapLoader.calculateUnderlayPalette — 11×11 box-blurred underlay HSL16 per
+ *  tile, 65×65 (VERTS²) like SceneMosaic.paletteFor; the 65th row/column
+ *  reuses the edge tiles (no neighbour region in this fallback path). */
 function computeUnderlayPalette(terrain: MapTerrain, plane: number, configs: SceneConfigs): Int32Array {
-  const palette = new Int32Array(SIZE * SIZE).fill(-1)
+  const palette = new Int32Array(VERTS * VERTS).fill(-1)
   type Acc = { hue: number; sat: number; light: number; div: number; n: number }
   // Precompute per-tile components
   const comp: ({ hue: number; saturation: number; lightness: number; divisor: number } | null)[] = new Array(SIZE * SIZE).fill(null)
@@ -544,14 +895,14 @@ function computeUnderlayPalette(terrain: MapTerrain, plane: number, configs: Sce
   }
   // Direct 11×11 window sum (simple; 64×64 region is small enough)
   const acc: Acc = { hue: 0, sat: 0, light: 0, div: 0, n: 0 }
-  for (let x = 0; x < SIZE; x++) {
-    for (let y = 0; y < SIZE; y++) {
+  for (let x = 0; x < VERTS; x++) {
+    for (let y = 0; y < VERTS; y++) {
       acc.hue = 0; acc.sat = 0; acc.light = 0; acc.div = 0; acc.n = 0
       for (let dx = -5; dx <= 5; dx++) {
-        const cx = x + dx
+        const cx = Math.min(x, SIZE - 1) + dx
         if (cx < 0 || cx >= SIZE) continue
         for (let dy = -5; dy <= 5; dy++) {
-          const cy = y + dy
+          const cy = Math.min(y, SIZE - 1) + dy
           if (cy < 0 || cy >= SIZE) continue
           const c = comp[cx * SIZE + cy]
           if (c) {
@@ -564,7 +915,7 @@ function computeUnderlayPalette(terrain: MapTerrain, plane: number, configs: Sce
         }
       }
       if (acc.div > 0 && acc.n > 0) {
-        palette[x * SIZE + y] = packBlurredHsl(
+        palette[x * VERTS + y] = packBlurredHsl(
           Math.trunc((acc.hue * 256) / acc.div),
           Math.trunc(acc.sat / acc.n),
           Math.trunc(acc.light / acc.n),
@@ -582,21 +933,30 @@ function computeUnderlayPalette(terrain: MapTerrain, plane: number, configs: Sce
 /** Still water (rivers/sea): a self-coloured blue material with no scroll —
  *  the client animates these with its rippling-water effect; the viewer uses
  *  a gentle UV drift instead. Blue band of the 6-bit HSL16 hue wheel. */
-function isWaterMaterial(meta: MaterialMeta): boolean {
+export function isWaterMaterial(meta: MaterialMeta): boolean {
   if (meta.detailsOnly || meta.colorHsl < 0) return false
   const hue = (meta.colorHsl >> 10) & 0x3f
   return hue >= 34 && hue <= 45
 }
 
-type Bucket = { positions: number[]; colors: number[]; uvs: number[]; owners: number[] }
+type Bucket = { positions: number[]; colors: number[]; uvs: number[]; owners: number[]; alphas: number[] }
+
+// blend buckets (terrain texture splatting) share the map under offset keys
+const BLEND_KEY = 1 << 20
 
 class BucketSet {
   buckets = new Map<number, Bucket>()
 
   get(textureId: number): Bucket {
     let b = this.buckets.get(textureId)
-    if (!b) this.buckets.set(textureId, (b = { positions: [], colors: [], uvs: [], owners: [] }))
+    if (!b) this.buckets.set(textureId, (b = { positions: [], colors: [], uvs: [], owners: [], alphas: [] }))
     return b
+  }
+
+  /** Transparent crossfade pass for terrain texture splatting: same geometry,
+   *  per-vertex alpha fades this texture over the base pass. */
+  getBlend(textureId: number): Bucket {
+    return this.get(BLEND_KEY + textureId)
   }
 
   /** One mesh with a material group per texture (index -1 = plain vertex
@@ -610,24 +970,39 @@ class BucketSet {
     getMeta?: (id: number) => Promise<MaterialMeta | null>,
   ): Promise<THREE.Mesh | null> {
     const entries = [...this.buckets.entries()].filter(([, b]) => b.positions.length > 0)
+      // opaque buckets first, blend passes after (drawn over their base)
+      .sort(([a], [b]) => a - b)
     if (entries.length === 0) return null
     let total = 0
     for (const [, b] of entries) total += b.positions.length / 3
     const positions = new Float32Array(total * 3)
-    const colors = new Float32Array(total * 3)
+    const colors = new Float32Array(total * 4).fill(1)
     const uvs = new Float32Array(total * 2)
     const owners = new Int32Array(total / 3)
     const geometry = new THREE.BufferGeometry()
     const materials: THREE.Material[] = []
     let vert = 0
-    for (const [textureId, b] of entries) {
+    for (const [key, b] of entries) {
+      const blend = key >= BLEND_KEY
+      const textureId = blend ? key - BLEND_KEY : key
       const count = b.positions.length / 3
       positions.set(b.positions, vert * 3)
-      colors.set(b.colors, vert * 3)
+      for (let i = 0; i < count; i++) {
+        colors[(vert + i) * 4] = b.colors[i * 3]
+        colors[(vert + i) * 4 + 1] = b.colors[i * 3 + 1]
+        colors[(vert + i) * 4 + 2] = b.colors[i * 3 + 2]
+        if (b.alphas.length > 0) colors[(vert + i) * 4 + 3] = b.alphas[i]
+      }
       uvs.set(b.uvs, vert * 2)
       owners.set(b.owners, vert / 3)
       geometry.addGroup(vert, count, materials.length)
       const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
+      if (blend) {
+        // crossfade pass: coplanar with its base face (depthFunc LEQUAL),
+        // alpha-faded per vertex, never writes depth
+        material.transparent = true
+        material.depthWrite = false
+      }
       if (textureId >= 0) {
         const texture = await getTexture(textureId)
         if (texture) {
@@ -636,8 +1011,9 @@ class BucketSet {
           const meta = getMeta ? await getMeta(textureId) : null
           const animated = meta && (meta.speedU !== 0 || meta.speedV !== 0 || isWaterMaterial(meta))
           material.map = animated ? texture.clone() : texture
-          // foliage/fence textures use hard alpha cutouts
-          material.alphaTest = 0.35
+          // foliage/fence textures use hard alpha cutouts — but crossfade
+          // passes must keep drawing at low alpha, so no cutoff there
+          material.alphaTest = blend ? 0 : 0.35
           material.needsUpdate = true
           if (meta && (meta.speedU !== 0 || meta.speedV !== 0)) {
             material.userData.scroll = { u: meta.speedU, v: meta.speedV }
@@ -650,7 +1026,7 @@ class BucketSet {
       vert += count
     }
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4))
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
     const mesh = new THREE.Mesh(geometry, materials)
     mesh.userData.triangleOwners = owners
@@ -675,14 +1051,20 @@ export async function buildTerrainMesh(
   heightsAll: Int32Array[],
   configs: SceneConfigs,
   assets: LocAssets,
-  pre?: { lights: Uint8Array[]; palettes: Int32Array[] },
+  pre?: { lights: Uint8Array[]; palettes: Int32Array[]; overlayCorners?: Int32Array[]; underlayCorners?: Int32Array[] },
 ): Promise<THREE.Mesh | null> {
   const lightCache: (Uint8Array | null)[] = [null, null, null, null]
   const paletteCache: (Int32Array | null)[] = [null, null, null, null]
+  const cornerCache: (Int32Array | null)[] = [null, null, null, null]
+  const fluCornerCache: (Int32Array | null)[] = [null, null, null, null]
   const lightOf = (dp: number) =>
     (lightCache[dp] ??= pre?.lights?.[dp] ?? computeVertexLight(heightsAll[dp]))
   const paletteOf = (dp: number) =>
     (paletteCache[dp] ??= pre?.palettes?.[dp] ?? computeUnderlayPalette(terrain, dp, configs))
+  const cornersOf = (dp: number) =>
+    (cornerCache[dp] ??= pre?.overlayCorners?.[dp] ?? computeOverlayCorners(terrain, dp, configs))
+  const fluCornersOf = (dp: number) =>
+    (fluCornerCache[dp] ??= pre?.underlayCorners?.[dp] ?? computeUnderlayCornerIds(terrain, dp))
   const buckets = new BucketSet()
   // lighting-only tint for self-coloured textures (water etc.)
   const neutral = (l: number): [number, number, number] => {
@@ -698,13 +1080,29 @@ export async function buildTerrainMesh(
   const usedTextureIds = new Set<number>()
   for (const flo of configs.overlays.values()) if (flo.texture !== undefined && flo.texture >= 0) usedTextureIds.add(flo.texture)
   for (const flu of configs.underlays.values()) if (flu.texture !== undefined && flu.texture >= 0) usedTextureIds.add(flu.texture)
-  const metas = new Map<number, { detailsOnly: boolean; avgLuma: number } | null>()
+  const metas = new Map<number, MaterialMeta | null>()
   await Promise.all([...usedTextureIds].map(async (id) => metas.set(id, await assets.getMaterialMeta(id))))
+
+  // corner-override colour per blendable overlay id (keyed by raw 1-based id):
+  // the tile colour, or the texture's average colour for texture-only
+  // overlays (the client's getOverlayColorHsl equivalent)
+  const overlayCornerHsl = new Map<number, number>()
+  for (const [key, flo] of configs.overlays) {
+    if (!isCornerBlendable(flo)) continue
+    let hsl = floTileHsl(flo)
+    if (hsl === -1 && flo.texture !== undefined && flo.texture >= 0) {
+      const meta = metas.get(flo.texture)
+      if (meta && meta.avgRgb !== -1) hsl = rgbToHsl16(meta.avgRgb)
+    }
+    if (hsl !== -1) overlayCornerHsl.set(key + 1, hsl)
+  }
 
   function emitTile(plane: number, x: number, y: number) {
       const heights = heightsAll[plane]
       const light = lightOf(plane)
       const palette = paletteOf(plane)
+      const ocorners = cornersOf(plane)
+      const fcorners = fluCornersOf(plane)
       const idx = tileIndex(plane, x, y)
       const overlayId = terrain.overlayIds[idx] & 0xff
       const underlayId = terrain.underlayIds[idx] & 0xff
@@ -717,7 +1115,7 @@ export async function buildTerrainMesh(
       const overlayTexture = flo?.texture !== undefined && flo.texture >= 0 ? flo.texture : -1
       const underlayTexture = flu?.texture !== undefined && flu.texture >= 0 ? flu.texture : -1
       const overlayHsl = floTileHsl(flo)
-      const underlayHsl = underlayId !== 0 ? palette[x * SIZE + y] : -1
+      const underlayHsl = underlayId !== 0 ? palette[x * VERTS + y] : -1
       const hasOverlay = flo !== undefined && (overlayHsl !== -1 || overlayTexture !== -1)
       const hasUnderlay = underlayId !== 0 && (underlayHsl !== -1 || underlayTexture !== -1)
       if (!hasOverlay && !hasUnderlay) return
@@ -746,38 +1144,156 @@ export async function buildTerrainMesh(
         return dx
       }
 
-      const emitFace = (a: number, b: number, c: number, hsl: number, textureId: number, texScale: number) => {
+      // Corner-blended underlay colour (addUnderlayTiles): a vertex at a tile
+      // corner takes the blurred palette of the tile whose origin sits there —
+      // unless a blendable overlay covers that corner, in which case the
+      // overlay's colour wins (calculateOverlayDisplay slot machinery; this
+      // feathers roads/mud into the surrounding ground). Mid-tile vertices
+      // bilinearly blend the 4 corner colours. Gouraud interpolation between
+      // those vertices is what makes ground colours flow smoothly across
+      // tiles instead of rendering per-tile patches.
+      const palAt = (tx: number, ty: number): number => {
+        const p = palette[tx * VERTS + ty]
+        return p !== -1 ? p : underlayHsl
+      }
+      const cornerBaseHsl = (tx: number, ty: number): number => {
+        const ov = ocorners[tx * VERTS + ty]
+        if (ov > 0) {
+          const h = overlayCornerHsl.get(ov)
+          if (h !== undefined) return h
+        }
+        return palAt(tx, ty)
+      }
+      // Exact corners take the override-or-palette colour; every other
+      // position blends the pure PALETTE only (the client's 6-vertex splits
+      // give edge midpoints the palette colour, so a neighbouring overlay's
+      // colour reaches only half a tile — full-quad interpolation would
+      // flood whole tiles with road colour)
+      const underlayVertexHsl = (px: number, py: number): number => {
+        if (px === 0 && py === 0) return cornerBaseHsl(x, y)
+        if (px === 0 && py === 512) return cornerBaseHsl(x, y + 1)
+        if (px === 512 && py === 512) return cornerBaseHsl(x + 1, y + 1)
+        if (px === 512 && py === 0) return cornerBaseHsl(x + 1, y)
+        const fx = px >> 2 // 0-128 blend factor, like sizeX << 7 >> 9
+        const fy = py >> 2
+        return blendHsl16(
+          blendHsl16(palAt(x, y), palAt(x + 1, y), fx),
+          blendHsl16(palAt(x, y + 1), palAt(x + 1, y + 1), fx),
+          fy,
+        )
+      }
+      // Blendable overlay faces keep their own colour except at corners a
+      // (possibly different, higher-slot) blendable overlay covers — the
+      // cross-overlay gradient between adjacent mud/dirt/path tiles.
+      const overlayVertexHsl = (px: number, py: number, own: number): number => {
+        const cx = px === 0 ? x : px === 512 ? x + 1 : -1
+        const cy = py === 0 ? y : py === 512 ? y + 1 : -1
+        if (cx < 0 || cy < 0) return own
+        const ov = ocorners[cx * VERTS + cy]
+        if (ov > 0) {
+          const h = overlayCornerHsl.get(ov)
+          if (h !== undefined) return h
+        }
+        return own
+      }
+
+      // mode: 0 = flat (non-blendable overlay), 1 = underlay corner blend,
+      // 2 = blendable overlay (own colour + cross-overlay corner overrides).
+      // `alphas` puts the triangle in a transparent crossfade bucket instead
+      // (terrain texture splatting between adjacent underlay textures).
+      const emitTri = (pts: [number, number][], hsl: number, textureId: number, texScale: number, mode: number, alphas?: [number, number, number]) => {
         const meta = textureId >= 0 ? metas.get(textureId) : null
-        const bucket = buckets.get(textureId)
+        const bucket = alphas ? buckets.getBlend(textureId) : buckets.get(textureId)
         bucket.owners.push(x * SIZE + y) // tile index, for terrain picking
         // detail maps modulate the tile colour; normalise by the map's own
         // average so the modulation is brightness-neutral
         const boost = textureId >= 0 && meta?.detailsOnly && hsl !== -1 ? 255 / meta.avgLuma : 1
         const useTint = textureId < 0 || (meta?.detailsOnly === true && hsl !== -1)
-        for (const v of [a, b, c]) {
-          const sceneX = (x << 9) + vx(v)
-          const sceneY = (y << 9) + vy(v)
+        for (let vi = 0; vi < 3; vi++) {
+          const [px, py] = pts[vi]
+          const sceneX = (x << 9) + px
+          const sceneY = (y << 9) + py
           const h = averageHeight(heights, sceneX, sceneY)
           bucket.positions.push(sceneX, -h, -sceneY)
           const l = Math.max(2, lightAt(light, sceneX, sceneY))
+          const vHsl = hsl === -1 ? hsl
+            : mode === 1 ? underlayVertexHsl(px, py)
+            : mode === 2 ? overlayVertexHsl(px, py, hsl)
+            : hsl
           let rgb: [number, number, number]
-          if (useTint && hsl !== -1) rgb = litColor(hsl, l)
+          if (useTint && vHsl !== -1) rgb = litColor(vHsl, l)
           else rgb = neutral(l)
           bucket.colors.push(rgb[0] * boost, rgb[1] * boost, rgb[2] * boost)
+          if (alphas) bucket.alphas.push(alphas[vi])
           // world-planar UVs: one repeat per `texScale` scene units
           bucket.uvs.push(sceneX / texScale, sceneY / texScale)
         }
       }
+      const emitFace = (a: number, b: number, c: number, hsl: number, textureId: number, texScale: number, mode: number) =>
+        emitTri([[vx(a), vy(a)], [vx(b), vy(b)], [vx(c), vy(c)]], hsl, textureId, texScale, mode)
 
       let faceIdx = 0
+      const overlayMode = flo !== undefined && isCornerBlendable(flo) ? 2 : 0
       for (let i = 0; i < overlayFaces; i++, faceIdx++) {
         if (hasOverlay) {
-          emitFace(va[faceIdx], vb[faceIdx], vc[faceIdx], overlayHsl, overlayTexture, flo?.textureScale || 512)
+          emitFace(va[faceIdx], vb[faceIdx], vc[faceIdx], overlayHsl, overlayTexture, flo?.textureScale || 512, overlayMode)
         }
       }
+      // Underlay faces render per-vertex corner TEXTURES (addUnderlayTiles):
+      // each vertex takes the texture of the tile whose origin sits at its
+      // corner. Uniform faces go straight to that texture's bucket; mixed
+      // faces draw the own texture as an opaque base plus one transparent
+      // crossfade pass per neighbouring texture — the client's ground
+      // texture splatting, which removes hard texture seams at tile edges.
+      const cornerFluAt = (px: number, py: number): number => {
+        const tx = px < 256 ? x : x + 1
+        const ty = py < 256 ? y : y + 1
+        const id = fcorners[tx * VERTS + ty]
+        return id !== 0 ? id : underlayId
+      }
+      const texOfFlu = (id: number): number => {
+        const f = configs.underlays.get(id - 1)
+        return f?.texture !== undefined && f.texture >= 0 ? f.texture : -1
+      }
+      // Any blendable-overlay override on this tile's corners? Then the
+      // client subdivides the ground faces (its 6-vertex fans) so the
+      // overlay colour fades out by the tile midpoints — emulate with a
+      // midpoint split of each triangle.
+      const hasOverride = ocorners[x * VERTS + y] > 0 || ocorners[(x + 1) * VERTS + y] > 0
+        || ocorners[x * VERTS + y + 1] > 0 || ocorners[(x + 1) * VERTS + y + 1] > 0
       for (let i = 0; i < underlayFaces; i++, faceIdx++) {
-        if (hasUnderlay) {
-          emitFace(va[faceIdx], vb[faceIdx], vc[faceIdx], underlayHsl, underlayTexture, flu?.scale || 512)
+        if (!hasUnderlay) continue
+        const A = va[faceIdx], B = vb[faceIdx], C = vc[faceIdx]
+        const pa: [number, number] = [vx(A), vy(A)]
+        const pb: [number, number] = [vx(B), vy(B)]
+        const pc: [number, number] = [vx(C), vy(C)]
+        let tris: [number, number][][]
+        if (hasOverride) {
+          const mid = (p: [number, number], q: [number, number]): [number, number] =>
+            [(p[0] + q[0]) >> 1, (p[1] + q[1]) >> 1]
+          const ab = mid(pa, pb), bc = mid(pb, pc), ca = mid(pc, pa)
+          tris = [[pa, ab, ca], [ab, pb, bc], [ca, bc, pc], [ab, bc, ca]]
+        } else {
+          tris = [[pa, pb, pc]]
+        }
+        for (const tri of tris) {
+          const flus = tri.map(([px, py]) => cornerFluAt(px, py))
+          const texes = flus.map(texOfFlu)
+          if (texes[0] === texes[1] && texes[0] === texes[2]) {
+            const f = flus[0] === underlayId ? flu : configs.underlays.get(flus[0] - 1)
+            emitTri(tri, underlayHsl, texes[0], f?.scale || 512, 1)
+          } else {
+            emitTri(tri, underlayHsl, underlayTexture, flu?.scale || 512, 1)
+            const done = new Set<number>([underlayTexture])
+            for (let vi = 0; vi < 3; vi++) {
+              const t = texes[vi]
+              if (t < 0 || done.has(t)) continue
+              done.add(t)
+              const f = configs.underlays.get(flus[vi] - 1)
+              emitTri(tri, underlayHsl, t, f?.scale || 512, 1,
+                [texes[0] === t ? 1 : 0, texes[1] === t ? 1 : 0, texes[2] === t ? 1 : 0])
+            }
+          }
         }
       }
   }
@@ -822,15 +1338,24 @@ export type ObjectDefJson = {
   originalTextureIds?: number[]
   modifiedTextureIds?: number[]
   name?: string
+  options?: (string | null)[]
+  staticShadow?: boolean
   soundId?: number
   ambientSoundId?: number
   soundGroupIds?: number[]
   mapCategoryId?: number
+  /** config/map_sprites id — the "mapscene" symbol drawn on the minimap. */
+  mapSpriteId?: number
+  mapSpriteRotation?: number
+  flipMapSprite?: boolean
 }
 
 export type MaterialMeta = {
   detailsOnly: boolean
   avgLuma: number
+  /** average opaque RGB of the texture PNG (-1 if unreadable) — the minimap
+   *  colour for texture-only overlays, like the client's getMaterialColor */
+  avgRgb: number
   speedU: number
   speedV: number
   colorHsl: number
@@ -842,11 +1367,29 @@ export class LocAssets {
   private models = new Map<number, Promise<ModelData | null>>()
   private textures = new Map<number, Promise<THREE.Texture | null>>()
   private materialMeta = new Map<number, Promise<MaterialMeta | null>>()
-  private objectsDir: FileSystemDirectoryHandle | null | undefined
-  private modelsDir: FileSystemDirectoryHandle | null | undefined
+  // single-flight directory resolution: cache the PROMISE, not the result —
+  // dozens of parallel first calls must not each re-resolve the folder
+  private objectsDirP: Promise<FileSystemDirectoryHandle | null> | undefined
+  private modelsDirP: Promise<FileSystemDirectoryHandle | null> | undefined
+  private texturesDirP: Promise<FileSystemDirectoryHandle | null> | undefined
+  private textureDefsDirP: Promise<FileSystemDirectoryHandle | null> | undefined
 
   constructor(root: FileSystemDirectoryHandle) {
     this.root = root
+  }
+
+  private texturesDir(): Promise<FileSystemDirectoryHandle | null> {
+    if (!this.texturesDirP) {
+      this.texturesDirP = this.root.getDirectoryHandle('textures').catch(() => null)
+    }
+    return this.texturesDirP
+  }
+
+  private textureDefsDir(): Promise<FileSystemDirectoryHandle | null> {
+    if (!this.textureDefsDirP) {
+      this.textureDefsDirP = this.root.getDirectoryHandle('texture_definitions').catch(() => null)
+    }
+    return this.textureDefsDirP
   }
 
   async dispose() {
@@ -863,7 +1406,8 @@ export class LocAssets {
     if (!p) {
       p = (async () => {
         try {
-          const texturesDir = await this.root.getDirectoryHandle('textures')
+          const texturesDir = await this.texturesDir()
+          if (!texturesDir) return null
           const dir = await texturesDir.getDirectoryHandle(String(id))
           const file = await (await dir.getFileHandle(`${id}.png`)).getFile()
           const bitmap = await createImageBitmap(file)
@@ -897,7 +1441,8 @@ export class LocAssets {
           let speedV = 0
           let colorHsl = -1
           try {
-            const defsDir = await this.root.getDirectoryHandle('texture_definitions')
+            const defsDir = await this.textureDefsDir()
+            if (!defsDir) throw new Error('no texture_definitions')
             const file = await (await defsDir.getFileHandle(`${id}.json`)).getFile()
             const def = JSON.parse(await file.text())
             detailsOnly = def.detailsOnly === true
@@ -906,8 +1451,10 @@ export class LocAssets {
             colorHsl = def.colorHsl ?? -1
           } catch { /* definition missing — treat as self-coloured */ }
           let avgLuma = 128
+          let avgRgb = -1
           try {
-            const texturesDir = await this.root.getDirectoryHandle('textures')
+            const texturesDir = await this.texturesDir()
+            if (!texturesDir) throw new Error('no textures')
             const dir = await texturesDir.getDirectoryHandle(String(id))
             const file = await (await dir.getFileHandle(`${id}.png`)).getFile()
             const bitmap = await createImageBitmap(file)
@@ -919,15 +1466,21 @@ export class LocAssets {
             ctx.drawImage(bitmap, 0, 0, size, size)
             bitmap.close()
             const px = ctx.getImageData(0, 0, size, size).data
-            let sum = 0, n = 0
+            let sum = 0, n = 0, sr = 0, sg = 0, sb = 0
             for (let i = 0; i < px.length; i += 4) {
               if (px[i + 3] === 0) continue
               sum += (px[i] + px[i + 1] + px[i + 2]) / 3
+              sr += px[i]
+              sg += px[i + 1]
+              sb += px[i + 2]
               n++
             }
-            if (n > 0) avgLuma = sum / n
+            if (n > 0) {
+              avgLuma = sum / n
+              avgRgb = (Math.round(sr / n) << 16) | (Math.round(sg / n) << 8) | Math.round(sb / n)
+            }
           } catch { /* keep default */ }
-          return { detailsOnly, avgLuma: Math.max(32, avgLuma), speedU, speedV, colorHsl }
+          return { detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl }
         } catch {
           return null
         }
@@ -942,11 +1495,12 @@ export class LocAssets {
     if (!p) {
       p = (async () => {
         try {
-          if (this.objectsDir === undefined) {
-            this.objectsDir = await resolveEntryHandle(this.root, getEntryPath('objects'))
+          if (!this.objectsDirP) {
+            this.objectsDirP = resolveEntryHandle(this.root, getEntryPath('objects'))
           }
-          if (!this.objectsDir) return null
-          const file = await (await this.objectsDir.getFileHandle(`${id}.json`)).getFile()
+          const objectsDir = await this.objectsDirP
+          if (!objectsDir) return null
+          const file = await (await objectsDir.getFileHandle(`${id}.json`)).getFile()
           return JSON.parse(await file.text()) as ObjectDefJson
         } catch {
           return null
@@ -962,11 +1516,12 @@ export class LocAssets {
     if (!p) {
       p = (async () => {
         try {
-          if (this.modelsDir === undefined) {
-            this.modelsDir = await resolveEntryHandle(this.root, getEntryPath('models'))
+          if (!this.modelsDirP) {
+            this.modelsDirP = resolveEntryHandle(this.root, getEntryPath('models'))
           }
-          if (!this.modelsDir) return null
-          const sub = await this.modelsDir.getDirectoryHandle(String(id))
+          const modelsDir = await this.modelsDirP
+          if (!modelsDir) return null
+          const sub = await modelsDir.getDirectoryHandle(String(id))
           const file = await (await sub.getFileHandle('model.dat')).getFile()
           return parseModel(new Uint8Array(await file.arrayBuffer()), id)
         } catch {
@@ -1041,7 +1596,7 @@ export type MarkerInfo = {
   y: number
   z: number
   objectId: number
-  kind: 'sound' | 'mapicon' | 'barrier' | 'other'
+  kind: 'sound' | 'mapicon' | 'mapsprite' | 'barrier' | 'other'
   tileX: number
   tileY: number
 }
@@ -1059,6 +1614,7 @@ export type LocRef = {
 export const MARKER_COLORS: Record<MarkerInfo['kind'], number> = {
   sound: 0xff9d3a, // orange — ambient sound emitters
   mapicon: 0xb47aff, // violet — map icon anchors
+  mapsprite: 0x3ad0c8, // teal — minimap "mapscene" sprite anchors
   barrier: 0xff5a5a, // red — invisible barrier walls
   other: 0xe8e8e8,
 }
@@ -1209,10 +1765,19 @@ export async function buildLocsMesh(
   heightsAll: Int32Array[],
   assets: LocAssets,
   onProgress?: (done: number, total: number) => void,
-): Promise<{ mesh: THREE.Mesh | null; markers: MarkerInfo[] }> {
+): Promise<{ mesh: THREE.Mesh | null; markers: MarkerInfo[]; shadows: Uint8Array }> {
   const acc = new ModelAccumulator()
   const markers: MarkerInfo[] = []
   const locRefs: LocRef[] = []
+  // SceneGraph static shadows: values SUBTRACTED from the vertex lights.
+  // Walls darken their edge's two corners by 50; scenery darkens every
+  // footprint corner by the model's shadow displacement (size2d/4, clamped
+  // 30 — which virtually all scenery hits, so we use the clamp).
+  const shadows = new Uint8Array(VERTS * VERTS)
+  const setShadow = (vx: number, vy: number, d: number) => {
+    if (vx < 0 || vy < 0 || vx >= VERTS || vy >= VERTS) return
+    if (shadows[vx * VERTS + vy] < d) shadows[vx * VERTS + vy] = d
+  }
   // bridge columns shift down one render plane (deck = ground level)
   const planeObjects = objects.filter(([, , , x, y, p]) => {
     const bridge = x >= 0 && y >= 0 && x < SIZE && y < SIZE && isBridgeTile(terrain, x, y)
@@ -1240,6 +1805,21 @@ export async function buildLocsMesh(
     // SceneGraph.addObject: swap footprint for rotations 1/3, centre + average height
     const sizeX = (rotation === 1 || rotation === 3 ? def.sizeY : def.sizeX) ?? 1
     const sizeY = (rotation === 1 || rotation === 3 ? def.sizeX : def.sizeY) ?? 1
+
+    if (def.staticShadow !== false) {
+      if (shape <= 3) {
+        // straight/corner walls: two corners of the wall's edge, 50
+        if (rotation === 0) { setShadow(x, y, 50); setShadow(x, y + 1, 50) }
+        else if (rotation === 1) { setShadow(x, y + 1, 50); setShadow(x + 1, y + 1, 50) }
+        else if (rotation === 2) { setShadow(x + 1, y, 50); setShadow(x + 1, y + 1, 50) }
+        else { setShadow(x, y, 50); setShadow(x + 1, y, 50) }
+      } else if (shape >= 9 && shape <= 11) {
+        // interactive scenery: whole footprint, shadow displacement 30
+        for (let dx = 0; dx <= sizeX; dx++) {
+          for (let dy = 0; dy <= sizeY; dy++) setShadow(x + dx, y + dy, 30)
+        }
+      }
+    }
     const xA = x + (sizeX >> 1)
     const xB = x + ((sizeX + 1) >> 1)
     const yA = y + (sizeY >> 1)
@@ -1305,13 +1885,15 @@ export async function buildLocsMesh(
           ? 'sound'
           : def.mapCategoryId !== undefined && def.mapCategoryId >= 0
             ? 'mapicon'
-            : markerIsBarrier
-              ? 'barrier'
-              : 'other'
+            : def.mapSpriteId !== undefined && def.mapSpriteId >= 0
+              ? 'mapsprite'
+              : markerIsBarrier
+                ? 'barrier'
+                : 'other'
       markers.push({ x: sceneX, y: -avgHeight, z: -sceneY, objectId, kind, tileX: x, tileY: y })
     }
   }
   const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id))
   if (mesh) mesh.userData.locs = locRefs
-  return { mesh, markers }
+  return { mesh, markers, shadows }
 }

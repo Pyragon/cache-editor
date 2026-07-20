@@ -32,7 +32,7 @@
 
 .mapscene-mount {
   flex: 1;
-  min-height: 480px;
+  min-height: 980px;
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
@@ -54,6 +54,16 @@
   margin-left: auto;
 }
 
+.mapscene-gamma input[type='range'] {
+  width: 90px;
+  accent-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.mapscene-gamma-value {
+  font-variant-numeric: tabular-nums;
+  min-width: 30px;
+}
+
 .mapscene-view {
   position: relative;
   flex: 1;
@@ -61,21 +71,370 @@
   display: flex;
 }
 
-.mapscene-view .mapscene-mount {
+.mapscene-canvas-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+.mapscene-canvas-wrap .mapscene-mount {
   flex: 1;
 }
 
-.mapscene-info {
+/* minimap overlay — placeholder tile colours until real minimap sprites */
+.mapscene-minimap {
   position: absolute;
   top: 12px;
   right: 12px;
-  min-width: 220px;
-  max-width: 320px;
-  padding: 10px 30px 10px 12px;
+  border: 2px solid var(--electric-blue-bright, #2f8fff);
   border-radius: 8px;
+  overflow: hidden;
+  background: #0b0d12;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+.mapscene-minimap canvas {
+  display: block;
+}
+
+.mapscene-minimap-cam {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 14px;
+  height: 14px;
+  clip-path: polygon(50% 0%, 88% 100%, 50% 72%, 12% 100%);
+  background: #ffe14d;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8));
+}
+
+/* map-sprite / map-icon preview images in the side panel */
+.mapscene-sprite-previews {
+  display: flex;
+  gap: 16px;
+}
+
+.mapscene-sprite-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.mapscene-sprite-preview img {
+  align-self: flex-start;
+  image-rendering: pixelated;
+  width: auto;
+  height: auto;
+  min-width: 32px;
+  max-width: 128px;
   border: 1px solid var(--border);
-  background: rgba(10, 12, 18, 0.92);
+  border-radius: 6px;
+  background: #12151d;
+  padding: 6px;
+}
+
+/* selection side panel — inspect/edit the picked object */
+.mapscene-side {
+  position: relative;
+  width: 300px;
+  flex-shrink: 0;
+  margin-left: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(10, 12, 18, 0.6);
   font-size: 12px;
+  overflow-y: auto;
+}
+
+.mapscene-side-hint {
+  color: var(--text-dim, #8a90a0);
+  line-height: 1.5;
+  margin: 10px 0 0;
+}
+
+.mapscene-side-tabs {
+  margin-left: 0;
+  margin-bottom: 12px;
+}
+
+.mapscene-side-tabs button {
+  flex: 1;
+}
+
+.mapscene-side-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 18px; /* clear the × button */
+}
+
+.mapscene-side-title {
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.mapscene-side-id {
+  color: var(--text-dim, #8a90a0);
+  font-weight: 500;
+}
+
+/* badges can carry long model lists — let them wrap instead of overflowing */
+.mapscene-side .item-id-badge {
+  overflow-wrap: anywhere;
+}
+
+.mapscene-side-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.mapscene-side-grid .item-field-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.mapscene-field-value {
+  padding: 4px 0;
+  color: var(--text);
+}
+
+/* Segmented pill, like .btn-pill (SpriteViewer.css) but full-width: the row
+   itself is the pill and its buttons stretch to share the width evenly. */
+.mapscene-btn-row {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.mapscene-btn-row .zoom-btn {
+  flex: 1;
+  padding: 4px 0;
+  white-space: nowrap;
+  border: none;
+  border-radius: 0;
+}
+
+.mapscene-btn-row .zoom-btn + .zoom-btn {
+  border-left: 1px solid var(--border);
+}
+
+.mapscene-side-grid .item-stackable-select {
+  width: 100%;
+}
+
+.mapscene-side-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.mapscene-side-actions button {
+  flex: 1;
+}
+
+.mapscene-delete-btn:hover {
+  border-color: #ff5a5a;
+  color: #ff8080;
+}
+
+/* marquee selection rectangle (Shift+drag) */
+.mapscene-marquee {
+  display: none;
+  position: absolute;
+  border: 1px dashed var(--electric-blue-bright, #2f8fff);
+  background: rgba(47, 143, 255, 0.12);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* multi-select block in the View tab */
+.mapscene-multisel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+/* Place-tab name search + marker quick-picks */
+.mapscene-place-search {
+  margin-bottom: 8px;
+}
+
+.mapscene-place-matches {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.mapscene-place-matches .mapscene-loclist-row {
+  height: 24px;
+}
+
+.mapscene-marker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-height: 110px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.mapscene-marker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mapscene-marker-chip:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.mapscene-place-multi {
+  margin-top: 10px;
+}
+
+/* underlay/overlay swatch pickers in the terrain panel */
+.mapscene-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.mapscene-swatch {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.75);
+  background: transparent;
+}
+
+.mapscene-swatch:hover {
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.mapscene-swatch.active {
+  border: 2px solid var(--electric-blue-bright, #2f8fff);
+  box-shadow: 0 0 4px rgba(47, 143, 255, 0.6);
+}
+
+.mapscene-swatch-none {
+  background: repeating-linear-gradient(45deg, #23262f 0 4px, #171a21 4px 8px);
+  color: #ff8080;
+}
+
+.mapscene-swatch-tex {
+  background: repeating-linear-gradient(45deg, #2c3140 0 4px, #20242e 4px 8px);
+}
+
+/* placed-objects list under the selection panel */
+.mapscene-loclist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.mapscene-loclist-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mapscene-loclist-filter {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.mapscene-loclist-filter:focus {
+  outline: none;
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.mapscene-loclist-scroll {
+  height: 340px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mapscene-loclist-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mapscene-loclist-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
+.mapscene-loclist-row.active {
+  background: rgba(0, 102, 255, 0.15);
+  color: #7eb8ff;
+}
+
+.mapscene-loclist-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.mapscene-loclist-name {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mapscene-loclist-pos {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
 }
 
 .mapscene-info-title {

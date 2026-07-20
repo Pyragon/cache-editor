@@ -40,6 +40,7 @@ import VarViewer from './components/VarViewer'
 import type { VarData } from './loaders/config/vars'
 import InventoryViewer from './components/InventoryViewer'
 import type { InventoryData } from './loaders/config/inventories'
+import BasViewer from './components/BasViewer'
 import HitbarViewer from './components/HitbarViewer'
 import LightIntensityViewer from './components/LightIntensityViewer'
 import VarcViewer from './components/VarcViewer'
@@ -52,7 +53,7 @@ import type { UnderlayData } from './loaders/config/underlays'
 import OverlayViewer from './components/OverlayViewer'
 import type { OverlayData } from './loaders/config/overlays'
 import MapViewer from './components/MapViewer'
-import type { MapData } from './loaders/maps'
+import type { WorldMapData } from './loaders/maps'
 import GameTipViewer from './components/GameTipViewer'
 import type { GameTipData } from './loaders/game_tips'
 import InterfaceViewer from './components/InterfaceViewer'
@@ -78,6 +79,7 @@ import type { SpotAnimationData } from './loaders/spot_animations'
 import type { ClanVarData } from './loaders/config/clan_var'
 import type { ClanVarSettingsData } from './loaders/config/clan_var_settings'
 import type { LightIntensityData } from './loaders/config/light_intensities'
+import type { BasData } from './loaders/config/bas'
 import type { HitbarData } from './loaders/config/hitbars'
 import HitsplatViewer from './components/HitsplatViewer'
 import type { HitsplatData } from './loaders/config/hitsplats'
@@ -116,7 +118,7 @@ const GROUP_LABELS: Record<string, string> = {
 // treatment ("dumped but not implemented" rather than "not dumped at all").
 const SPECIALIZED_ENTRIES = new Set([
   'config_quests', 'config_cursors', 'config_map_sprites', 'config_structs', 'config_params', 'config_vars', 'config_inventories',
-  'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas', 'config_light_intensities',
+  'config_hitbars', 'config_hitsplats', 'config_skybox', 'config_map_areas', 'config_light_intensities', 'config_bas',
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings',
   'items', 'objects', 'npcs', 'varbits', 'defaults', 'billboards', 'map_areas', 'quick_chat_messages', 'quick_chat_menus',
   'sprites', 'models', 'textures', 'texture_definitions', 'enums', 'huffman', 'native_libraries', 'font_metrics',
@@ -129,7 +131,7 @@ const SPECIALIZED_ENTRIES = new Set([
 // the user has manually reviewed and signed off go in here.
 const DONE_ENTRIES = new Set([
   'config_cursors', 'config_hitbars', 'config_inventories', 'config_params', 'config_structs', 'config_vars', 'defaults', 'huffman', 'native_libraries', 'varbits',
-  'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics',
+  'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics', 'sprites',
   'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests', 'game_tips',
 ])
@@ -146,6 +148,7 @@ function entryStatusClass(entry: CacheEntry): string {
 }
 
 const ENTRY_LABEL_OVERRIDES: Record<string, string> = {
+  bas: 'BAS',
   cs2: 'CS2',
   music2: 'Music 2',
   midi: 'MIDI',
@@ -399,6 +402,10 @@ function App() {
     ? selectedItemContent as HitbarData
     : null
 
+  const basContent = selectedEntry?.name === 'config_bas' && selectedItemContent != null
+    ? selectedItemContent as BasData
+    : null
+
   const lightIntensityContent = selectedEntry?.name === 'config_light_intensities' && selectedItemContent != null
     ? selectedItemContent as LightIntensityData
     : null
@@ -427,9 +434,6 @@ function App() {
     ? selectedItemContent as OverlayData
     : null
 
-  const mapContent = selectedEntry?.name === 'maps' && selectedItemContent != null
-    ? selectedItemContent as MapData
-    : null
 
   const gameTipContent = selectedEntry?.name === 'game_tips' && selectedItemContent != null
     ? selectedItemContent as GameTipData
@@ -1302,6 +1306,8 @@ function App() {
                 ? <HuffmanViewer data={activeContent as HuffmanData} onSave={handleSaveNoPanel} />
                 : selectedEntry?.name === 'native_libraries'
                 ? <NativeLibrariesViewer data={activeContent as NativeLibrariesData} />
+                : selectedEntry?.name === 'maps'
+                ? <MapViewer world={activeContent as WorldMapData} onDirtyChange={setIsContentDirty} />
                 : <pre className="content-json">{JSON.stringify(activeContent, null, 2)}</pre>
             ) : selectedItemContent != null ? (
               <>
@@ -1354,6 +1360,8 @@ function App() {
                 ? <InventoryViewer data={inventoryContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : hitbarContent != null
                 ? <HitbarViewer data={hitbarContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : basContent != null
+                ? <BasViewer data={basContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenAnimation={(id) => handleNavigateToItem('animations', id)} />
                 : lightIntensityContent != null
                 ? <LightIntensityViewer data={lightIntensityContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : varcContent != null
@@ -1368,8 +1376,6 @@ function App() {
                 ? <UnderlayViewer data={underlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : overlayContent != null
                 ? <OverlayViewer data={overlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
-                : mapContent != null
-                ? <MapViewer data={mapContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : gameTipContent != null
                 ? <GameTipViewer data={gameTipContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenTip={(id) => handleNavigateToItem('game_tips', id)} />
                 : interfaceContent != null
