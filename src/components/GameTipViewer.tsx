@@ -222,39 +222,52 @@ function drawScene(
 
           if (multi && capL && capR && stripT && stripB && fill && empty) {
             // Faithful assembly (client Class52_Sub2): caps at the ends
-            // (v-centred), top/bottom strips stretched between them, sprite A
-            // stretched over the inner region clipped to progress (the
-            // animated variant slides it by scrollSpeed·t/10 % width), and
-            // sprite B stretched over the unfilled remainder.
+            // (v-centred), and everything else TILED at native sprite size —
+            // NativeSprite.method2756 fills its rect with wrapped texcoords,
+            // never stretching. That's what gives the bar its segmented look;
+            // the animated variant offsets the fill's tile phase by
+            // scrollSpeed·ms/10 % tileWidth, marching the segments rightward.
+            const drawTiled = (img: HTMLCanvasElement, rx: number, ry: number, rw: number, rh: number, phaseX = 0) => {
+              ctx.save()
+              ctx.beginPath()
+              ctx.rect(rx, ry, rw, rh)
+              ctx.clip()
+              const startX = rx - (((phaseX % img.width) + img.width) % img.width)
+              for (let tx = startX; tx < rx + rw; tx += img.width) {
+                for (let ty = ry; ty < ry + rh; ty += img.height) {
+                  ctx.drawImage(img, tx, ty)
+                }
+              }
+              ctx.restore()
+            }
+
             ctx.drawImage(capL, x, y + Math.floor((h - capL.height) / 2))
             ctx.drawImage(capR, x + w - capR.width, y + Math.floor((h - capR.height) / 2))
             const innerX = x + capL.width
             const innerW = w - capL.width - capR.width
-            ctx.drawImage(stripT, innerX, y, innerW, stripT.height)
-            ctx.drawImage(stripB, innerX, y + h - stripB.height, innerW, stripB.height)
+            drawTiled(stripT, innerX, y, innerW, stripT.height)
+            drawTiled(stripB, innerX, y + h - stripB.height, innerW, stripB.height)
 
             const fillY = y + stripT.height
             const fillH = h - stripT.height - stripB.height
             const fillW = Math.floor(innerW * progress)
 
+            // fill clipped to progress; animated bars shift the tile phase so
+            // the pattern marches right. The client's clock here is the
+            // loading thread's tick counter (Class306.anInt3600, one per 20ms
+            // loop), NOT milliseconds: px = scrollSpeed · ticks / 10, so
+            // speed 6 = 30px/s.
+            const scroll = c.type === 'ANIMATED_LOADING_BAR'
+              ? Math.floor(((c.scrollSpeed ?? 0) * (now / 20)) / 10) % fill.width
+              : 0
             ctx.save()
             ctx.beginPath()
             ctx.rect(innerX, fillY, fillW, fillH)
             ctx.clip()
-            if (c.type === 'ANIMATED_LOADING_BAR') {
-              const scroll = Math.floor(((c.scrollSpeed ?? 0) * now) / 10) % fill.width
-              ctx.drawImage(fill, innerX - fill.width + scroll, fillY, innerW + fill.width - scroll, fillH)
-            } else {
-              ctx.drawImage(fill, innerX, fillY, innerW, fillH)
-            }
+            drawTiled(fill, innerX, fillY, innerW, fillH, -scroll)
             ctx.restore()
 
-            ctx.save()
-            ctx.beginPath()
-            ctx.rect(innerX + fillW, fillY, innerW - fillW, fillH)
-            ctx.clip()
-            ctx.drawImage(empty, innerX, fillY, innerW, fillH)
-            ctx.restore()
+            drawTiled(empty, innerX + fillW, fillY, innerW - fillW, fillH, fillW)
           } else {
             // Approximate bar (colour variant, or sprites missing from the
             // dump): dark trough, fill, outline.
@@ -656,7 +669,7 @@ export default function GameTipViewer({ data, onSave, onDirtyChange, onOpenTip }
   const [stageMode, setStageMode] = useState<'master' | 'stages'>('master')
   const [selMaster, setSelMaster] = useState<number | null>(null)
   // Simulated load time (seconds) + restart key for the stage-table preview.
-  const [simSeconds, setSimSeconds] = useState(90)
+  const [simSeconds, setSimSeconds] = useState(10)
   const [simKey, setSimKey] = useState(0)
   const draftRef = useRef(draft)
   draftRef.current = draft
