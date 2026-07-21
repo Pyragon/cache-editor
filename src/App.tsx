@@ -524,7 +524,7 @@ function App() {
 
   // Ref keeps the effect below honest without re-running it every render
   // (handleSelectItem closes over fresh state each render).
-  const handleSelectItemRef = useRef<(id: number) => void>(() => {})
+  const handleSelectItemRef = useRef<(id: number) => Promise<boolean>>(async () => false)
   handleSelectItemRef.current = handleSelectItem
 
   // filteredItems is rebuilt every render; hold it in a ref so the
@@ -858,6 +858,56 @@ function App() {
     if (entry.id === selectedEntryId) return handleSelectItem(itemId)
     return handleSelectEntry(entry.id, itemId)
   }
+
+  // --- Browser history: back/forward re-selects the previously viewed
+  // entry/item. Selections push a {entryId, itemId} state; popstate restores
+  // through the normal handlers so the unsaved-changes guard still applies —
+  // a refused prompt re-pushes the on-screen location so the stack stays
+  // consistent with what's shown.
+  const historyRestoringRef = useRef(false)
+  const handleSelectEntryRef = useRef<(id: number, selectId?: number) => Promise<boolean>>(async () => false)
+  handleSelectEntryRef.current = handleSelectEntry
+  const selectionRef = useRef<{ entryId: number | null; itemId: number | null }>({ entryId: null, itemId: null })
+  selectionRef.current = { entryId: selectedEntryId, itemId: selectedItemId }
+
+  useEffect(() => {
+    if (!cacheHandle || historyRestoringRef.current) return
+    const next = { entryId: selectedEntryId, itemId: selectedItemId }
+    const state = window.history.state as typeof next | null
+    if (state == null) {
+      window.history.replaceState(next, '')
+      return
+    }
+    if (state.entryId === next.entryId && state.itemId === next.itemId) return
+    window.history.pushState(next, '')
+  }, [cacheHandle, selectedEntryId, selectedItemId])
+
+  useEffect(() => {
+    function onPop(e: PopStateEvent) {
+      const state = e.state as { entryId?: number | null; itemId?: number | null } | null
+      if (!state || state.entryId == null) return
+      historyRestoringRef.current = true
+      ;(async () => {
+        let ok = false
+        try {
+          if (state.entryId === selectionRef.current.entryId) {
+            ok = state.itemId != null ? await handleSelectItemRef.current(state.itemId) : true
+          } else {
+            ok = await handleSelectEntryRef.current(state.entryId!, state.itemId ?? undefined)
+          }
+        } finally {
+          // cleared a tick later so the push-effect skips the restore's own
+          // selection updates
+          setTimeout(() => { historyRestoringRef.current = false }, 0)
+        }
+        if (!ok) {
+          window.history.pushState({ ...selectionRef.current }, '')
+        }
+      })()
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
 
   // An item's "View Model": navigate, then pose the viewer with the item's
   // inventory-icon display params (set after navigating — the navigation
