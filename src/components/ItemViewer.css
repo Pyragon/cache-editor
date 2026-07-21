@@ -63,20 +63,165 @@
   background: #1a1d26;
 }
 
+/* NPC snapshot icon beside the name (npcSnapshot.ts, transparent PNG) —
+   sits in the title row like the items page's ItemIcon, a notch larger */
+.npc-header-icon {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+/* NPC sound-effect mini-player under the id inputs (NumGrid fieldExtra) */
+.sound-cell-player {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.sound-cell-btn {
+  padding: 2px 8px;
+  flex-shrink: 0;
+}
+
+/* minimal slider: a hairline track with a round thumb (Chromium-only app,
+   so the -webkit pseudo-elements are all that's needed) */
+.sound-cell-slider {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  height: 14px; /* comfortable hit area; the visible track is the 2px line */
+  background: transparent;
+  cursor: pointer;
+}
+
+.sound-cell-slider::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.sound-cell-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: none;
+  background: #7eb8ff;
+  margin-top: -4px; /* centres the thumb on the 2px track */
+}
+
+.sound-cell-slider:disabled {
+  cursor: default;
+}
+
+.sound-cell-slider:disabled::-webkit-slider-thumb {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.sound-cell-length {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* single-model snapshots in the part-table rows */
+.npc-model-row-icon {
+  display: block;
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  margin: 0 auto;
+}
+
 /* a second heading within one section (e.g. NPC Head Models under Models) */
 .item-section h3.npc-headmodels-title {
   margin-top: 18px;
 }
 
-/* NPC Var Transforms: the Transform To cell spans the two var columns, so
-   its width tracks theirs exactly at any container size */
-.npc-transform-cell {
-  grid-column: 1 / span 2;
+/* NPC models table: "Translate X" wrapped onto two lines when no row had a
+   translation yet (the colSpan cell starves the X/Y/Z columns of width) */
+.object-shapes-wrap th {
+  white-space: nowrap;
 }
 
-.npc-transform-cell .def-int-list {
-  max-width: none;
-  width: 100%;
+/* + Add model / View Full Model side by side */
+.npc-models-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Var Transforms: air between the var-field cells, the transform table and
+   the + Add transform button */
+.npc-var-transforms .item-grid {
+  margin-bottom: 14px;
+}
+
+.npc-var-transforms .quest-table-wrap {
+  margin-bottom: 10px;
+}
+
+/* Head models: two columns (id + actions) — full width was absurd for it */
+.npc-headmodels-wrap {
+  width: fit-content;
+  min-width: 300px;
+}
+
+.npc-headmodels-wrap .cell-input {
+  width: 90px;
+}
+
+/* NPC right-click menu preview (Options section) */
+.npc-menu-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* Chathead dialogue preview: centre the cropped interface render */
+.chathead-preview-stage {
+  display: flex;
+  justify-content: center;
+  padding: 16px 0;
+}
+
+.chathead-preview-stage canvas {
+  image-rendering: pixelated;
+  max-width: 100%;
+}
+
+/* Quests: one number and two small buttons */
+.npc-quests-wrap {
+  width: 200px;
+  max-width: 100%;
+}
+
+.npc-quests-wrap .cell-input {
+  width: 90px;
+}
+
+/* PairTable value cell with an adornment (colour swatch / view link) */
+.pair-cell-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pair-cell-inner .cell-input {
+  flex: 1;
+  min-width: 60px;
+}
+
+/* live HSL16 swatch beside recolour ids */
+.pair-swatch {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
 .item-section h3 {
@@ -187,6 +332,12 @@
 }
 
 .field-link-btn:hover {
+  background: rgba(0, 102, 255, 0.18);
+  border-color: rgba(126, 184, 255, 0.45);
+  color: #7eb8ff;
+}
+
+.prereq-tag button.field-link-btn:hover {
   background: rgba(0, 102, 255, 0.18);
   border-color: rgba(126, 184, 255, 0.45);
   color: #7eb8ff;

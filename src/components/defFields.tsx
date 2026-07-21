@@ -39,6 +39,14 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
   title?: string
   placeholder?: string
 }) {
+  // While focused, the field is free text (digits and a leading minus) so
+  // intermediate states like "" or "-" survive typing — a controlled
+  // type="number" input snapped those straight back to 0, which made
+  // clearing a 0 to type 1000 produce 01000 and negatives untypeable. Only
+  // fully valid integers are committed to the draft; blur snaps the text
+  // back to the last committed value, so nothing invalid can ever be saved.
+  const [text, setText] = useState<string | null>(null)
+
   function clamp(next: number): number {
     if (min != null && next < min) return min
     if (max != null && next > max) return max
@@ -49,12 +57,21 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
     <span className="num-input" title={title}>
       <input
         className={`${className} num-input-field`}
-        type="number"
-        value={Number.isFinite(value) ? value : 0}
+        type="text"
+        inputMode="numeric"
+        value={text ?? String(Number.isFinite(value) ? value : 0)}
         placeholder={placeholder}
+        onFocus={() => setText(String(Number.isFinite(value) ? value : 0))}
+        onBlur={() => setText(null)}
         onChange={(e) => {
-          const parsed = parseInt(e.target.value, 10)
-          onChange(clamp(Number.isNaN(parsed) ? 0 : parsed))
+          const raw = e.target.value
+          if (!/^-?\d*$/.test(raw)) return // reject non-numeric keystrokes
+          setText(raw)
+          if (/^-?\d+$/.test(raw)) onChange(clamp(parseInt(raw, 10)))
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowUp') { e.preventDefault(); setText(null); onChange(clamp(value + step)) }
+          if (e.key === 'ArrowDown') { e.preventDefault(); setText(null); onChange(clamp(value - step)) }
         }}
       />
       <span className="num-input-steps">
@@ -120,19 +137,25 @@ export function SortableTh({ label, sortKey, sort, onSort }: {
 // viewer), rendered as a small button in the cell's top-right corner.
 export type FieldLink = { label: string; onOpen: (value: number) => void }
 
-export function NumGrid({ fields, values, onChange, links }: {
+export function NumGrid({ fields, values, onChange, links, fieldExtra }: {
   fields: NumFieldDef[]
   values: Record<string, unknown>
   onChange: (key: string, value: number) => void
   links?: Record<string, FieldLink | undefined>
+  /** Extra content under a field's input (e.g. the NPC sound mini-player).
+      Fields with extras render as a div, not a label — interactive extras
+      inside a label would fight its click-to-focus behaviour. */
+  fieldExtra?: Record<string, ReactNode | undefined>
 }) {
   return (
     <div className="item-grid">
       {fields.map(([key, label]) => {
         const value = Number(values[key] ?? 0)
         const link = links?.[key]
+        const extra = fieldExtra?.[key]
+        const Wrapper = extra != null ? 'div' : 'label'
         return (
-          <label key={key} className="item-field">
+          <Wrapper key={key} className="item-field">
             <span className={`item-field-label${link ? ' field-link-label' : ''}`} title={label}>
               {link ? (
                 <>
@@ -153,7 +176,8 @@ export function NumGrid({ fields, values, onChange, links }: {
               )}
             </span>
             <NumberInput value={value} onChange={(v) => onChange(key, v)} />
-          </label>
+            {extra}
+          </Wrapper>
         )
       })}
     </div>
@@ -210,7 +234,7 @@ export function IntListInput({ value, onChange, placeholder }: {
   )
 }
 
-export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, onRemove, srcIcon }: {
+export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, onRemove, srcIcon, cellExtra }: {
   title: string
   srcLabel: string
   dstLabel: string
@@ -221,7 +245,22 @@ export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, o
   onRemove: (index: number) => void
   // Optional leading icon column rendered from each row's src value.
   srcIcon?: (value: number) => ReactNode
+  // Optional adornment rendered beside EVERY value input (both columns) —
+  // e.g. an HSL16 colour swatch, or a View jump link for texture ids.
+  cellExtra?: (value: number) => ReactNode
 }) {
+  const cell = (value: number, i: number, which: 0 | 1) => (
+    <td>
+      {cellExtra ? (
+        <span className="pair-cell-inner">
+          <NumberInput className="cell-input" value={value} onChange={(v) => onSet(i, which, v)} />
+          {cellExtra(value)}
+        </span>
+      ) : (
+        <NumberInput className="cell-input" value={value} onChange={(v) => onSet(i, which, v)} />
+      )}
+    </td>
+  )
   return (
     <section className="item-section">
       <h3>{title}</h3>
@@ -233,8 +272,8 @@ export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, o
               {src.map((s, i) => (
                 <tr key={i}>
                   {srcIcon && <td className="pair-icon-cell">{srcIcon(s)}</td>}
-                  <td><NumberInput className="cell-input" value={s} onChange={(v) => onSet(i, 0, v)} /></td>
-                  <td><NumberInput className="cell-input" value={dst[i] ?? 0} onChange={(v) => onSet(i, 1, v)} /></td>
+                  {cell(s, i, 0)}
+                  {cell(dst[i] ?? 0, i, 1)}
                   <td><button type="button" className="row-remove-btn" onClick={() => onRemove(i)}>×</button></td>
                 </tr>
               ))}

@@ -1,6 +1,15 @@
 import { useEffect, useState } from 'react'
 import type { NpcData, NpcDef } from '../loaders/npcs'
-import { NumberInput, IntListInput, NumGrid, PairTable, ParamsTable, ToggleGrid  } from './defFields'
+import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
+import { hslToRgb } from '../loaders/models'
+import { npcCompositeSpec } from '../loaders/npcComposite'
+import { getNpcIcon, peekNpcIcon } from './npcSnapshot'
+import { CursorPreview, ModelSnapshotIcon, SpriteFramePreview } from './spriteCards'
+import { NpcMenuPreview } from './NpcMenuPreview'
+import { SoundPlayerCell } from './SoundPlayerCell'
+import ModelPreviewModal from './ModelPreviewModal'
+import ChatheadPreviewModal from './ChatheadPreviewModal'
+import { NumberInput, NumGrid, PairTable, ParamsTable, ToggleGrid  } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { paramRowsToRecord, toParamRows } from './defParams'
 import type { ParamRow } from './defParams'
@@ -10,7 +19,63 @@ type Props = {
   onSave: (data: NpcData) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
   onNavigate?: (entryName: string, itemId: number) => void
+  /** Cache root for the model preview modals (part + full-NPC views). */
+  cacheRoot?: FileSystemDirectoryHandle | null
 }
+
+/** What the model preview modal is currently showing (null = closed). */
+type NpcModelPreview = {
+  title: string
+  modelIds: number[]
+  translations?: (number[] | null)[]
+  recolor?: { from?: number[]; to?: number[]; textureFrom?: number[]; textureTo?: number[] }
+  scale?: { xz: number; y: number }
+  tint?: { hue: number; saturation: number; lightness: number; opacity: number }
+  /** Hide skin-255 static marker faces (full-model view). */
+  hideMarkerFaces?: boolean
+  /** Sequence to auto-play (the BAS's stand animation, full-model view). */
+  sequenceId?: number
+  /** The BAS's emotes for the modal's playback dropdown. */
+  sequenceOptions?: { label: string; seqId: number }[]
+  /** Set for single-part previews: the modal's "Open in Models" target. */
+  openModelId?: number
+}
+
+// Every named BAS sequence field, labeled for the emote dropdown (same
+// movement matrix the BAS viewer shows; dirs per PathingEntity.kt's bands).
+const BAS_EMOTE_FIELDS: [key: string, label: string][] = [
+  ['standAnimation', 'Stand'],
+  ['standTurnCcwSequence', 'Stand turn CCW'],
+  ['standTurnCwSequence', 'Stand turn CW'],
+  ['walkAnimation', 'Walk'],
+  ['walkDir1', 'Walk side 90°'],
+  ['walkDir3', 'Walk backwards'],
+  ['walkDir2', 'Walk side 270°'],
+  ['walkTurnCcwSequence', 'Walk turn CCW'],
+  ['walkTurnCwSequence', 'Walk turn CW'],
+  ['runningAnimation', 'Run'],
+  ['runDir1', 'Run side 90°'],
+  ['runDir3', 'Run backwards'],
+  ['runDir2', 'Run side 270°'],
+  ['runTurnCcwSequence', 'Run turn CCW'],
+  ['runTurnCwSequence', 'Run turn CW'],
+  ['teleportingAnimation', 'Teleport'],
+  ['teleDir1', 'Teleport side 90°'],
+  ['teleDir3', 'Teleport backwards'],
+  ['teleDir2', 'Teleport side 270°'],
+  ['teleTurnCcwSequence', 'Teleport turn CCW'],
+  ['teleTurnCwSequence', 'Teleport turn CW'],
+]
+
+// The "headicons_prayer" sprite group. The client resolves it by name hash
+// at runtime (darkan StaticMedia.loadGroupIds); the dump carries no names,
+// so this is the rev-727 group id — verified by eye: 30 frames at 25×25,
+// frame 0 the protect-melee sword (439 next door is headicons_pk's skulls).
+// An NPC's headIcons value is a FRAME index into this group, not a sprite id.
+const HEADICONS_PRAYER_SPRITE = 440
+
+// headIcons is dumped as an unsigned short; 65535 is the encoded -1 "none".
+const HEAD_ICON_NONE = 65535
 
 const GENERAL_FIELDS: NumFieldDef[] = [
   ['size', 'Size'],
@@ -53,6 +118,10 @@ const SHADOW_FIELDS: NumFieldDef[] = [
   ['shadowAlphaDst', 'Alpha Dst'],
 ]
 
+// The four sound fields holding sound_effects ids (index 4) — they get the
+// View jump link and the inline mini-player.
+const SOUND_ID_KEYS = ['walkingSoundEffect', 'runningSoundEffect', 'idleSoundEffect', 'teleportSoundEffect'] as const
+
 const SOUND_FIELDS: NumFieldDef[] = [
   ['walkingSoundEffect', 'Walking Sound'],
   ['runningSoundEffect', 'Running Sound'],
@@ -87,17 +156,38 @@ const VAR_FIELDS: NumFieldDef[] = [
 
 const DIRECTIONS = ['NORTH', 'NORTHEAST', 'EAST', 'SOUTHEAST', 'SOUTH', 'SOUTHWEST', 'WEST', 'NORTHWEST']
 
-export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: Props) {
+// cryogen NPCDefinitions.MovementType (opcode-driven; absent = unset)
+const MOVEMENT_TYPES = ['STATIONARY', 'HALF_WALK', 'WALKING', 'RUNNING']
+
+// Combat-bonus params — cryogen derives the dumped `bonuses`/`strBonuses`
+// arrays from these at load (NPCDefinitions.getBonus): 0-4 attack, 5-9
+// defence, 641/643/965 strength values stored ×10, 14 attack speed.
+const NPC_PARAM_LABELS: Record<string, string> = {
+  '0': 'Stab Atk',
+  '1': 'Slash Atk',
+  '2': 'Crush Atk',
+  '3': 'Magic Atk',
+  '4': 'Range Atk',
+  '5': 'Stab Def',
+  '6': 'Slash Def',
+  '7': 'Crush Def',
+  '8': 'Magic Def',
+  '9': 'Range Def',
+  '14': 'Attack Speed',
+  '641': 'Melee Str ×10',
+  '643': 'Range Str ×10',
+  '965': 'Magic Dmg ×10',
+}
+
+export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate, cacheRoot }: Props) {
   const [draft, setDraft] = useState<NpcDef>(data.npc)
   const [paramRows, setParamRows] = useState<ParamRow[]>(() => toParamRows(data.npc.parameters))
-  const [newQuestId, setNewQuestId] = useState('')
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
 
   useEffect(() => {
     setDraft(data.npc)
     setParamRows(toParamRows(data.npc.parameters))
-    setNewQuestId('')
     setIsDirty(false)
   }, [data])
 
@@ -159,6 +249,75 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
 
   const modelIds = (draft.modelIds as number[] | undefined) ?? []
   const modelTranslation = (draft.modelTranslation as (number[] | null)[] | undefined) ?? []
+  const [modelPreview, setModelPreview] = useState<NpcModelPreview | null>(null)
+  // In-game dialogue (interface 1184) preview of the merged head models.
+  const [chatheadPreview, setChatheadPreview] = useState<number[] | null>(null)
+
+  // Snapshot icon: rendered in the background from the SAVED def the first
+  // time this NPC is opened (npcSnapshot.ts session cache serves revisits).
+  const [icon, setIcon] = useState<string | null>(peekNpcIcon(data.id) ?? null)
+  useEffect(() => {
+    setIcon(peekNpcIcon(data.id) ?? null)
+    if (!cacheRoot) return
+    let cancelled = false
+    getNpcIcon(cacheRoot, data.id, data.npc as Record<string, unknown>).then((url) => {
+      if (!cancelled) setIcon(url)
+    })
+    return () => { cancelled = true }
+  }, [data, cacheRoot])
+
+  // Sprite/cursor preview cards need these entry folders.
+  const [spritesDir, setSpritesDir] = useState<FileSystemDirectoryHandle | null>(null)
+  const [cursorsDir, setCursorsDir] = useState<FileSystemDirectoryHandle | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setSpritesDir(null)
+    setCursorsDir(null)
+    if (!cacheRoot) return
+    ;(async () => {
+      const sprites = await resolveEntryHandle(cacheRoot, getEntryPath('sprites'))
+      const cursors = await resolveEntryHandle(cacheRoot, getEntryPath('config_cursors'))
+      if (!cancelled) {
+        setSpritesDir(sprites)
+        setCursorsDir(cursors)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [cacheRoot])
+
+  // All part models merged with their per-model translations, the NPC's
+  // recolour/retexture pairs, its scaleXZ/scaleY and its tint — the composite
+  // the client actually renders — idling in its BAS's stand animation when
+  // one resolves.
+  async function previewFullModel() {
+    let sequenceId: number | undefined
+    const sequenceOptions: { label: string; seqId: number }[] = []
+    const basId = Number(draft.basId ?? -1)
+    if (basId >= 0 && cacheRoot) {
+      try {
+        const dir = await resolveEntryHandle(cacheRoot, getEntryPath('config_bas'))
+        const file = await (await dir!.getFileHandle(`${basId}.json`)).getFile()
+        const bas = JSON.parse(await file.text()) as Record<string, unknown>
+        for (const [key, label] of BAS_EMOTE_FIELDS) {
+          const seq = Number(bas[key] ?? -1)
+          if (seq >= 0) sequenceOptions.push({ label: `${label} · ${seq}`, seqId: seq })
+        }
+        const randoms = (bas.randomStandSequences as number[] | undefined) ?? []
+        randoms.forEach((seq, i) => {
+          if (seq >= 0) sequenceOptions.push({ label: `Random stand ${i + 1} · ${seq}`, seqId: seq })
+        })
+        const stand = Number(bas.standAnimation ?? -1)
+        if (stand >= 0) sequenceId = stand
+        else if (sequenceOptions.length > 0) sequenceId = sequenceOptions[0].seqId
+      } catch { /* BAS unreadable — static preview */ }
+    }
+    setModelPreview({
+      sequenceId,
+      sequenceOptions,
+      title: `NPC ${data.id} — full model`,
+      ...npcCompositeSpec(draft as Record<string, unknown>),
+    })
+  }
 
   function setTranslation(index: number, axis: 0 | 1 | 2, value: number) {
     const next = modelIds.map((_, i) => {
@@ -201,6 +360,18 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
   }
 
   const headModels = (draft.headModels as number[] | undefined) ?? []
+  const transformTo = (draft.transformTo as number[] | undefined) ?? []
+
+  function setTransformTo(index: number, value: number) {
+    const arr = [...transformTo]
+    arr[index] = value
+    set('transformTo', arr)
+  }
+
+  function removeTransformTo(index: number) {
+    const arr = transformTo.filter((_, i) => i !== index)
+    set('transformTo', arr.length > 0 ? arr : undefined)
+  }
 
   function setHeadModel(index: number, value: number) {
     const ids = [...headModels]
@@ -231,19 +402,17 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
     setIsDirty(true)
   }
 
-  function addQuest() {
-    const id = parseInt(newQuestId, 10)
-    if (isNaN(id)) return
-    const quests = (draft.quests as number[] | undefined) ?? []
-    if (quests.includes(id)) return
-    set('quests', [...quests, id])
-    setNewQuestId('')
+  function setQuest(index: number, value: number) {
+    const arr = [...((draft.quests as number[] | undefined) ?? [])]
+    arr[index] = value
+    set('quests', arr)
   }
 
-  function removeQuest(id: number) {
-    const quests = ((draft.quests as number[] | undefined) ?? []).filter((q) => q !== id)
-    set('quests', quests.length === 0 ? undefined : quests)
+  function removeQuestAt(index: number) {
+    const arr = ((draft.quests as number[] | undefined) ?? []).filter((_, i) => i !== index)
+    set('quests', arr.length === 0 ? undefined : arr)
   }
+
 
   function setParamRow(index: number, patch: Partial<ParamRow>) {
     setParamRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)))
@@ -265,7 +434,6 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
   function handleDiscard() {
     setDraft(data.npc)
     setParamRows(toParamRows(data.npc.parameters))
-    setNewQuestId('')
     setIsDirty(false)
   }
 
@@ -274,11 +442,14 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
   return (
     <div className="item-viewer">
       <div className="item-header">
-        <input
-          className="quest-name-input"
-          value={String(draft.name ?? '')}
-          onChange={(e) => set('name', e.target.value)}
-        />
+        <div className="item-title-row">
+          {icon && <img className="npc-header-icon" src={icon} alt="" title="Snapshot of the full composite model" />}
+          <input
+            className="quest-name-input"
+            value={String(draft.name ?? '')}
+            onChange={(e) => set('name', e.target.value)}
+          />
+        </div>
         <div className="item-badges">
           <span className="item-id-badge">ID {data.id}</span>
           <label className="item-stackable">
@@ -291,6 +462,28 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
               {DIRECTIONS.map((d) => <option key={d} value={d}>{d}</option>)}
             </select>
           </label>
+          <label className="item-stackable">
+            <span className="item-field-label">Movement Type</span>
+            <select
+              className="item-stackable-select"
+              value={String(draft.movementType ?? '')}
+              onChange={(e) => set('movementType', e.target.value === '' ? undefined : e.target.value)}
+            >
+              <option value="">(unset)</option>
+              {MOVEMENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </label>
+          <label className="item-stackable" title="Use the crawl-walk BAS variant when moving">
+            <span className="item-field-label">Crawl-Walk BAS</span>
+            <span className="sprite-toggle">
+              <input
+                type="checkbox"
+                checked={Boolean(draft.usesCrawlWalkBAS)}
+                onChange={(e) => set('usesCrawlWalkBAS', e.target.checked)}
+              />
+              <span className="sprite-toggle-track" />
+            </span>
+          </label>
         </div>
       </div>
 
@@ -299,12 +492,13 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
         {modelIds.length > 0 && (
           <div className="quest-table-wrap object-shapes-wrap">
             <table className="quest-table">
-              <thead><tr><th>Model</th><th>Translate X</th><th>Y</th><th>Z</th><th></th></tr></thead>
+              <thead><tr><th className="pair-icon-th" /><th>Model</th><th>Translate X</th><th>Y</th><th>Z</th><th></th></tr></thead>
               <tbody>
                 {modelIds.map((modelId, i) => {
                   const triple = modelTranslation[i] ?? null
                   return (
                     <tr key={i}>
+                      <td className="pair-icon-cell"><ModelSnapshotIcon cacheRoot={cacheRoot ?? null} modelId={modelId} /></td>
                       <td><NumberInput className="cell-input" value={modelId} onChange={(v) => setModelId(i, v)} /></td>
                       {triple ? (
                         ([0, 1, 2] as const).map((axis) => (
@@ -319,8 +513,13 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
                       )}
                       <td>
                         <span className="anim-fit-actions">
-                          {onNavigate && (
-                            <button type="button" className="field-link-btn" title={`Open model ${modelId} in the model viewer`} onClick={() => onNavigate('models', modelId)}>
+                          {cacheRoot && (
+                            <button
+                              type="button"
+                              className="field-link-btn"
+                              title={`Preview model ${modelId} in a modal`}
+                              onClick={() => setModelPreview({ title: `NPC ${data.id} — part model ${modelId}`, modelIds: [modelId], openModelId: modelId })}
+                            >
                               View Model
                             </button>
                           )}
@@ -339,22 +538,40 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
             </table>
           </div>
         )}
-        <button type="button" className="add-row-btn" onClick={addModel}>+ Add model</button>
+        <span className="npc-models-actions">
+          <button type="button" className="add-row-btn" onClick={addModel}>+ Add model</button>
+          {cacheRoot && modelIds.length > 0 && (
+            <button
+              type="button"
+              className="add-row-btn"
+              title="Merge every part model (with its translation and the NPC's recolours) into the composite the client renders"
+              onClick={previewFullModel}
+            >
+              View Full Model
+            </button>
+          )}
+        </span>
 
         <h3 className="npc-headmodels-title">Head Models</h3>
         <p className="tex-op-note">Chathead pieces — the client merges these into one head mesh (head/hair/beard), like the body models above.</p>
         {headModels.length > 0 && (
-          <div className="quest-table-wrap object-shapes-wrap">
+          <div className="quest-table-wrap npc-headmodels-wrap">
             <table className="quest-table">
-              <thead><tr><th>Model</th><th></th></tr></thead>
+              <thead><tr><th className="pair-icon-th" /><th>Model</th><th></th></tr></thead>
               <tbody>
                 {headModels.map((modelId, i) => (
                   <tr key={i}>
+                    <td className="pair-icon-cell"><ModelSnapshotIcon cacheRoot={cacheRoot ?? null} modelId={modelId} /></td>
                     <td><NumberInput className="cell-input" value={modelId} onChange={(v) => setHeadModel(i, v)} /></td>
                     <td>
                       <span className="anim-fit-actions">
-                        {onNavigate && (
-                          <button type="button" className="field-link-btn" title={`Open model ${modelId} in the model viewer`} onClick={() => onNavigate('models', modelId)}>
+                        {cacheRoot && (
+                          <button
+                            type="button"
+                            className="field-link-btn"
+                            title={`Preview head model ${modelId} in a modal`}
+                            onClick={() => setModelPreview({ title: `NPC ${data.id} — head model ${modelId}`, modelIds: [modelId], openModelId: modelId })}
+                          >
                             View Model
                           </button>
                         )}
@@ -367,7 +584,19 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
             </table>
           </div>
         )}
-        <button type="button" className="add-row-btn" onClick={() => set('headModels', [...headModels, 0])}>+ Add head model</button>
+        <span className="npc-models-actions">
+          <button type="button" className="add-row-btn" onClick={() => set('headModels', [...headModels, 0])}>+ Add head model</button>
+          {cacheRoot && headModels.length > 0 && (
+            <button
+              type="button"
+              className="add-row-btn"
+              title="Render the merged head models inside the game's dialogue interface (1184)"
+              onClick={() => setChatheadPreview([...headModels])}
+            >
+              Preview Chathead
+            </button>
+          )}
+        </span>
       </section>
 
       <section className="item-section">
@@ -389,11 +618,55 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
             </div>
           ))}
         </div>
+        <NpcMenuPreview
+          cacheRoot={cacheRoot ?? null}
+          name={String(draft.name ?? '')}
+          combatLevel={Number(draft.combatLevel ?? 0)}
+          options={(draft.options as (string | null)[] | undefined) ?? []}
+          membersOptions={(draft.membersOptions as (string | null)[] | undefined) ?? []}
+        />
       </section>
 
       <section className="item-section">
         <h3>General</h3>
-        <NumGrid fields={GENERAL_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
+        <NumGrid
+          fields={GENERAL_FIELDS}
+          values={draft}
+          onChange={(k, v) => set(k, v)}
+          links={{
+            basId: onNavigate && { label: 'View BAS', onOpen: (id: number) => onNavigate('config_bas', id) },
+            // MEC = Map Element Config — the map_areas shared-config group
+            // (36), i.e. this NPC's world-map/minimap marker.
+            mecId: onNavigate && { label: 'View Map Area', onOpen: (id: number) => onNavigate('config_map_areas', id) },
+          }}
+        />
+        {(() => {
+          const overhead = Number(draft.overheadSprite ?? -1)
+          const headIcon = Number(draft.headIcons ?? -1)
+          const hasHeadIcon = headIcon >= 0 && headIcon !== HEAD_ICON_NONE
+          if (overhead < 0 && !hasHeadIcon) return null
+          return (
+            <div className="item-cursor-row">
+              {overhead >= 0 && (
+                <SpriteFramePreview
+                  spritesDir={spritesDir}
+                  spriteId={overhead}
+                  label={`Overhead · sprite ${overhead}`}
+                  onOpen={onNavigate && ((id) => onNavigate('sprites', id))}
+                />
+              )}
+              {hasHeadIcon && (
+                <SpriteFramePreview
+                  spritesDir={spritesDir}
+                  spriteId={HEADICONS_PRAYER_SPRITE}
+                  frameIndex={headIcon}
+                  label={`Head icon · frame ${headIcon} of headicons_prayer (${HEADICONS_PRAYER_SPRITE})`}
+                  onOpen={onNavigate && ((id) => onNavigate('sprites', id))}
+                />
+              )}
+            </div>
+          )
+        })()}
       </section>
 
       <section className="item-section">
@@ -413,12 +686,38 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
 
       <section className="item-section">
         <h3>Sounds</h3>
-        <NumGrid fields={SOUND_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
+        <NumGrid
+          fields={SOUND_FIELDS}
+          values={draft}
+          onChange={(k, v) => set(k, v)}
+          links={Object.fromEntries(SOUND_ID_KEYS.map((key) => [
+            key,
+            onNavigate && { label: 'View', onOpen: (id: number) => onNavigate('sound_effects', id) },
+          ]))}
+          fieldExtra={cacheRoot ? Object.fromEntries(SOUND_ID_KEYS.map((key) => {
+            const id = Number(draft[key] ?? -1)
+            return [key, id >= 0 && id !== 65535 ? <SoundPlayerCell key={key} cacheRoot={cacheRoot} soundId={id} /> : undefined]
+          })) : undefined}
+        />
       </section>
 
       <section className="item-section">
         <h3>Cursors</h3>
         <NumGrid fields={CURSOR_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
+        {(['primaryCursor', 'secondaryCursor', 'attackCursor'] as const).some((key) => Number(draft[key] ?? -1) >= 0) && (
+          <div className="item-cursor-row">
+            {([['primaryCursor', 'Primary'], ['secondaryCursor', 'Secondary'], ['attackCursor', 'Attack']] as const).map(([key, label]) => (
+              <CursorPreview
+                key={key}
+                cursorsDir={cursorsDir}
+                spritesDir={spritesDir}
+                cursorId={Number(draft[key] ?? -1)}
+                label={label}
+                onOpen={onNavigate && ((id) => onNavigate('config_cursors', id))}
+              />
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="item-section">
@@ -426,26 +725,46 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
         <NumGrid fields={TINT_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
       </section>
 
-      <section className="item-section">
+      <section className="item-section npc-var-transforms">
         <h3>Var Transforms</h3>
-        {/* one grid, with Transform To spanning the two var columns so its
-            width always matches them exactly */}
-        <div className="item-grid">
-          {VAR_FIELDS.map(([key, label]) => (
-            <label key={key} className="item-field">
-              <span className="item-field-label" title={label}>{label}</span>
-              <NumberInput value={Number(draft[key] ?? 0)} onChange={(v) => set(key, v)} />
-            </label>
-          ))}
-          <label className="item-field npc-transform-cell">
-            <span className="item-field-label">Transform To</span>
-            <IntListInput
-              value={(draft.transformTo as number[] | undefined)}
-              onChange={(v) => set('transformTo', v)}
-              placeholder="npc ids, comma-separated (-1 = none)"
-            />
-          </label>
-        </div>
+        <NumGrid
+          fields={VAR_FIELDS}
+          values={draft}
+          onChange={(k, v) => set(k, v)}
+          links={{
+            varp: onNavigate && { label: 'View', onOpen: (id: number) => onNavigate('config_vars', id) },
+            varpBit: onNavigate && { label: 'View', onOpen: (id: number) => onNavigate('varbits', id) },
+          }}
+        />
+        {/* Positional: transformTo[var value] = the NPC shown for that value
+            (the last slot is the client's out-of-range fallback), so rows are
+            keyed by var value rather than freely reorderable. */}
+        {transformTo.length > 0 && (
+          <div className="quest-table-wrap npc-headmodels-wrap">
+            <table className="quest-table">
+              <thead><tr><th>Var Value</th><th>NPC</th><th></th></tr></thead>
+              <tbody>
+                {transformTo.map((npcId, i) => (
+                  <tr key={i}>
+                    <td className="bas-slot-label">{i === transformTo.length - 1 ? `${i} / fallback` : i}</td>
+                    <td><NumberInput className="cell-input" value={npcId} min={-1} onChange={(v) => setTransformTo(i, v)} /></td>
+                    <td>
+                      <span className="anim-fit-actions">
+                        {onNavigate && npcId >= 0 && (
+                          <button type="button" className="field-link-btn" title={`Open NPC ${npcId}`} onClick={() => onNavigate('npcs', npcId)}>
+                            View NPC
+                          </button>
+                        )}
+                        <button type="button" className="row-remove-btn" title="Remove this slot (later var values shift down)" onClick={() => removeTransformTo(i)}>×</button>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <button type="button" className="add-row-btn" onClick={() => set('transformTo', [...transformTo, -1])}>+ Add transform</button>
       </section>
 
       <PairTable
@@ -455,6 +774,14 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
         onSet={(i, w, v) => setPair('originalColors', 'modifiedColors', i, w, v)}
         onAdd={() => addPair('originalColors', 'modifiedColors')}
         onRemove={(i) => removePair('originalColors', 'modifiedColors', i)}
+        // live swatch of the HSL16 the id encodes, tracking edits
+        cellExtra={(v) => (
+          <span
+            className="pair-swatch"
+            title={`HSL16 ${v & 0xffff}`}
+            style={{ background: `#${hslToRgb(v & 0xffff).toString(16).padStart(6, '0')}` }}
+          />
+        )}
       />
       <PairTable
         title="Textures" srcLabel="Original" dstLabel="Modified"
@@ -463,25 +790,40 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
         onSet={(i, w, v) => setPair('originalTextures', 'modifiedTextures', i, w, v)}
         onAdd={() => addPair('originalTextures', 'modifiedTextures')}
         onRemove={(i) => removePair('originalTextures', 'modifiedTextures', i)}
+        cellExtra={onNavigate && ((v) => v >= 0 && (
+          <button type="button" className="field-link-btn" title={`Open texture ${v}`} onClick={() => onNavigate('textures', v)}>
+            View
+          </button>
+        ))}
       />
 
       <section className="item-section">
         <h3>Quests</h3>
-        <div className="quest-prereqs">
-          {quests.map((id) => (
-            <span key={id} className="prereq-tag">
-              {id}
-              <button type="button" onClick={() => removeQuest(id)}>×</button>
-            </span>
-          ))}
-          <div className="prereq-add">
-            <input className="prereq-input" type="number" placeholder="ID"
-              value={newQuestId}
-              onChange={(e) => setNewQuestId(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addQuest()} />
-            <button type="button" className="add-row-btn" onClick={addQuest}>Add</button>
+        {quests.length > 0 && (
+          <div className="quest-table-wrap npc-quests-wrap">
+            <table className="quest-table">
+              <thead><tr><th>Quest</th><th></th></tr></thead>
+              <tbody>
+                {quests.map((id, i) => (
+                  <tr key={i}>
+                    <td><NumberInput className="cell-input" value={id} onChange={(v) => setQuest(i, v)} /></td>
+                    <td>
+                      <span className="anim-fit-actions">
+                        {onNavigate && id >= 0 && (
+                          <button type="button" className="field-link-btn" title={`Open quest ${id}`} onClick={() => onNavigate('config_quests', id)}>
+                            View
+                          </button>
+                        )}
+                        <button type="button" className="row-remove-btn" title="Remove this quest" onClick={() => removeQuestAt(i)}>×</button>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        </div>
+        )}
+        <button type="button" className="add-row-btn" onClick={() => set('quests', [...quests, 0])}>+ Add quest</button>
       </section>
 
       <section className="item-section">
@@ -491,8 +833,44 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: P
           onSet={setParamRow}
           onAdd={() => { setParamRows((prev) => [...prev, { key: '', isString: false, value: '' }]); setIsDirty(true) }}
           onRemove={(i) => { setParamRows((prev) => prev.filter((_, idx) => idx !== i)); setIsDirty(true) }}
+          rowAnnotation={(row) => {
+            const label = NPC_PARAM_LABELS[row.key]
+            return label ? <span className="param-row-note">{label}</span> : null
+          }}
         />
       </section>
+
+      {modelPreview && cacheRoot && (
+        <ModelPreviewModal
+          title={modelPreview.title}
+          modelIds={modelPreview.modelIds}
+          translations={modelPreview.translations}
+          recolor={modelPreview.recolor}
+          scale={modelPreview.scale}
+          tint={modelPreview.tint}
+          hideMarkerFaces={modelPreview.hideMarkerFaces}
+          sequenceId={modelPreview.sequenceId}
+          sequenceOptions={modelPreview.sequenceOptions}
+          rootHandle={cacheRoot}
+          openLabel={modelPreview.openModelId != null ? 'Open in Models' : undefined}
+          onOpen={modelPreview.openModelId != null
+            ? () => { setModelPreview(null); onNavigate?.('models', modelPreview.openModelId!) }
+            : undefined}
+          onOpenModelId={onNavigate && ((id) => { setModelPreview(null); onNavigate('models', id) })}
+          onClose={() => setModelPreview(null)}
+        />
+      )}
+
+      {chatheadPreview && cacheRoot && (
+        <ChatheadPreviewModal
+          rootHandle={cacheRoot}
+          headModelIds={chatheadPreview}
+          npcName={String(draft.name ?? '')}
+          recolor={npcCompositeSpec(draft as Record<string, unknown>).recolor}
+          tint={npcCompositeSpec(draft as Record<string, unknown>).tint}
+          onClose={() => setChatheadPreview(null)}
+        />
+      )}
 
       {isDirty && (
         <div className="save-bar">
