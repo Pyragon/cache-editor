@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { ModelData } from '../loaders/models'
 import { hslToRgb } from '../loaders/models'
+import type { PosedVertices } from '../loaders/skeletalAnimation'
 import type { ParticleProducer, ParticleType } from '../loaders/particles'
 import { PARTICLE_FPS_DEFAULT, PARTICLE_FPS_KEY, PARTICLE_FPS_OPTIONS, ParticleSim } from './particleSim'
 import type { Effector } from './particleSim'
@@ -55,9 +56,13 @@ export type CameraState = { position: [number, number, number]; target: [number,
 type Props = {
   data: ModelData
   display?: ModelDisplayParams | null
+  /** Animated vertex positions (skeletalAnimation.ts) applied in place to the
+   *  live geometry — same length/order as data.vertexX/Y/Z. Changing this does
+   *  NOT rebuild the Three.js scene; null/undefined shows the rest pose. */
+  posedVertices?: PosedVertices | null
   /** When set, the orbit camera saves into / restores from this ref across
-   *  scene rebuilds — so stepping animation frames keeps the user's rotation
-   *  instead of resetting to the default view. */
+   *  scene rebuilds (e.g. reloading a different model into the same viewer) —
+   *  so the user's rotation survives instead of resetting to the default view. */
   cameraStateRef?: React.MutableRefObject<CameraState | null>
 }
 
@@ -159,11 +164,27 @@ function jagexNormalSpace(
   return space
 }
 
-export default function ModelViewer({ data, display, cameraStateRef }: Props) {
+export default function ModelViewer({ data, display, posedVertices, cameraStateRef }: Props) {
   const mountRef = useRef<HTMLDivElement>(null)
   const matsRef = useRef<THREE.MeshBasicMaterial[]>([])
+  // Decoded material textures, keyed by texture id and kept across scene
+  // rebuilds (e.g. reloading a different model that shares texture ids) —
+  // without this, each rebuild re-decoded every texture from scratch via
+  // createImageBitmap, and since that's async, the model visibly rendered
+  // flat-coloured (no texture) for a moment. Only disposed on true unmount,
+  // or when a texture id's blob actually changes underneath it.
+  const textureCacheRef = useRef(new Map<number, { blob: Blob; texture: THREE.Texture }>())
+  useEffect(() => () => {
+    for (const { texture } of textureCacheRef.current.values()) texture.dispose()
+    textureCacheRef.current.clear()
+  }, [])
   const [wireframe, setWireframe] = useState(false)
   const [applyPose, setApplyPose] = useState(true)
+  // The scene-build closure that applies an animated pose in place. The build
+  // effect deliberately does NOT depend on posedVertices — frame changes only
+  // rewrite the existing position buffer (and re-anchor billboards/emitters)
+  // through this ref, never rebuild the scene.
+  const applyPosedFnRef = useRef<((posed: PosedVertices | null) => void) | null>(null)
   const [particles, setParticles] = useState(true)
   const particlesRef = useRef(true)
   const particleObjectsRef = useRef<THREE.Points[]>([])
@@ -299,6 +320,10 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
     const positions = new Float32Array(validFaces * 9)
     const colors    = new Float32Array(validFaces * 9)
     const uvs       = new Float32Array(validFaces * 6)
+    // Which model vertex each buffer corner came from — the geometry is
+    // non-indexed (corners duplicated per face), so this is the map an
+    // animated pose needs to rewrite positions in place.
+    const cornerVertex = new Int32Array(validFaces * 3)
 
     let minX = Infinity, maxX = -Infinity
     let minY = Infinity, maxY = -Infinity
@@ -545,6 +570,7 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
         positions[base]     = ax; positions[base + 1] = ay; positions[base + 2] = az
         positions[base + 3] = bx; positions[base + 4] = by; positions[base + 5] = bz
         positions[base + 6] = cx; positions[base + 7] = cy; positions[base + 8] = cz
+        cornerVertex[vert] = ia; cornerVertex[vert + 1] = ib; cornerVertex[vert + 2] = ic
 
         for (const x of [ax, bx, cx]) { if (x < minX) minX = x; if (x > maxX) maxX = x }
         for (const y of [ay, by, cy]) { if (y < minY) minY = y; if (y > maxY) maxY = y }
@@ -596,7 +622,6 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
     // One material per group: flat vertex colours, or the texture's material PNG.
     const wireframe = matsRef.current[0]?.wireframe ?? false
     const materials: THREE.MeshBasicMaterial[] = []
-    const loadedTextures: THREE.Texture[] = []
     // Materials with a UV scroll (the fire cape's flowing lava): the client offsets
     // sampling by seconds * speed / 64 each frame (OpenGlToolkit.renderAnimatedTexture).
     const scrollingTextures: { texture: THREE.Texture; u: number; v: number }[] = []
@@ -614,18 +639,29 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
       if (g.tex >= 0) {
         const blob = textureBlob(g.tex)!
         const speed = pose?.retextureSpeeds?.get(g.tex) ?? data.textureSpeeds.get(g.tex)
-        createImageBitmap(blob).then((bitmap) => {
-          if (disposed) { bitmap.close(); return }
-          const texture = new THREE.Texture(bitmap)
-          texture.wrapS = THREE.RepeatWrapping
-          texture.wrapT = THREE.RepeatWrapping
-          texture.colorSpace = THREE.SRGBColorSpace
-          texture.needsUpdate = true
-          loadedTextures.push(texture)
-          if (speed) scrollingTextures.push({ texture, u: speed.u, v: speed.v })
-          mat.map = texture
+
+        const cached = textureCacheRef.current.get(g.tex)
+        if (cached && cached.blob === blob) {
+          // same texture as last rebuild (e.g. the previous animation frame)
+          // — reuse the already-decoded GPU texture, no async gap.
+          if (speed) scrollingTextures.push({ texture: cached.texture, u: speed.u, v: speed.v })
+          mat.map = cached.texture
           mat.needsUpdate = true
-        })
+        } else {
+          createImageBitmap(blob).then((bitmap) => {
+            if (disposed) { bitmap.close(); return }
+            const texture = new THREE.Texture(bitmap)
+            texture.wrapS = THREE.RepeatWrapping
+            texture.wrapT = THREE.RepeatWrapping
+            texture.colorSpace = THREE.SRGBColorSpace
+            texture.needsUpdate = true
+            cached?.texture.dispose()
+            textureCacheRef.current.set(g.tex, { blob, texture })
+            if (speed) scrollingTextures.push({ texture, u: speed.u, v: speed.v })
+            mat.map = texture
+            mat.needsUpdate = true
+          })
+        }
       }
     })
 
@@ -644,6 +680,8 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
     // the mesh so they inherit its centering offset.
     const spriteMaterials: THREE.SpriteMaterial[] = []
     const spriteTextures: THREE.Texture[] = []
+    // host-face corner indices per sprite, so an animated pose can re-centre it
+    const spriteAnchors: { sprite: THREE.Sprite; ia: number; ib: number; ic: number }[] = []
     if (data.billboards) {
       for (const bb of data.billboards) {
         const info = data.billboardTypes.get(bb.typeId)
@@ -668,6 +706,7 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
         sprite.scale.set(def.size2d * 2, def.size3d * 2, 1)
         sprite.renderOrder = 1
         mesh.add(sprite)
+        spriteAnchors.push({ sprite, ia, ib, ic })
 
         if (material) {
           createImageBitmap(material).then((bitmap) => {
@@ -710,6 +749,10 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
     const emitterSystems: EmitterSystem[] = []
     const particleTextures: THREE.Texture[] = []
     const PARTICLE_CAP = 2048
+    // spawn-face corners / anchor vertices, so an animated pose can move
+    // emitters and effectors with the mesh (particles in flight are kept)
+    const simAnchors: { sim: ParticleSim; ia: number; ib: number; ic: number }[] = []
+    const effectorAnchors: { effector: Effector; vertex: number }[] = []
 
     if (data.emitters) {
       // one texture per producer, shared by every emitter using it
@@ -733,6 +776,7 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
             dirX: type.offsetX,
             dirZ: type.offsetZ,
           })
+          effectorAnchors.push({ effector: effectors[effectors.length - 1], vertex: effector.vertex })
         }
       }
 
@@ -754,6 +798,7 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
           effectors,
         )
         sim.maxParticles = PARTICLE_CAP
+        simAnchors.push({ sim, ia, ib, ic })
 
         let texture = producerTextures.get(emitter.producerId)
         if (!texture) {
@@ -890,6 +935,53 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
     camera.updateProjectionMatrix()
     updateParticleScale(h)
 
+    // --- Animated pose: rewrites the live position buffer in place (plus
+    // billboard centres and particle-emitter/effector anchors) — no scene
+    // rebuild. Colours, UVs and the centring offset stay at rest pose: UVs
+    // glued to their faces is the normal skinned-mesh look, and a fixed pivot
+    // keeps the camera from jumping between frames. The length guard drops a
+    // stale pose left over from a previously loaded model.
+    const positionAttr = geo.getAttribute('position') as THREE.BufferAttribute
+    function applyPosed(posed: PosedVertices | null) {
+      const valid = posed != null && posed.x.length === vertexCount ? posed : null
+      const X = valid ? valid.x : vertexX
+      const Y = valid ? valid.y : vertexY
+      const Z = valid ? valid.z : vertexZ
+      for (let i = 0; i < cornerVertex.length; i++) {
+        const v = cornerVertex[i]
+        positions[i * 3]     = X[v]
+        positions[i * 3 + 1] = -Y[v]
+        positions[i * 3 + 2] = -Z[v]
+      }
+      positionAttr.needsUpdate = true
+      // Skip recomputing bounds per frame — the mesh IS the scene, culling
+      // buys nothing, and stale rest-pose bounds could wrongly cull a pose.
+      mesh.frustumCulled = false
+      for (const { sprite, ia, ib, ic } of spriteAnchors) {
+        sprite.position.set(
+          (X[ia] + X[ib] + X[ic]) / 3,
+          -(Y[ia] + Y[ib] + Y[ic]) / 3,
+          -(Z[ia] + Z[ib] + Z[ic]) / 3,
+        )
+      }
+      for (const { sim, ia, ib, ic } of simAnchors) {
+        sim.setTriangle({
+          ax: X[ia], ay: Y[ia], az: Z[ia],
+          bx: X[ib], by: Y[ib], bz: Z[ib],
+          cx: X[ic], cy: Y[ic], cz: Z[ic],
+        })
+      }
+      for (const { effector, vertex } of effectorAnchors) {
+        effector.x = X[vertex]
+        effector.y = Y[vertex]
+        effector.z = Z[vertex]
+      }
+    }
+    applyPosedFnRef.current = applyPosed
+    // A rebuild mid-animation (this render's closure has the current prop)
+    // starts from the active pose instead of flashing the rest pose.
+    if (posedVertices) applyPosed(posedVertices)
+
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -952,6 +1044,7 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
 
     return () => {
       disposed = true
+      applyPosedFnRef.current = null
       if (cameraStateRef) {
         cameraStateRef.current = {
           position: [camera.position.x, camera.position.y, camera.position.z],
@@ -963,7 +1056,7 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
       controls.dispose()
       renderer.dispose()
       geo.dispose()
-      for (const texture of loadedTextures) texture.dispose()
+      // mesh textures live in textureCacheRef, not disposed per-rebuild — see its declaration
       for (const material of materials) material.dispose()
       for (const texture of spriteTextures) texture.dispose()
       for (const material of spriteMaterials) material.dispose()
@@ -974,10 +1067,16 @@ export default function ModelViewer({ data, display, cameraStateRef }: Props) {
       for (const texture of particleTextures) texture.dispose()
       mount.removeChild(renderer.domElement)
     }
-    // cameraStateRef is a mutable ref (stable identity, read at cleanup) —
-    // deliberately not a dependency
+    // cameraStateRef is a mutable ref (stable identity, read at cleanup) and
+    // posedVertices is applied in place by the effect below — both deliberately
+    // not dependencies (a pose change must not rebuild the scene).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, display, applyPose])
+
+  // Animated pose changes never rebuild the scene — just in-place buffer writes.
+  useEffect(() => {
+    applyPosedFnRef.current?.(posedVertices ?? null)
+  }, [posedVertices])
 
   useEffect(() => {
     for (const material of matsRef.current) material.wireframe = wireframe

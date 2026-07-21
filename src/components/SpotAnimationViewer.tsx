@@ -9,6 +9,7 @@ import { frameFileId } from '../loaders/animations'
 import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
 import type { AnimationFrameSetData } from '../loaders/animation_frame_sets'
 import { applyAnimationFrame } from '../loaders/skeletalAnimation'
+import type { PosedVertices } from '../loaders/skeletalAnimation'
 import ModelViewer from './ModelViewer'
 import { NumberInput, NumGrid, PairTable } from './defFields'
 import type { NumFieldDef } from './defFields'
@@ -39,7 +40,9 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
   const [isSaving, setIsSaving] = useState(false)
 
   const [baseModel, setBaseModel] = useState<ModelData | null>(null)
-  const [posedModel, setPosedModel] = useState<ModelData | null>(null)
+  // Animated vertex positions applied in place by ModelViewer — the scene
+  // itself is only rebuilt when baseModel changes, not per frame.
+  const [posedVertices, setPosedVertices] = useState<PosedVertices | null>(null)
   const [frameIndex, setFrameIndex] = useState(0)
   const [sequence, setSequence] = useState<AnimationDef | null>(null)
   const [status, setStatus] = useState('')
@@ -105,7 +108,7 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
     if (!data.rootHandle) return
     setStatus('Loading model…')
     setBaseModel(null)
-    setPosedModel(null)
+    setPosedVertices(null)
     setSequence(null)
     try {
       const modelsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('models'))
@@ -134,7 +137,7 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
   }
 
   async function poseFrame(index: number) {
-    if (!baseModel || !sequence || !data.rootHandle) { setPosedModel(baseModel); return }
+    if (!baseModel || !sequence || !data.rootHandle) { setPosedVertices(null); return }
     const setId = sequence.frameSetIds?.[index]
     if (setId == null) return
     const fileId = frameFileId(sequence, index)
@@ -149,7 +152,7 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
         frameSetCache.current.set(setId, frameSet)
       }
       const frame = frameSet.frames.get(fileId)
-      if (!frame || frame.rawFallbackBytes) { setStatus('Frame unavailable.'); setPosedModel(baseModel); return }
+      if (!frame || frame.rawFallbackBytes) { setStatus('Frame unavailable.'); setPosedVertices(null); return }
 
       let frameBase = frameBaseCache.current.get(frame.frameBaseId)
       if (!frameBase) {
@@ -162,9 +165,9 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
       }
 
       const posed = applyAnimationFrame(baseModel, frameBase, frame)
-      setPosedModel(posed ? { ...baseModel, vertexX: posed.x, vertexY: posed.y, vertexZ: posed.z } : baseModel)
+      setPosedVertices(posed)
     } catch {
-      setPosedModel(baseModel)
+      setPosedVertices(null)
     }
   }
 
@@ -242,7 +245,7 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
             <button type="button" className="model-toolbar-btn" disabled={frameIndex >= frameCount - 1} onClick={() => setFrameIndex((i) => Math.min(frameCount - 1, i + 1))}>Next ▸</button>
           </div>
         )}
-        {posedModel && <ModelViewer data={posedModel} />}
+        {baseModel && <ModelViewer data={baseModel} posedVertices={posedVertices} />}
       </section>
 
       {isDirty && (

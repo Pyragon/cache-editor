@@ -7,6 +7,7 @@ import { frameFileId } from '../loaders/animations'
 import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
 import type { AnimationFrameSetData } from '../loaders/animation_frame_sets'
 import { applyAnimationFrame } from '../loaders/skeletalAnimation'
+import type { PosedVertices } from '../loaders/skeletalAnimation'
 import { NumberInput } from './defFields'
 import ModelViewer from './ModelViewer'
 import type { CameraState } from './ModelViewer'
@@ -20,27 +21,24 @@ type Props = {
   onClose: () => void
 }
 
-// Modal that steps through a sequence's frames on a chosen model, applying the
-// ported skeletal transform math (skeletalAnimation.ts) per frame. Not
-// real-time playback — ModelViewer rebuilds its whole Three.js scene per
-// `data` change, too costly to do at animation framerate, so this is a
-// frame-by-frame stepper instead (still shows the real deformation working).
-const FPS_CAPS = [5, 10, 20, 30]
-
+// Modal that plays a sequence's frames on a chosen model, applying the ported
+// skeletal transform math (skeletalAnimation.ts) per frame. The posed vertices
+// go to ModelViewer as `posedVertices`, applied in place to the live scene —
+// the scene is built once per model load, so playback runs at the animation's
+// real per-frame durations.
 export default function AnimationPlaybackViewer({ animation, rootHandle, initialModelId, onClose }: Props) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const [modelId, setModelId] = useState(initialModelId ?? 0)
   const [model, setModel] = useState<ModelData | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [frameIndex, setFrameIndex] = useState(0)
-  const [posedModel, setPosedModel] = useState<ModelData | null>(null)
+  const [posedVertices, setPosedVertices] = useState<PosedVertices | null>(null)
   const [status, setStatus] = useState<string>('')
   const [playing, setPlaying] = useState(false)
-  const [fpsCap, setFpsCap] = useState(10)
 
   const frameSetCache = useRef(new Map<number, AnimationFrameSetData>())
   const frameBaseCache = useRef(new Map<number, AnimationFrameBaseDef>())
-  // Orbit rotation survives the per-frame scene rebuilds (and model reloads).
+  // Orbit rotation survives model reloads (which do rebuild the scene).
   const cameraStateRef = useRef<CameraState | null>(null)
 
   const frameCount = animation.frameDurations?.length ?? 0
@@ -49,6 +47,7 @@ export default function AnimationPlaybackViewer({ animation, rootHandle, initial
     if (!rootHandle) return
     setLoadError(null)
     setModel(null)
+    setPosedVertices(null)
     try {
       const dir = await resolveEntryHandle(rootHandle, getEntryPath('models'))
       const loader = getLoader('models')
@@ -70,10 +69,13 @@ export default function AnimationPlaybackViewer({ animation, rootHandle, initial
     if (setId == null) return
     const fileId = frameFileId(animation, index)
 
-    setStatus('Loading…')
     try {
+      // Only surface "Loading…" on a real cache miss — setting it on every
+      // frame advance re-rendered and reflowed the dialog twice per frame
+      // during playback (the cached path is effectively synchronous).
       let frameSet = frameSetCache.current.get(setId)
       if (!frameSet) {
+        setStatus('Loading…')
         const dir = await resolveEntryHandle(rootHandle, getEntryPath('animation_frame_sets'))
         const loader = getLoader('animation_frame_sets')
         if (!dir || !loader) throw new Error('animation_frame_sets entry not available')
@@ -81,11 +83,12 @@ export default function AnimationPlaybackViewer({ animation, rootHandle, initial
         frameSetCache.current.set(setId, frameSet)
       }
       const frame = frameSet.frames.get(fileId)
-      if (!frame) { setStatus(`Frame set ${setId} has no file ${fileId}.`); setPosedModel(null); return }
-      if (frame.rawFallbackBytes) { setStatus('This frame is unreadable (references an orphaned frame base).'); setPosedModel(null); return }
+      if (!frame) { setStatus(`Frame set ${setId} has no file ${fileId}.`); setPosedVertices(null); return }
+      if (frame.rawFallbackBytes) { setStatus('This frame is unreadable (references an orphaned frame base).'); setPosedVertices(null); return }
 
       let frameBase = frameBaseCache.current.get(frame.frameBaseId)
       if (!frameBase) {
+        setStatus('Loading…')
         const dir = await resolveEntryHandle(rootHandle, getEntryPath('animation_frame_bases'))
         const loader = getLoader('animation_frame_bases')
         if (!dir || !loader) throw new Error('animation_frame_bases entry not available')
@@ -95,13 +98,13 @@ export default function AnimationPlaybackViewer({ animation, rootHandle, initial
       }
 
       const posed = applyAnimationFrame(model, frameBase, frame)
-      if (!posed) { setStatus('This frame base has no compatible skin data for the loaded model.'); setPosedModel(null); return }
+      if (!posed) { setStatus('This frame base has no compatible skin data for the loaded model.'); setPosedVertices(null); return }
 
-      setPosedModel({ ...model, vertexX: posed.x, vertexY: posed.y, vertexZ: posed.z })
+      setPosedVertices(posed)
       setStatus('')
     } catch {
       setStatus('Failed to pose this frame.')
-      setPosedModel(null)
+      setPosedVertices(null)
     }
   }
 
@@ -116,16 +119,14 @@ export default function AnimationPlaybackViewer({ animation, rootHandle, initial
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Playback: advance per the frame's own duration (20ms client ticks),
-  // never faster than the FPS cap allows — each step rebuilds the Three.js
-  // scene, which is the expensive part the cap protects against.
+  // Playback: advance per the frame's own duration (20ms client ticks) —
+  // posing is an in-place buffer update now, so real-time speed is fine.
   useEffect(() => {
     if (!playing || !model || frameCount === 0) return
     const duration = (animation.frameDurations?.[frameIndex] ?? 1) * 20
-    const wait = Math.max(duration, 1000 / fpsCap)
-    const timer = setTimeout(() => setFrameIndex((i) => (i + 1) % frameCount), wait)
+    const timer = setTimeout(() => setFrameIndex((i) => (i + 1) % frameCount), Math.max(duration, 20))
     return () => clearTimeout(timer)
-  }, [playing, frameIndex, model, fpsCap, frameCount, animation.frameDurations])
+  }, [playing, frameIndex, model, frameCount, animation.frameDurations])
 
   return (
     <dialog
@@ -157,27 +158,13 @@ export default function AnimationPlaybackViewer({ animation, rootHandle, initial
                 {playing ? '⏸ Pause' : '▶ Play'}
               </button>
               <span className="anim-preview-frame-label">Frame {frameIndex + 1} / {frameCount}</span>
-              <span className="sprite-zoom-label">FPS cap</span>
-              <span className="btn-pill">
-                {FPS_CAPS.map((f) => (
-                  <button
-                    key={f}
-                    type="button"
-                    className={`zoom-btn${fpsCap === f ? ' active' : ''}`}
-                    title="Playback never advances faster than this (each frame rebuilds the 3D scene)"
-                    onClick={() => setFpsCap(f)}
-                  >
-                    {f}
-                  </button>
-                ))}
-              </span>
             </>
           )}
         </div>
 
         {loadError && <p className="anim-preview-status">{loadError}</p>}
         {status && <p className="anim-preview-status">{status}</p>}
-        {posedModel && <ModelViewer data={posedModel} cameraStateRef={cameraStateRef} />}
+        {model && <ModelViewer data={model} posedVertices={posedVertices} cameraStateRef={cameraStateRef} />}
       </div>
     </dialog>
   )

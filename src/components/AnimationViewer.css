@@ -96,9 +96,11 @@
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
 }
 
+/* No backdrop-filter here: a blur forces the browser to re-blur the whole
+   underlying page on every composited frame, and the WebGL preview inside
+   repaints every RAF — the combination made orbiting visibly laggy. */
 .anim-preview-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(2px);
+  background: rgba(0, 0, 0, 0.62);
 }
 
 .anim-preview-body {

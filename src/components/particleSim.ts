@@ -202,41 +202,47 @@ export class ParticleSim {
         }
       }
     }
-    if (triangle) {
-      this.centerX = Math.trunc((triangle.ax + triangle.bx + triangle.cx) / 3)
-      this.centerY = Math.trunc((triangle.ay + triangle.by + triangle.cy) / 3)
-      this.centerZ = Math.trunc((triangle.az + triangle.bz + triangle.cz) / 3)
+    if (triangle) this.setTriangle(triangle)
+  }
 
-      // cross(B-A, C-A), component order per the client
-      const bax = triangle.bx - triangle.ax
-      const bay = triangle.by - triangle.ay
-      const baz = triangle.bz - triangle.az
-      const cax = triangle.cx - triangle.ax
-      const cay = triangle.cy - triangle.ay
-      const caz = triangle.cz - triangle.az
-      let mx = (bay * caz - baz * cay) | 0
-      let my = (baz * cax - bax * caz) | 0
-      let mz = (bax * cay - cax * bay) | 0
+  /** Re-anchor the emitter to a moved face (skeletal animation) without
+   *  resetting live particles — recomputes the spawn centre and emission axis
+   *  exactly like construction. */
+  setTriangle(triangle: EmitterTriangle) {
+    this.triangle = triangle
+    this.centerX = Math.trunc((triangle.ax + triangle.bx + triangle.cx) / 3)
+    this.centerY = Math.trunc((triangle.ay + triangle.by + triangle.cy) / 3)
+    this.centerZ = Math.trunc((triangle.az + triangle.bz + triangle.cz) / 3)
 
-      while (mx > 32767 || my > 32767 || mz > 32767 || mx < -32767 || my < -32767 || mz < -32767) {
-        mx >>= 1
-        my >>= 1
-        mz >>= 1
-      }
+    // cross(B-A, C-A), component order per the client
+    const bax = triangle.bx - triangle.ax
+    const bay = triangle.by - triangle.ay
+    const baz = triangle.bz - triangle.az
+    const cax = triangle.cx - triangle.ax
+    const cay = triangle.cy - triangle.ay
+    const caz = triangle.cz - triangle.az
+    let mx = (bay * caz - baz * cay) | 0
+    let my = (baz * cax - bax * caz) | 0
+    let mz = (bax * cay - cax * bay) | 0
 
-      let divider = Math.trunc(Math.sqrt(mz * mz + my * my + mx * mx))
-      if (divider <= 0) divider = 1
-      this.axisX = Math.trunc((mx * 32767) / divider)
-      this.axisY = Math.trunc((my * 32767) / divider)
-      this.axisZ = Math.trunc((mz * 32767) / divider)
+    while (mx > 32767 || my > 32767 || mz > 32767 || mx < -32767 || my < -32767 || mz < -32767) {
+      mx >>= 1
+      my >>= 1
+      mz >>= 1
+    }
 
-      // 2607.594… is 16384 / 2π — radians to 14-bit angle units
-      if (producer.maximumAngleH > 0 || producer.maximumAngleV > 0) {
-        this.thetaH = Math.trunc(Math.atan2(this.axisZ, this.axisX) * 2607.5945876176133)
-        this.thetaV = Math.trunc(
-          Math.atan2(this.axisY, Math.sqrt(this.axisX * this.axisX + this.axisZ * this.axisZ)) * 2607.5945876176133,
-        )
-      }
+    let divider = Math.trunc(Math.sqrt(mz * mz + my * my + mx * mx))
+    if (divider <= 0) divider = 1
+    this.axisX = Math.trunc((mx * 32767) / divider)
+    this.axisY = Math.trunc((my * 32767) / divider)
+    this.axisZ = Math.trunc((mz * 32767) / divider)
+
+    // 2607.594… is 16384 / 2π — radians to 14-bit angle units
+    if (this.producer.maximumAngleH > 0 || this.producer.maximumAngleV > 0) {
+      this.thetaH = Math.trunc(Math.atan2(this.axisZ, this.axisX) * 2607.5945876176133)
+      this.thetaV = Math.trunc(
+        Math.atan2(this.axisY, Math.sqrt(this.axisX * this.axisX + this.axisZ * this.axisZ)) * 2607.5945876176133,
+      )
     }
   }
 
