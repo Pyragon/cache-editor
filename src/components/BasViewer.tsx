@@ -131,7 +131,7 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [compatProgress, setCompatProgress] = useState<{ done: number; total: number } | null>(null)
-  const [preview, setPreview] = useState<{ animation: AnimationDef; modelId: number } | null>(null)
+  const [preview, setPreview] = useState<{ animation: AnimationDef; modelIds: number[] } | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   // Item row "View Model": the item's inventory model, posed, in a modal.
   const [itemPreview, setItemPreview] = useState<{ itemId: number; modelId: number; display: ModelDisplayParams } | null>(null)
@@ -168,7 +168,7 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
       const dir = await resolveEntryHandle(cacheRoot, getEntryPath('animations'))
       const file = await (await dir!.getFileHandle(`${seqId}.json`)).getFile()
       const animation = JSON.parse(await file.text()) as AnimationDef
-      setPreview({ animation, modelId: npc.modelIds[0] })
+      setPreview({ animation, modelIds: npc.modelIds })
       setPreviewError(null)
     } catch {
       setPreviewError(`Couldn't load animation ${seqId} from the animations entry.`)
@@ -507,7 +507,7 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
         <AnimationPlaybackViewer
           animation={preview.animation}
           rootHandle={cacheRoot ?? undefined}
-          initialModelId={preview.modelId}
+          initialModelIds={preview.modelIds}
           onClose={() => setPreview(null)}
         />
       )}
@@ -515,7 +515,7 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
       {itemPreview && cacheRoot && (
         <ModelPreviewModal
           title={`Item ${itemPreview.itemId} — inventory model ${itemPreview.modelId}`}
-          modelId={itemPreview.modelId}
+          modelIds={[itemPreview.modelId]}
           display={itemPreview.display}
           rootHandle={cacheRoot}
           openLabel="Open Item"

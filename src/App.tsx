@@ -1473,7 +1473,7 @@ function App() {
       {itemModelPreview && cacheHandle && (
         <ModelPreviewModal
           title={`Model ${itemModelPreview.modelId}${itemModelPreview.display ? ` — ${itemModelPreview.display.label}` : ''}`}
-          modelId={itemModelPreview.modelId}
+          modelIds={[itemModelPreview.modelId]}
           display={itemModelPreview.display}
           rootHandle={cacheHandle}
           openLabel="Open in Models"

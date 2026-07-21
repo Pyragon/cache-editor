@@ -64,6 +64,9 @@ type Props = {
    *  scene rebuilds (e.g. reloading a different model into the same viewer) —
    *  so the user's rotation survives instead of resetting to the default view. */
   cameraStateRef?: React.MutableRefObject<CameraState | null>
+  /** Extra text appended to the "N verts · M faces" stats line (e.g. the
+   *  preview modal's "Anim 808 · frame 3 / 21"). */
+  statsExtra?: string
 }
 
 // Per-particle size, tint and alpha need a shader — THREE.Points only supports a
@@ -164,7 +167,7 @@ function jagexNormalSpace(
   return space
 }
 
-export default function ModelViewer({ data, display, posedVertices, cameraStateRef }: Props) {
+export default function ModelViewer({ data, display, posedVertices, cameraStateRef, statsExtra }: Props) {
   const mountRef = useRef<HTMLDivElement>(null)
   const matsRef = useRef<THREE.MeshBasicMaterial[]>([])
   // Decoded material textures, keyed by texture id and kept across scene
@@ -1137,6 +1140,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
           {data.vertexCount} verts · {data.faceCount} faces
           {emitterCount > 0 && ` · ${emitterCount} particle emitter${emitterCount > 1 ? 's' : ''}`}
           {display && applyPose && ` · inventory pose from ${display.label}`}
+          {statsExtra && ` · ${statsExtra}`}
         </span>
         <span className="model-hint">Drag to rotate · Scroll to zoom · Right-drag to pan</span>
       </div>

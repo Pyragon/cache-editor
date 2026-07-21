@@ -125,11 +125,13 @@
   gap: 8px;
 }
 
-.anim-preview-toolbar .num-input {
+.anim-preview-toolbar .num-input,
+.anim-preview-seq-grid .num-input {
   width: calc(6ch + 10px + 52px);
 }
 
-.anim-preview-toolbar .num-input-field {
+.anim-preview-toolbar .num-input-field,
+.anim-preview-seq-grid .num-input-field {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -141,8 +143,42 @@
   padding-left: 8px;
 }
 
-.anim-preview-toolbar .num-input-steps {
+.anim-preview-toolbar .num-input-steps,
+.anim-preview-seq-grid .num-input-steps {
   right: 4px;
+}
+
+/* The preview modal's playback rows (Emote / Any sequence): a 3-column grid
+   so labels, controls and play buttons line up across the rows — controls
+   keep their natural widths, they just share a starting column. */
+.anim-preview-seq-grid {
+  display: grid;
+  grid-template-columns: max-content max-content max-content;
+  gap: 8px 12px;
+  align-items: center;
+  justify-items: start;
+}
+
+/* dropdown and the any-sequence field share one width, so the two control
+   cells read as one column (outranks the toolbar-shared calc() above).
+   Fixed px, not ch: ch resolves per-element font, so a shared calc() gave
+   the two controls slightly different widths. */
+.anim-preview-seq-grid .item-stackable-select,
+.anim-preview-seq-grid .num-input {
+  width: 172px;
+  box-sizing: border-box;
+}
+
+/* "Built from N models: …" chip list under the playback rows */
+.anim-preview-parts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.anim-preview-parts .anim-fit-models {
+  max-width: none;
 }
 
 .anim-preview-frame-label {

@@ -31,7 +31,7 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
   const [isSaving, setIsSaving] = useState(false)
   const [showPlayback, setShowPlayback] = useState(false)
   // model the playback modal opens preloaded with (from a fit-table row)
-  const [previewModelId, setPreviewModelId] = useState<number | null>(null)
+  const [previewModelIds, setPreviewModelIds] = useState<number[] | null>(null)
   // null = still resolving, -1 = no frames / unresolvable
   const [skeleton, setSkeleton] = useState<number | null>(null)
   // Bumped when a scan completes; readiness itself is derived from
@@ -164,7 +164,7 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
         <button
           type="button"
           className="model-toolbar-btn"
-          onClick={() => { setPreviewModelId(null); setShowPlayback(true) }}
+          onClick={() => { setPreviewModelIds(null); setShowPlayback(true) }}
           disabled={frameCount === 0}
         >
           Preview on Model…
@@ -175,7 +175,7 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
         <AnimationPlaybackViewer
           animation={draft}
           rootHandle={data.rootHandle}
-          initialModelId={previewModelId ?? undefined}
+          initialModelIds={previewModelIds ?? undefined}
           onClose={() => setShowPlayback(false)}
         />
       )}
@@ -335,7 +335,7 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
                   emptyText="No NPC's BAS uses a sequence on this skeleton."
                   onNavigate={onNavigate}
                   onPreviewAnim={(npc) => {
-                    setPreviewModelId(npc.modelIds[0])
+                    setPreviewModelIds(npc.modelIds)
                     setShowPlayback(true)
                   }}
                 />
