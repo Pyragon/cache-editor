@@ -116,7 +116,7 @@ type FontMetricsJson = {
   bottomPadding: number
 }
 
-type CacheFont = {
+export type CacheFont = {
   metrics: FontMetricsJson
   glyphMeta: SpriteMeta
   glyphs: (HTMLCanvasElement | null | undefined)[] // lazily rendered, undefined = not tried yet
@@ -294,6 +294,13 @@ export class InterfaceAssets {
     return p
   }
 
+  /** Seed a prebuilt model under a synthetic id — the chathead preview
+   *  merges an NPC's head models and needs the composite to flow through
+   *  the normal MODEL-component render path. */
+  primeModel(id: number, model: ModelData): void {
+    this.models.set(id, Promise.resolve(model))
+  }
+
   getModel(id: number): Promise<ModelData | null> {
     let p = this.models.get(id)
     if (!p) {
@@ -337,6 +344,17 @@ export class InterfaceAssets {
       this.modelRenders.set(key, p)
     }
     return p
+  }
+
+  /** One-shot uncached render of a prebuilt model through the MODEL
+   *  component projection — the chathead preview re-renders each posed
+   *  animation frame this way. */
+  renderModelFrame(model: ModelData, c: IComponentDefinition, rect: LayoutRect, clip: LayoutRect): HTMLCanvasElement | null {
+    try {
+      return this.renderModel(model, c, rect, clip)
+    } catch {
+      return null
+    }
   }
 
   private ensureRenderer(): THREE.WebGLRenderer {
@@ -458,15 +476,55 @@ function buildModelGeometry(model: ModelData): { geometry: THREE.BufferGeometry 
   }
   if (faces.length === 0) return null
 
+  // The palette RGB is a display (sRGB) value, but three's renderer works in
+  // linear space and gamma-encodes on output — fed in raw, vertex colours get
+  // double-encoded and wash out to near-white (same trap ModelViewer notes).
+  const srgbToLinear = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4))
+
+  // Client vertex-lit shading (same math as ModelViewer's icon-lighting path,
+  // at the default ambient/contrast an interface model gets): base lightness
+  // halved (ambient 64/128), each corner modulated by 1 + cos against the
+  // (−50, −10, −50) light using smooth vertex normals. Flat unlit colours
+  // made chatheads look like paper cutouts — no hair highlights, no depth.
+  const normSumX = new Float32Array(vertexCount)
+  const normSumY = new Float32Array(vertexCount)
+  const normSumZ = new Float32Array(vertexCount)
+  const normCount = new Uint16Array(vertexCount)
+  for (const f of faces) {
+    if (model.faceType && model.faceType[f] === 2) continue
+    const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
+    const e1x = vertexX[ib] - vertexX[ia], e1y = vertexY[ib] - vertexY[ia], e1z = vertexZ[ib] - vertexZ[ia]
+    const e2x = vertexX[ic] - vertexX[ia], e2y = vertexY[ic] - vertexY[ia], e2z = vertexZ[ic] - vertexZ[ia]
+    const nx = e1y * e2z - e2y * e1z
+    const ny = e1z * e2x - e2z * e1x
+    const nz = e1x * e2y - e2x * e1y
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz)
+    if (len === 0) continue
+    for (const v of [ia, ib, ic]) {
+      normSumX[v] += nx / len
+      normSumY[v] += ny / len
+      normSumZ[v] += nz / len
+      normCount[v]++
+    }
+  }
+  const LIGHT_LEN = Math.sqrt(50 * 50 + 10 * 10 + 50 * 50)
+  const LX = -50 / LIGHT_LEN, LY = -10 / LIGHT_LEN, LZ = -50 / LIGHT_LEN
+  const litHsl = (hsl: number) => {
+    let lum = ((hsl & 0x7f) * 64) >> 7
+    if (lum < 2) lum = 2
+    else if (lum > 126) lum = 126
+    return (hsl & 0xff80) + lum
+  }
+
   const positions = new Float32Array(faces.length * 9)
   const colors = new Float32Array(faces.length * 9)
   let vert = 0
   for (const f of faces) {
     const idx = [triangleX[f], triangleY[f], triangleZ[f]]
-    const rgb = hslToRgb(faceColor[f] & 0xffff)
-    const r = ((rgb >> 16) & 0xff) / 255
-    const g = ((rgb >> 8) & 0xff) / 255
-    const b = (rgb & 0xff) / 255
+    const rgb = hslToRgb(litHsl(faceColor[f] & 0xffff))
+    const br = (rgb >> 16) & 0xff
+    const bg = (rgb >> 8) & 0xff
+    const bb = rgb & 0xff
     for (let i = 0; i < 3; i++) {
       const v = idx[i]
       const base = (vert + i) * 3
@@ -474,9 +532,12 @@ function buildModelGeometry(model: ModelData): { geometry: THREE.BufferGeometry 
       positions[base] = vertexX[v] * upscale
       positions[base + 1] = -vertexY[v] * upscale
       positions[base + 2] = -vertexZ[v] * upscale
-      colors[base] = r
-      colors[base + 1] = g
-      colors[base + 2] = b
+      const n = normCount[v]
+      const cos = n > 0 ? (LX * normSumX[v] + LY * normSumY[v] + LZ * normSumZ[v]) / n : 0
+      const f30 = 1 + cos
+      colors[base] = srgbToLinear(Math.min(Math.max((br * f30) / 255, 0), 1))
+      colors[base + 1] = srgbToLinear(Math.min(Math.max((bg * f30) / 255, 0), 1))
+      colors[base + 2] = srgbToLinear(Math.min(Math.max((bb * f30) / 255, 0), 1))
     }
     vert += 3
   }
@@ -601,6 +662,77 @@ function tintedGlyph(font: CacheFont, fontId: number, code: number, rgb: number)
     glyphTintCache.set(key, tinted)
   }
   return tinted
+}
+
+// ---------------------------------------------------------------------------
+// Standalone cache-font text API (the NPC right-click menu preview draws with
+// the real b12 glyphs instead of a browser font).
+// ---------------------------------------------------------------------------
+
+const standaloneFonts = new Map<number, Promise<CacheFont | null>>()
+
+/** Load a sprite font + metrics outside an InterfaceAssets instance
+ *  (session-cached per font id). */
+export function loadCacheFont(root: FileSystemDirectoryHandle, fontId: number): Promise<CacheFont | null> {
+  let p = standaloneFonts.get(fontId)
+  if (!p) {
+    p = (async (): Promise<CacheFont | null> => {
+      try {
+        const [spritesDir, metricsDir] = await Promise.all([
+          resolveEntryHandle(root, getEntryPath('sprites')),
+          resolveEntryHandle(root, getEntryPath('font_metrics')),
+        ])
+        if (!spritesDir || !metricsDir) return null
+        const glyphMeta = await loadSpriteMeta(spritesDir, fontId)
+        if (!glyphMeta) return null
+        const metricsFile = await (await metricsDir.getFileHandle(`${fontId}.json`)).getFile()
+        const metrics = JSON.parse(await metricsFile.text()) as FontMetricsJson
+        if (!metrics.glyphWidths) return null
+        return { metrics, glyphMeta, glyphs: new Array(256).fill(undefined) }
+      } catch {
+        return null
+      }
+    })()
+    standaloneFonts.set(fontId, p)
+  }
+  return p
+}
+
+/** Tag-aware pixel width of one line (entities and <col=> handled). */
+export function measureCacheText(font: CacheFont, text: string): number {
+  return tokensWidth(font, tokenizeLine(text))
+}
+
+/** Draw one tag-aware line. `lineY` uses the client's renderPlain anchor
+ *  (glyph tops sit at lineY − verticalSpacing, like drawTextComponent). */
+export function drawCacheText(
+  ctx: CanvasRenderingContext2D,
+  font: CacheFont,
+  fontId: number,
+  text: string,
+  x: number,
+  lineY: number,
+  baseColor: number,
+  shadow: boolean,
+): void {
+  const glyphY = lineY - font.metrics.verticalSpacing
+  let penX = x
+  let color = baseColor & 0xffffff
+  for (const t of tokenizeLine(text)) {
+    if ('color' in t) {
+      color = t.color ?? (baseColor & 0xffffff)
+      continue
+    }
+    if (t.ch !== 32) {
+      if (shadow) {
+        const shadowGlyph = tintedGlyph(font, fontId, t.ch, 0)
+        if (shadowGlyph) ctx.drawImage(shadowGlyph, penX + 1, glyphY + 1)
+      }
+      const glyph = tintedGlyph(font, fontId, t.ch, color)
+      if (glyph) ctx.drawImage(glyph, penX, glyphY)
+    }
+    penX += advanceOf(font, t.ch)
+  }
 }
 
 function drawTextComponent(
