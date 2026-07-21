@@ -15,11 +15,12 @@ export async function loadSpriteMeta(
   }
 }
 
-// Render a sprite's first frame onto a fresh canvas, or null if empty.
-export function renderFrameToCanvas(meta: SpriteMeta): HTMLCanvasElement | null {
+// Render one of a sprite's frames onto a fresh canvas, or null if empty.
+export function renderFrameToCanvas(meta: SpriteMeta, frameIndex = 0): HTMLCanvasElement | null {
   if (meta.width <= 0 || meta.height <= 0) return null
+  if (frameIndex < 0 || frameIndex >= meta.usesAlpha.length) return null
   const canvas = document.createElement('canvas')
-  renderFrame(canvas, meta, 0)
+  renderFrame(canvas, meta, frameIndex)
   return canvas
 }
 
