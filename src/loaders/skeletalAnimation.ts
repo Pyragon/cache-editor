@@ -154,6 +154,16 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
 
   const vertexGroups = buildVertexGroups(model.vertexSkins, model.vertexCount)
 
+  function verticesForSlot(slot: number): number[] {
+    const labels = frameBase.labels[slot] ?? []
+    const vertices: number[] = []
+    for (const label of labels) {
+      const group = vertexGroups[label]
+      if (group) vertices.push(...group)
+    }
+    return vertices
+  }
+
   const state: PoseState = {
     x: Int32Array.from(model.vertexX),
     y: Int32Array.from(model.vertexY),
@@ -166,18 +176,25 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
   for (let i = 0; i < frame.transformationIndices.length; i++) {
     const slot = frame.transformationIndices[i]
     const type = frameBase.transformationTypes[slot]
-    const labels = frameBase.labels[slot] ?? []
 
-    const vertices: number[] = []
-    for (const label of labels) {
-      const group = vertexGroups[label]
-      if (group) vertices.push(...group)
+    // Before certain transforms, the client re-establishes the current
+    // origin from a DIFFERENT slot's live vertex positions (a zero-delta
+    // type-0 pass) — darkan Model.kt's single-frame driver, keyed by
+    // frame.skippedReferences[i] (confusingly also called "labels" in
+    // AnimFrame.kt, NOT the same thing as AnimationFrameBaseDef.labels).
+    // Skipping this lets the origin drift stale across branches of the
+    // skeleton (e.g. legs -> neck), which is what was producing the
+    // stretched/spiked geometry on models whose hierarchy isn't purely
+    // linear (confirmed against a live terrorbird capture).
+    const skipSlot = frame.skippedReferences[i]
+    if (skipSlot != null && skipSlot !== -1) {
+      applyTransform(state, model.vertexCount, 0, verticesForSlot(skipSlot), 0, 0, 0)
     }
 
     const x = resolveTransformDelta(type, frame.transformationX[i])
     const y = resolveTransformDelta(type, frame.transformationY[i])
     const z = resolveTransformDelta(type, frame.transformationZ[i])
-    applyTransform(state, model.vertexCount, type, vertices, x, y, z)
+    applyTransform(state, model.vertexCount, type, verticesForSlot(slot), x, y, z)
   }
 
   if (state.upscaled) {
