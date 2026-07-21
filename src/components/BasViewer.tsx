@@ -8,6 +8,7 @@ import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { IntListInput, NumberInput, NumGrid, PairTable, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { ItemUseTable, NpcFitTable } from './AnimCompatTables'
+import type { PreviewAnimOption } from './AnimCompatTables'
 import AnimationPlaybackViewer from './AnimationPlaybackViewer'
 import './BasViewer.css'
 
@@ -131,12 +132,27 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
   const [preview, setPreview] = useState<{ animation: AnimationDef; modelId: number } | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
 
-  // Preview this BAS on an NPC's model: load the stand (else walk/run)
-  // sequence's def and hand it to the playback modal with the model preloaded.
-  async function handlePreviewAnim(npc: NpcUse) {
+  // The dropdown choices in the NPC fit table: this BAS's movement-matrix
+  // main sequences that are actually set.
+  const previewOptions: PreviewAnimOption[] = (
+    [
+      ['Stand', draft.standAnimation],
+      ['Walk', draft.walkAnimation],
+      ['Run', draft.runningAnimation],
+      ['Teleport', draft.teleportingAnimation],
+    ] as const
+  )
+    .filter(([, seq]) => seq >= 0)
+    .map(([label, seq]) => ({ label: `${label} · anim ${seq}`, seqId: seq }))
+
+  // Preview this BAS on an NPC's model: load the picked sequence's def (the
+  // dropdown always supplies one; the stand/walk/run fallback covers the
+  // shared table's plain-button path) and hand it to the playback modal with
+  // the model preloaded.
+  async function handlePreviewAnim(npc: NpcUse, pickedSeqId?: number) {
     if (!cacheRoot) return
-    const seqId = [draft.standAnimation, draft.walkAnimation, draft.runningAnimation].find((s) => s >= 0)
-    if (seqId == null) {
+    const seqId = pickedSeqId ?? [draft.standAnimation, draft.walkAnimation, draft.runningAnimation].find((s) => s >= 0)
+    if (seqId == null || seqId < 0) {
       setPreviewError('This BAS has no stand/walk/run sequence to preview.')
       return
     }
@@ -385,6 +401,7 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
               emptyText="No NPC uses this BAS as its render anim."
               onNavigate={onNavigate}
               onPreviewAnim={handlePreviewAnim}
+              previewOptions={previewOptions}
             />
             <h4 className="anim-fit-subhead">Items (weapon stance)</h4>
             <p className="map-sprite-hint">

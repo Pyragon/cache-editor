@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { ItemIcon, SortableTh } from './defFields'
 import type { SortState } from './defFields'
 import type { ItemUse, NpcUse, SpotUse } from '../loaders/animCompat'
@@ -9,12 +10,102 @@ import './AnimCompatTables.css'
 // skeleton alone matches thousands of NPCs — with the filter as the way in.
 const ROW_CAP = 400
 
-export function NpcFitTable({ npcs, emptyText, onNavigate, onPreviewAnim }: {
+/** One previewable sequence choice for the NpcFitTable dropdown (BAS viewer:
+    the movement-matrix mains — Stand, Walk, Run, Teleport). */
+export type PreviewAnimOption = { label: string; seqId: number }
+
+// "View Anim ▾" — same outside-click-to-close pattern as QuestViewer's
+// BadgeDropdown, reusing its shared .badge-dropdown-* classes. Unlike that
+// one, the menu portals into document.body as position:fixed at the
+// trigger's viewport rect: the fit tables live inside overflow scroll
+// containers that clip an absolute menu, and an ancestor transform/filter
+// re-bases fixed coords if the menu stays in the table's subtree (both
+// happened). Fixed coords go stale on scroll, so any scroll/resize simply
+// closes the menu.
+function PreviewAnimDropdown({ options, onPick }: {
+  options: PreviewAnimOption[]
+  onPick: (seqId: number) => void
+}) {
+  const [menuPos, setMenuPos] = useState<{ left: number; top: number } | { left: number; bottom: number } | null>(null)
+  const open = menuPos != null
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function onDown(e: MouseEvent) {
+      const t = e.target as Node
+      if (btnRef.current?.contains(t) || menuRef.current?.contains(t)) return
+      setMenuPos(null)
+    }
+    function onScrollOrResize() { setMenuPos(null) }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('scroll', onScrollOrResize, true)
+    window.addEventListener('resize', onScrollOrResize)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('scroll', onScrollOrResize, true)
+      window.removeEventListener('resize', onScrollOrResize)
+    }
+  }, [open])
+
+  function toggle() {
+    if (open) { setMenuPos(null); return }
+    const rect = btnRef.current!.getBoundingClientRect()
+    // keep the menu on-screen: clamp the left edge, flip upward when the
+    // estimated height (~33px/item) wouldn't fit below the trigger
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - 200))
+    const estHeight = options.length * 33 + 10
+    if (rect.bottom + 6 + estHeight > window.innerHeight) {
+      setMenuPos({ left, bottom: window.innerHeight - rect.top + 6 })
+    } else {
+      setMenuPos({ left, top: rect.bottom + 6 })
+    }
+  }
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className="field-link-btn"
+        title="Preview one of this BAS's sequences on this NPC's model"
+        onClick={toggle}
+      >
+        View Anim <span className="badge-dropdown-caret">▾</span>
+      </button>
+      {menuPos && createPortal(
+        <div
+          ref={menuRef}
+          className="badge-dropdown-menu anim-preview-menu"
+          style={{ position: 'fixed', top: 'auto', ...menuPos }}
+        >
+          {options.map((opt) => (
+            <button
+              key={opt.label}
+              type="button"
+              className="badge-dropdown-item"
+              onClick={() => { setMenuPos(null); onPick(opt.seqId) }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+export function NpcFitTable({ npcs, emptyText, onNavigate, onPreviewAnim, previewOptions }: {
   npcs: NpcUse[]
   emptyText: string
   onNavigate?: (entryName: string, itemId: number) => void
   /** When set, rows get a "View Anim" button (e.g. preview the open animation on this NPC's model). */
-  onPreviewAnim?: (npc: NpcUse) => void
+  onPreviewAnim?: (npc: NpcUse, seqId?: number) => void
+  /** When also set, the button becomes a dropdown of these sequences and
+      onPreviewAnim receives the picked seqId (BAS viewer: stand/walk/run/teleport). */
+  previewOptions?: PreviewAnimOption[]
 }) {
   const [filter, setFilter] = useState('')
   const [sort, setSort] = useState<SortState>({ key: 'id', dir: 1 })
@@ -87,14 +178,23 @@ export function NpcFitTable({ npcs, emptyText, onNavigate, onPreviewAnim }: {
                       </button>
                     )}
                     {onPreviewAnim && n.modelIds.length > 0 && (
-                      <button
-                        type="button"
-                        className="field-link-btn"
-                        title={`Preview this animation on model ${n.modelIds[0]}`}
-                        onClick={() => onPreviewAnim(n)}
-                      >
-                        View Anim
-                      </button>
+                      previewOptions ? (
+                        previewOptions.length > 0 && (
+                          <PreviewAnimDropdown
+                            options={previewOptions}
+                            onPick={(seqId) => onPreviewAnim(n, seqId)}
+                          />
+                        )
+                      ) : (
+                        <button
+                          type="button"
+                          className="field-link-btn"
+                          title={`Preview this animation on model ${n.modelIds[0]}`}
+                          onClick={() => onPreviewAnim(n)}
+                        >
+                          View Anim
+                        </button>
+                      )
                     )}
                   </span>
                 </td>

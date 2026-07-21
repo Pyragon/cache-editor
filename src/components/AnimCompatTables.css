@@ -5,6 +5,14 @@
   max-width: 320px;
 }
 
+/* The preview menu portals into document.body as position:fixed (set inline
+   from the trigger's rect) so it floats above the table's scroll container
+   instead of being clipped by it — don't let long "Walk · anim 12345" labels
+   wrap either. */
+.anim-preview-menu .badge-dropdown-item {
+  white-space: nowrap;
+}
+
 .anim-fit-subhead {
   margin: 14px 0 8px;
   font-size: 12px;
