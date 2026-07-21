@@ -17,6 +17,8 @@ export type BillboardData = {
   id: number
   def: BillboardDef
   texturesDir: FileSystemDirectoryHandle | null
+  /** Cache root, for the session-wide used-by-models scan (billboardUsage.ts). */
+  rootHandle: FileSystemDirectoryHandle | null
 }
 
 const NEW_BILLBOARD_DEFAULTS: Omit<BillboardDef, 'id'> = {
@@ -46,7 +48,7 @@ const loader: CacheLoader = {
       }
     }
 
-    return { id: item.id, def, texturesDir } satisfies BillboardData
+    return { id: item.id, def, texturesDir, rootHandle: rootHandle ?? null } satisfies BillboardData
   },
 
   async saveItem(dirHandle, item, data) {

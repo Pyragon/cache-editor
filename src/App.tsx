@@ -1454,7 +1454,7 @@ function App() {
                 : defaultsContent != null
                 ? <DefaultsViewer data={defaultsContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : billboardContent != null
-                ? <BillboardViewer data={billboardContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <BillboardViewer data={billboardContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : skyboxContent != null
                 ? <SkyboxViewer data={skyboxContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : mapAreaContent != null

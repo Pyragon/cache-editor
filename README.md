@@ -50,7 +50,7 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 26 | `texture_definitions` | ✅ **Done** | Full field editor with live material preview + HSL16 colour swatch — shares the textures viewer; flags repack via cryogen's `TextureDefinitions.encode()` (byte-identical round-trip) |
 | 27 | `particles` | ✅ **Done** | Producer/type editor with a live client-faithful effect preview (emission windows, face-normal cones, effectors) at selectable 10/25/50 FPS; model viewer renders emitters on their carrier faces |
 | 28 | `defaults` | ✅ **Done** | entity / equipment blobs |
-| 29 | `billboards` | ✅ **Done** | material id + size + shape/blend, live material preview, used-by-models list (scripts/scan-billboard-usage.mjs) |
+| 29 | `billboards` | ✅ **Done** | material id + size + shape/blend, live material preview, used-by-models jump links (in-editor session-cached scan of every model binary) |
 | 30 | `native_libraries` | ✅ **Done** | File browser — view/download/replace/add. `.dll`/`.exe` files can't be touched due to a browser platform restriction (see notice in the viewer) |
 | 31 | `shaders` | Not implemented upstream | |
 | 32 | `normal_fonts` | Merged into **Fonts** | Glyph bitmaps for the real typefaces — dumped by cryogen's FontGlyphs to `fonts/glyphs/normal/`, served by the `font_metrics` entry (no separate sidebar row). |

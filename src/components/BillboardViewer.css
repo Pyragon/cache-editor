@@ -13,11 +13,8 @@
   filter: brightness(1.35);
 }
 
-.billboard-used-by {
-  margin: 0;
+/* model-link chips reuse .anim-fit-models; just relax its width cap here,
+   some billboards are referenced by hundreds of models */
+.item-section .anim-fit-models.billboard-used-by {
   max-width: 620px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--text-dim);
-  word-break: break-word;
 }
