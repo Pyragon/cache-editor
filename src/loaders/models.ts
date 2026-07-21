@@ -155,6 +155,10 @@ export type ModelData = {
   // bases index vertex groups by these ids via their `labels` arrays. Absent
   // on models with no skeletal animation (most static scenery).
   vertexSkins: Uint8Array | null
+  // Per-face group label (darkan Mesh.kt faceGroups) — the type 5 (alpha) and
+  // 7 (colour) animation transforms address face groups by these. −1 =
+  // unlabelled (the client's merge default for parts without face skins).
+  faceSkins: Int16Array | null
 }
 
 // Structural mirror of ParticleType (see loaders/particles.ts) — everything the
@@ -359,7 +363,8 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   off += faceCount
   const facePriOff = off
   if (modelPriority === 255) off += faceCount
-  if (hasFaceSkins === 1) off += faceCount   // face skins (not decoded here)
+  const faceSkinsOff = off
+  if (hasFaceSkins === 1) off += faceCount
   const vertSkinsOffset = off
   if (hasVertexSkins === 1) off += vertexCount
   const faceAlphaOff = off
@@ -395,6 +400,9 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceTextures = hasFaceTextures === 1 ? new Int32Array(faceCount) : null
   const texturePos = hasFaceTextures === 1 && texturedFaceCount > 0 ? new Int16Array(faceCount) : null
   const vertexSkins = hasVertexSkins === 1 ? new Uint8Array(vertexCount) : null
+  // −1 = unlabelled, matching the client's merge default (Mesh.kt writes −1
+  // for faces from parts without skins; createFaceGroups skips group < 0)
+  const faceSkins = hasFaceSkins === 1 ? new Int16Array(faceCount) : null
 
   // Decode vertices
   decodeVertices(
@@ -410,6 +418,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceColorReader = new BinReader(data).at(faceColorOff)
   const faceTypeReader  = hasFaceRenderTypes ? new BinReader(data).at(faceRenderTypeOff) : null
   const facePriReader   = modelPriority === 255 ? new BinReader(data).at(facePriOff) : null
+  const faceSkinsReader = faceSkins ? new BinReader(data).at(faceSkinsOff) : null
   const faceAlphaReader = hasFaceAlpha === 1 ? new BinReader(data).at(faceAlphaOff) : null
   const faceTexReader   = faceTextures ? new BinReader(data).at(faceTexturesOff) : null
   const texPosReader    = texturePos ? new BinReader(data).at(texturePosOff) : null
@@ -418,6 +427,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     faceColor[face] = faceColorReader.u16()
     if (faceTypeReader) faceType![face] = faceTypeReader.s8()
     if (facePriReader) facePriorities![face] = facePriReader.s8()
+    if (faceSkinsReader) faceSkins![face] = faceSkinsReader.u8()
     if (faceAlphaReader) faceAlpha[face] = faceAlphaReader.s8()
     if (faceTexReader) faceTextures![face] = faceTexReader.u16() - 1
     if (texPosReader) {
@@ -594,6 +604,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     effectors,
     effectorTypes: new Map(),
     vertexSkins,
+    faceSkins,
   }
 }
 
@@ -626,7 +637,8 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceTypeOff = off; off += fc    // face index type bytes (one per face)
   const facePriOff = off
   if (modelPriority === 255) off += fc
-  if (hasFaceSkins === 1) off += fc     // face skins (not decoded here)
+  const faceSkinsOff = off
+  if (hasFaceSkins === 1) off += fc
   const faceInfoOff = off
   if (hasFaceInfo === 1) off += fc
   const vertSkinsOff = off
@@ -654,6 +666,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceTextures = hasFaceInfo === 1 ? new Int32Array(fc) : null
   const texturePos = hasFaceInfo === 1 ? new Int16Array(fc) : null
   const vertexSkins = hasVertexSkins === 1 ? new Uint8Array(vc) : null
+  const faceSkins = hasFaceSkins === 1 ? new Int16Array(fc) : null
 
   // Decode vertices
   decodeVertices(
@@ -669,6 +682,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceColorReader = new BinReader(data).at(faceColorOff)
   const faceInfoReader  = hasFaceInfo === 1 ? new BinReader(data).at(faceInfoOff) : null
   const facePriReader   = modelPriority === 255 ? new BinReader(data).at(facePriOff) : null
+  const faceSkinsReader = faceSkins ? new BinReader(data).at(faceSkinsOff) : null
   const faceAlphaReader = hasFaceAlphas === 1 ? new BinReader(data).at(faceAlphaOff) : null
 
   let anyTextured = false
@@ -688,6 +702,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
       }
     }
     if (facePriReader) facePriorities![face] = facePriReader.s8()
+    if (faceSkinsReader) faceSkins![face] = faceSkinsReader.u8()
     if (faceAlphaReader) faceAlpha[face] = faceAlphaReader.s8()
   }
 
@@ -754,6 +769,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     effectors: null,
     effectorTypes: new Map(),
     vertexSkins,
+    faceSkins,
   }
 }
 
@@ -799,6 +815,9 @@ export function mergeModels(models: ModelData[]): ModelData {
   const texturePos = anyTexturePos ? new Int16Array(faceCount).fill(-1) : null
   const anyVertexSkins = models.some((m) => m.vertexSkins)
   const vertexSkins = anyVertexSkins ? new Uint8Array(vertexCount) : null
+  const anyFaceSkins = models.some((m) => m.faceSkins)
+  // −1 for faces from parts without skins, per Mesh.kt's merge
+  const faceSkins = anyFaceSkins ? new Int16Array(faceCount).fill(-1) : null
 
   const textureRenderTypes = texturedFaceCount > 0 ? new Int8Array(texturedFaceCount) : null
   const textureP = texturedFaceCount > 0 ? new Int32Array(texturedFaceCount) : null
@@ -839,6 +858,7 @@ export function mergeModels(models: ModelData[]): ModelData {
       triangleZ[fOff + f] = m.triangleZ[f] + vOff
       faceColor[fOff + f] = m.faceColor[f]
       faceAlpha[fOff + f] = m.faceAlpha[f]
+      if (faceSkins && m.faceSkins) faceSkins[fOff + f] = m.faceSkins[f]
       if (facePriorities) facePriorities[fOff + f] = m.facePriorities?.[f] ?? m.priority
       if (faceType) faceType[fOff + f] = m.faceType?.[f] ?? 0
       if (faceTextures && m.faceTextures) faceTextures[fOff + f] = m.faceTextures[f]
@@ -906,6 +926,7 @@ export function mergeModels(models: ModelData[]): ModelData {
     effectors: effectors.length > 0 ? effectors : null,
     effectorTypes,
     vertexSkins,
+    faceSkins,
   }
 }
 

@@ -2,17 +2,17 @@ import type { ModelData } from './models'
 import type { AnimationFrameBaseDef } from './animation_frame_bases'
 import type { AnimationFrameDef } from './animation_frame_sets'
 
-// Applies one animation frame's bone-group transforms to a model's vertices —
-// ports darkan ModelSM.kt's animateTransform (the non-interpolated, single-
-// frame playback path; interpolateFrames' tweened blend between two frames
-// and the BAS equipment-matrix branches inside animateTransform, both gated
-// on data this project doesn't build yet, are NOT ported — see the TODO
-// note where they'd hook in). Only transform types that move vertices are
-// implemented (0 origin marker, 1 translate, 2 rotate, 3 scale); types 5/7
-// (face alpha/colour) and 8/9/10 (billboard offset/rotate/scale) are
-// face-group/billboard-group effects, not vertex deformation, and are
-// skipped — a model played through this only shows its skeletal pose, not
-// those secondary effects.
+// Applies one animation frame's bone-group transforms to a model — ports
+// darkan ModelSM.kt's animateTransform (the non-interpolated, single-frame
+// playback path; interpolateFrames' tweened blend between two frames and the
+// BAS equipment-matrix branches inside animateTransform, both gated on data
+// this project doesn't build yet, are NOT ported — see the TODO note where
+// they'd hook in). Implemented transform types: 0 origin marker, 1 translate,
+// 2 rotate, 3 scale (vertex groups from vertexSkins), plus the face-group
+// effects 5 (alpha: alpha += delta·8, clamped 0..255 where 255 = invisible)
+// and 7 (colour: HSL16 hue += Δx wrapped &0x3f, sat += Δy clamped 0..7,
+// light += Δz clamped 0..127), addressed via faceSkins. Types 8/9/10
+// (billboard offset/rotate/scale) remain unimplemented.
 //
 // Fixed-point convention matches the client exactly: a 14-bit sine/cosine
 // table (SINE/COSINE, 16384 entries covering one full turn) and a lazy "upscale"
@@ -132,7 +132,9 @@ function applyTransform(state: PoseState, vertexCount: number, type: number, ver
       state.z[v] += state.originZ
     }
   }
-  // types 5/7/8/9/10 (alpha, colour, billboard offset/rotate/scale) intentionally not implemented — see file header.
+  // types 5/7 (face alpha/colour) are handled by applyAnimationFrame itself
+  // (they touch face groups, not this vertex state); 8/9/10 (billboard
+  // offset/rotate/scale) remain unimplemented — see file header.
 }
 
 // Type 2/9 store the raw pre-`<<2 & 0x3fff` smart delta (see
@@ -143,16 +145,39 @@ function resolveTransformDelta(type: number, raw: number): number {
   return raw
 }
 
-export type PosedVertices = { x: Int32Array; y: Int32Array; z: Int32Array }
+export type PosedVertices = {
+  x: Int32Array
+  y: Int32Array
+  z: Int32Array
+  /** Posed per-face alphas, only when a type-5 transform ran (255 = invisible,
+   *  i.e. −1 when read back signed like ModelData.faceAlpha). */
+  faceAlpha: Int8Array | null
+  /** Posed per-face HSL16 colours, only when a type-7 transform ran. */
+  faceColor: Uint16Array | null
+}
 
 // Applies every transform in one frame to a model's vertices, in order, and
 // returns the posed positions (same array length/order as model.vertexX/Y/Z,
 // same coordinate scale — already downscaled back from the transform math's
-// internal fixed-point precision).
+// internal fixed-point precision) plus posed face alphas/colours when the
+// frame carried type 5/7 face-group transforms.
 export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameBaseDef, frame: AnimationFrameDef): PosedVertices | null {
   if (!model.vertexSkins || frame.rawFallbackBytes) return null
 
   const vertexGroups = buildVertexGroups(model.vertexSkins, model.vertexCount)
+  // Face groups (darkan Mesh.createFaceGroups): label −1 = unlabelled.
+  let faceGroups: number[][] | null = null
+  if (model.faceSkins) {
+    let maxGroup = -1
+    for (let f = 0; f < model.faceCount; f++) if (model.faceSkins[f] > maxGroup) maxGroup = model.faceSkins[f]
+    if (maxGroup >= 0) {
+      faceGroups = Array.from({ length: maxGroup + 1 }, () => [])
+      for (let f = 0; f < model.faceCount; f++) {
+        const group = model.faceSkins[f]
+        if (group >= 0) faceGroups[group].push(f)
+      }
+    }
+  }
 
   function verticesForSlot(slot: number): number[] {
     const labels = frameBase.labels[slot] ?? []
@@ -164,6 +189,17 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
     return vertices
   }
 
+  function facesForSlot(slot: number): number[] {
+    if (!faceGroups) return []
+    const labels = frameBase.labels[slot] ?? []
+    const faces: number[] = []
+    for (const label of labels) {
+      const group = faceGroups[label]
+      if (group) faces.push(...group)
+    }
+    return faces
+  }
+
   const state: PoseState = {
     x: Int32Array.from(model.vertexX),
     y: Int32Array.from(model.vertexY),
@@ -172,23 +208,56 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
     withinOrigin: false,
     upscaled: false,
   }
+  // Copied lazily on the first face-group transform.
+  let faceAlpha: Int8Array | null = null
+  let faceColor: Uint16Array | null = null
 
   for (let i = 0; i < frame.transformationIndices.length; i++) {
     const slot = frame.transformationIndices[i]
     const type = frameBase.transformationTypes[slot]
 
-    // Before certain transforms, the client re-establishes the current
-    // origin from a DIFFERENT slot's live vertex positions (a zero-delta
-    // type-0 pass) — darkan Model.kt's single-frame driver, keyed by
-    // frame.skippedReferences[i] (confusingly also called "labels" in
-    // AnimFrame.kt, NOT the same thing as AnimationFrameBaseDef.labels).
-    // Skipping this lets the origin drift stale across branches of the
-    // skeleton (e.g. legs -> neck), which is what was producing the
-    // stretched/spiked geometry on models whose hierarchy isn't purely
-    // linear (confirmed against a live terrorbird capture).
+    // Before EVERY transform entry (regardless of its type — the client's
+    // driver in Model.kt runs this unconditionally), re-establish the
+    // current origin from a DIFFERENT slot's live vertex positions (a
+    // zero-delta type-0 pass), keyed by frame.skippedReferences[i]
+    // (confusingly also called "labels" in AnimFrame.kt, NOT the same thing
+    // as AnimationFrameBaseDef.labels). Skipping this lets the origin drift
+    // stale across branches of the skeleton (e.g. legs -> neck, or across a
+    // face-effect entry), which produced stretched/spiked geometry
+    // (terrorbird capture) and gaping chathead jaws when type-5 blinks sat
+    // between rotation entries.
     const skipSlot = frame.skippedReferences[i]
     if (skipSlot != null && skipSlot !== -1) {
       applyTransform(state, model.vertexCount, 0, verticesForSlot(skipSlot), 0, 0, 0)
+    }
+
+    // Face-group effects (darkan ModelSM.animateTransform types 5/7).
+    if (type === 5) {
+      faceAlpha ??= Int8Array.from(model.faceAlpha)
+      const delta = frame.transformationX[i]
+      for (const f of facesForSlot(slot)) {
+        let alpha = (faceAlpha[f] & 0xff) + delta * 8
+        if (alpha < 0) alpha = 0
+        else if (alpha > 255) alpha = 255
+        faceAlpha[f] = alpha
+      }
+      continue
+    }
+    if (type === 7) {
+      faceColor ??= Uint16Array.from(model.faceColor)
+      const dh = frame.transformationX[i], ds = frame.transformationY[i], dl = frame.transformationZ[i]
+      for (const f of facesForSlot(slot)) {
+        const hsl = faceColor[f] & 0xffff
+        const h = (dh + ((hsl >> 10) & 0x3f)) & 0x3f
+        let s = ((hsl >> 7) & 0x7) + ds
+        if (s < 0) s = 0
+        else if (s > 7) s = 7
+        let l = (hsl & 0x7f) + dl
+        if (l < 0) l = 0
+        else if (l > 127) l = 127
+        faceColor[f] = (h << 10) | (s << 7) | l
+      }
+      continue
     }
 
     const x = resolveTransformDelta(type, frame.transformationX[i])
@@ -205,5 +274,5 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
     }
   }
 
-  return { x: state.x, y: state.y, z: state.z }
+  return { x: state.x, y: state.y, z: state.z, faceAlpha, faceColor }
 }

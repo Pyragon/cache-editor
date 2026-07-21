@@ -322,8 +322,10 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     const uvs       = new Float32Array(validFaces * 6)
     // Which model vertex each buffer corner came from — the geometry is
     // non-indexed (corners duplicated per face), so this is the map an
-    // animated pose needs to rewrite positions in place.
+    // animated pose needs to rewrite positions in place. cornerFace maps
+    // each corner-triple back to its model face (type 5/7 face effects).
     const cornerVertex = new Int32Array(validFaces * 3)
+    const cornerFace = new Int32Array(validFaces)
 
     let minX = Infinity, maxX = -Infinity
     let minY = Infinity, maxY = -Infinity
@@ -571,6 +573,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
         positions[base + 3] = bx; positions[base + 4] = by; positions[base + 5] = bz
         positions[base + 6] = cx; positions[base + 7] = cy; positions[base + 8] = cz
         cornerVertex[vert] = ia; cornerVertex[vert + 1] = ib; cornerVertex[vert + 2] = ic
+        cornerFace[vert / 3] = f
 
         for (const x of [ax, bx, cx]) { if (x < minX) minX = x; if (x > maxX) maxX = x }
         for (const y of [ay, by, cy]) { if (y < minY) minY = y; if (y > maxY) maxY = y }
@@ -942,6 +945,9 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     // keeps the camera from jumping between frames. The length guard drops a
     // stale pose left over from a previously loaded model.
     const positionAttr = geo.getAttribute('position') as THREE.BufferAttribute
+    // whether the last applied pose rewrote face colours (so a later pose
+    // without colour effects restores the base colours exactly once)
+    let faceFxColors = false
     function applyPosed(posed: PosedVertices | null) {
       const valid = posed != null && posed.x.length === vertexCount ? posed : null
       const X = valid ? valid.x : vertexX
@@ -953,7 +959,43 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
         positions[i * 3 + 1] = -Y[v]
         positions[i * 3 + 2] = -Z[v]
       }
+
+      // Type-5 face alpha: collapse now-invisible faces to a point (a
+      // degenerate triangle never rasterises). Faces hidden at REST were
+      // never built into the buffer, so a type-5 reveal can't show them
+      // here — the chathead preview rebuilds its geometry per frame and
+      // covers that case.
+      const posedFaceAlpha = valid?.faceAlpha ?? null
+      if (posedFaceAlpha) {
+        for (let t = 0; t < cornerFace.length; t++) {
+          if (posedFaceAlpha[cornerFace[t]] === -1) {
+            const base = t * 9
+            for (let k = 0; k < 9; k++) positions[base + k] = 0
+          }
+        }
+      }
       positionAttr.needsUpdate = true
+
+      // Type-7 face colour: rewrite the colour buffer from the posed HSLs
+      // (plain-colour path only — item-icon poses never animate).
+      const posedFaceColor = valid?.faceColor ?? null
+      if (!pose && (posedFaceColor || faceFxColors)) {
+        faceFxColors = posedFaceColor != null
+        const colorAttr = geo.getAttribute('color') as THREE.BufferAttribute
+        for (let t = 0; t < cornerFace.length; t++) {
+          const f = cornerFace[t]
+          const rgb = hslToRgb(posedFaceColor ? posedFaceColor[f] & 0xffff : faceHsl(f))
+          const r = srgbToLinear(((rgb >> 16) & 0xFF) / 255)
+          const g = srgbToLinear(((rgb >> 8) & 0xFF) / 255)
+          const b = srgbToLinear((rgb & 0xFF) / 255)
+          const base = t * 9
+          colors[base]     = r; colors[base + 1] = g; colors[base + 2] = b
+          colors[base + 3] = r; colors[base + 4] = g; colors[base + 5] = b
+          colors[base + 6] = r; colors[base + 7] = g; colors[base + 8] = b
+        }
+        colorAttr.needsUpdate = true
+      }
+
       // Skip recomputing bounds per frame — the mesh IS the scene, culling
       // buys nothing, and stale rest-pose bounds could wrongly cull a pose.
       mesh.frustumCulled = false
