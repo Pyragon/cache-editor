@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ItemData, ItemDef } from '../loaders/items'
 import type { CursorDef } from '../loaders/config/cursors'
 import type { ModelDisplayParams } from './ModelViewer'
+import { RENDER_ANIM_PARAM } from '../loaders/animCompat'
 import { itemIconDisplayParams } from './modelDisplay'
 import { loadSpriteMeta, renderFrameToCanvas } from './spriteRender'
 import { NumberInput, ItemIcon, NumGrid, PairTable, ParamsTable  } from './defFields'
@@ -20,6 +21,8 @@ type Props = {
   onOpenModel?: (id: number, display?: ModelDisplayParams) => void
   /** Opens the config cursors viewer with the given cursor id selected. */
   onOpenCursor?: (id: number) => void
+  /** Generic entry/item navigation (the render-anim param's BAS link). */
+  onNavigate?: (entryName: string, itemId: number) => void
 }
 
 // The Equipment Models fields that hold model ids (the wear offsets are
@@ -163,7 +166,7 @@ const UNKNOWN_FIELDS: NumFieldDef[] = [
   ['realOffsetY', 'realOffsetY'],
 ]
 
-export default function ItemViewer({ data, onSave, onDirtyChange, onOpenModel, onOpenCursor }: Props) {
+export default function ItemViewer({ data, onSave, onDirtyChange, onOpenModel, onOpenCursor, onNavigate }: Props) {
   const [draft, setDraft] = useState<ItemDef>(data.item)
   const [paramRows, setParamRows] = useState<ParamRow[]>(() => toParamRows(data.item.clientScriptData))
   const [newQuestId, setNewQuestId] = useState('')
@@ -471,6 +474,22 @@ export default function ItemViewer({ data, onSave, onDirtyChange, onOpenModel, o
           onSet={setParamRow}
           onAdd={() => { setParamRows((prev) => [...prev, { key: '', isString: false, value: '' }]); setIsDirty(true) }}
           onRemove={(i) => { setParamRows((prev) => prev.filter((_, idx) => idx !== i)); setIsDirty(true) }}
+          rowAnnotation={(row) => {
+            // Param 644 is the wielded render anim (BAS id) — the reason the
+            // BAS viewer's "Items (weapon stance)" table lists this item.
+            if (row.key !== RENDER_ANIM_PARAM || row.isString) return null
+            const basId = parseInt(row.value, 10)
+            return (
+              <span className="param-row-note">
+                Render Anim
+                {onNavigate && !isNaN(basId) && basId >= 0 && (
+                  <button type="button" className="field-link-btn" onClick={() => onNavigate('config_bas', basId)}>
+                    View BAS
+                  </button>
+                )}
+              </span>
+            )
+          }}
         />
       </section>
 

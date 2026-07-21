@@ -233,6 +233,41 @@
   max-width: 100%;
 }
 
+/* value input + optional inline note (ParamsTable rowAnnotation) side by side */
+.param-value-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.param-value-cell .cell-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* When a note is present, the input stops growing so the note gets the whole
+   leftover gap and centres in it. The note is ~150px wide, so the gap must be
+   meaningfully wider than that for centring to be visible at all — hence the
+   narrow input AND the wider table when any row carries a note. */
+.param-value-cell:has(.param-row-note) .cell-input {
+  flex: 0 0 90px;
+}
+
+.item-params-wrap:has(.param-row-note) {
+  width: 680px;
+}
+
+.param-row-note {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 .item-params-wrap {
   width: 560px;
   max-width: 100%;

@@ -247,11 +247,14 @@ export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, o
   )
 }
 
-export function ParamsTable({ rows, onSet, onAdd, onRemove }: {
+export function ParamsTable({ rows, onSet, onAdd, onRemove, rowAnnotation }: {
   rows: ParamRow[]
   onSet: (index: number, patch: Partial<ParamRow>) => void
   onAdd: () => void
   onRemove: (index: number) => void
+  /** Optional inline note rendered after a row's value input (e.g. the item
+      viewer labels param 644 "(Render Anim)" with a BAS jump link). */
+  rowAnnotation?: (row: ParamRow) => React.ReactNode
 }) {
   return (
     <>
@@ -277,8 +280,11 @@ export function ParamsTable({ rows, onSet, onAdd, onRemove }: {
                     </select>
                   </td>
                   <td>
-                    <input className="cell-input" type={row.isString ? 'text' : 'number'} value={row.value}
-                      onChange={(e) => onSet(i, { value: e.target.value })} />
+                    <span className="param-value-cell">
+                      <input className="cell-input" type={row.isString ? 'text' : 'number'} value={row.value}
+                        onChange={(e) => onSet(i, { value: e.target.value })} />
+                      {rowAnnotation?.(row)}
+                    </span>
                   </td>
                   <td><button type="button" className="row-remove-btn" onClick={() => onRemove(i)}>×</button></td>
                 </tr>

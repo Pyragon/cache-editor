@@ -1389,7 +1389,7 @@ function App() {
                 : mapSpriteContent != null
                 ? <MapSpriteViewer data={mapSpriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenObject={(id) => handleNavigateToItem('objects', id)} />
                 : itemContent != null
-                ? <ItemViewer data={itemContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenModel={handleOpenItemModel} onOpenCursor={(id) => handleNavigateToItem('config_cursors', id)} />
+                ? <ItemViewer data={itemContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenModel={handleOpenItemModel} onOpenCursor={(id) => handleNavigateToItem('config_cursors', id)} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : objectContent != null
                 ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : npcContent != null
