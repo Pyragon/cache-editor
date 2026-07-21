@@ -195,6 +195,11 @@ Still open for interfaces:
 - **`<img=n>` mod-icon text tags are stripped** rather than drawn.
 - **Two font renderers exist** — `fontRender.ts` (GameTips, single-line, `fonts/glyphs/` PNGs) and the fuller `interfacePreview.ts` implementation (sprite-frame glyphs); should consolidate on the latter.
 
+## NPCs
+
+- **Signed off Done by Cody (2026-07-21)** after the full-page pass: snapshot icons, part/full-model previews (animated, BAS emotes), chathead dialogue preview (interface 1184 + HeadE emotes incl. type-5 blinking), right-click menu preview (F2P/members semantics, real b12 font, viewer treated as combat level 138), sound players, movementType/usesCrawlWalkBAS surfaced, combat-param labels (bonuses/strBonuses are dump-time derivations of params 0-9/14/641/643/965), and jump links throughout. Known limits documented under Animations (submesh gating; fit-table preview is first-model-only).
+- **Verify the chathead emote list (`src/loaders/headAnimations.ts`) against the new gamevals dump.** The list was transcribed from darkanrs `world-server/.../dialogue/HeadE.java` (2026-07-20); cross-check the names/animation ids against the gamevals dump and reconcile any differences.
+
 ## Vars
 
 - **Triple-check the vars entry is really complete.** Marked done after diffing cryogen `VarDefinitions` against darkan `VarpType` — both decode only opcode 1 (`paramType`, cp1252 char) and opcode 5 (`clientCode`, ushort), so the dump being almost entirely `{paramType: none, clientCode: 0}` (2708/2716 empty; only var 2715 has paramType `i`, 8 have a non-zero clientCode) appears correct. Still felt suspiciously sparse — before fully trusting it, confirm: (1) the cache `FileType.VARS` table really maps to darkan's *old* `VarpType` format (darkan comments it as "Old varp format" — make sure there isn't a newer/richer varp format for rev 727 that cryogen is decoding with the wrong class), and (2) spot-check a couple of the known-meaningful varps (run energy, weight, special-attack) against a live client to be sure clientCode values line up. The real per-varp structure lives in **varbits** (`VarpbitType`), so cross-check that table too.
