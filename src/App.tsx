@@ -16,6 +16,7 @@ import ParticleViewer from './components/ParticleViewer'
 import type { TextureData } from './loaders/textures'
 import ModelPreviewModal from './components/ModelPreviewModal'
 import { resolveRetextureAssets } from './components/modelDisplay'
+import { invalidateAnimCompatIndex } from './loaders/animCompat'
 import type { ParticleData } from './loaders/particles'
 import NativeLibrariesViewer from './components/NativeLibrariesViewer'
 import type { NativeLibrariesData } from './loaders/native_libraries'
@@ -596,6 +597,13 @@ function App() {
     const entryHandle = await resolveEntryHandle(cacheHandle, getEntryPath(selectedEntry.name))
     if (!entryHandle) return
     await loader.saveItem(entryHandle, selectedItem, data)
+
+    // These def types feed the session-wide anim-compat index (BAS/animation
+    // Used By and fit tables) — drop it so the tables offer a fresh rescan
+    // instead of serving stale rows.
+    if (['animations', 'animation_frame_sets', 'config_bas', 'npcs', 'spot_animations', 'items'].includes(selectedEntry.name)) {
+      invalidateAnimCompatIndex()
+    }
 
     // In a dropped (Firefox) session nothing reached disk — the shim collected the
     // bytes instead. Hand them over as a download; several files become one zip whose

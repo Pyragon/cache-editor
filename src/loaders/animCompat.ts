@@ -60,6 +60,14 @@ export function isAnimCompatBuilding(): boolean {
   return building != null && cached == null
 }
 
+/** Drop the session cache — App calls this after saving any def type the
+ *  index reads (animations, frame sets, bas, npcs, spot anims, items), so
+ *  the Used By / fit tables offer a fresh scan instead of stale rows. */
+export function invalidateAnimCompatIndex(): void {
+  cached = null
+  building = null
+}
+
 async function listJsonIds(dir: FileSystemDirectoryHandle): Promise<number[]> {
   const ids: number[] = []
   for await (const handle of dir.values()) {

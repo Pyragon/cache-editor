@@ -34,7 +34,11 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
   const [previewModelId, setPreviewModelId] = useState<number | null>(null)
   // null = still resolving, -1 = no frames / unresolvable
   const [skeleton, setSkeleton] = useState<number | null>(null)
-  const [compatReady, setCompatReady] = useState(peekAnimCompatIndex() != null)
+  // Bumped when a scan completes; readiness itself is derived from
+  // peekAnimCompatIndex() each render so a save that invalidates the index
+  // (App does this for anim/bas/npc/item/spot saves) falls back to the scan
+  // button instead of reading a vanished cache.
+  const [compatVersion, setCompatVersion] = useState(0)
   const [compatProgress, setCompatProgress] = useState<{ done: number; total: number } | null>(null)
 
   useEffect(() => {
@@ -74,14 +78,14 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
     }
     resolve()
     return () => { cancelled = true }
-  }, [data, compatReady])
+  }, [data, compatVersion])
 
   async function handleCompatScan() {
     if (!data.rootHandle) return
     setCompatProgress({ done: 0, total: 0 })
     try {
       await buildAnimCompatIndex(data.rootHandle, (done, total) => setCompatProgress({ done, total }))
-      setCompatReady(true)
+      setCompatVersion((v) => v + 1)
     } finally {
       setCompatProgress(null)
     }
@@ -312,7 +316,7 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
             <p className="map-sprite-none">
               Scanning… {compatProgress.done.toLocaleString()}{compatProgress.total > 0 ? ` / ${compatProgress.total.toLocaleString()}` : ''}
             </p>
-          ) : !compatReady ? (
+          ) : peekAnimCompatIndex() == null ? (
             <div className="map-sprite-uses-scan">
               <button type="button" className="cursor-pick-btn" disabled={!data.rootHandle} onClick={handleCompatScan}>
                 Scan compatibility
