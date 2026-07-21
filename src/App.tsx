@@ -13,8 +13,9 @@ import type { ModelDisplayParams } from './components/ModelViewer'
 import type { ModelData } from './loaders/models'
 import TextureViewer from './components/TextureViewer'
 import ParticleViewer from './components/ParticleViewer'
-import { loadTextureDef, loadTexturePng } from './loaders/textures'
 import type { TextureData } from './loaders/textures'
+import ModelPreviewModal from './components/ModelPreviewModal'
+import { resolveRetextureAssets } from './components/modelDisplay'
 import type { ParticleData } from './loaders/particles'
 import NativeLibrariesViewer from './components/NativeLibrariesViewer'
 import type { NativeLibrariesData } from './loaders/native_libraries'
@@ -292,6 +293,8 @@ function App() {
   // Inventory-icon pose for the model viewer, set when arriving via an item's
   // "View Model" link and cleared again by any manual navigation.
   const [modelDisplay, setModelDisplay] = useState<ModelDisplayParams | null>(null)
+  // Item "View Model" preview modal (posed when display params are present).
+  const [itemModelPreview, setItemModelPreview] = useState<{ modelId: number; display: ModelDisplayParams | null } | null>(null)
   const [filter, setFilter] = useState('')
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set())
   const [isContentDirty, setIsContentDirty] = useState(false)
@@ -910,38 +913,22 @@ function App() {
     return () => window.removeEventListener('popstate', onPop)
   }, [])
 
-  // An item's "View Model": navigate, then pose the viewer with the item's
-  // inventory-icon display params (set after navigating — the navigation
-  // handlers clear any previous pose).
+  // An item's "View Model": open the model in a preview modal (posed with the
+  // item's inventory-icon display params when given) instead of navigating
+  // away from the item — the modal offers "Open in Models" for the full page.
   async function handleOpenItemModel(id: number, display?: ModelDisplayParams) {
-    if (!(await handleNavigateToItem('models', id))) return
-    if (!display) return // equipment-model links: plain navigation, no pose
+    const enriched = display && cacheHandle ? await resolveRetextureAssets(cacheHandle, display) : display ?? null
+    setItemModelPreview({ modelId: id, display: enriched })
+  }
 
-    // Texture-swap targets aren't among the textures the model's own loader
-    // fetched, so pull their rendered PNGs (and scroll speeds) here.
-    if (display.retextureTo.length > 0 && cacheHandle) {
-      const blobs = new Map<number, Blob>()
-      const speeds = new Map<number, { u: number; v: number }>()
-      try {
-        const texturesDir = await cacheHandle.getDirectoryHandle('textures')
-        await Promise.all(display.retextureTo.map(async (texId) => {
-          const png = await loadTexturePng(texturesDir, texId)
-          if (png) blobs.set(texId, png)
-        }))
-      } catch { /* textures not dumped — swapped faces fall back to flat colour */ }
-      try {
-        const defsDir = await cacheHandle.getDirectoryHandle('texture_definitions')
-        await Promise.all(display.retextureTo.map(async (texId) => {
-          const def = await loadTextureDef(defsDir, texId)
-          if (def && (def.textureSpeedU !== 0 || def.textureSpeedV !== 0)) {
-            speeds.set(texId, { u: def.textureSpeedU, v: def.textureSpeedV })
-          }
-        }))
-      } catch { /* no definitions dumped — swapped textures stay still */ }
-      display = { ...display, retextureBlobs: blobs, retextureSpeeds: speeds }
-    }
-
-    setModelDisplay(display)
+  // The modal's escape hatch: real navigation to the models page, posed like
+  // the modal was (set after navigating — navigation clears any previous pose).
+  async function handleOpenPreviewInModels() {
+    const preview = itemModelPreview
+    if (!preview) return
+    setItemModelPreview(null)
+    if (!(await handleNavigateToItem('models', preview.modelId))) return
+    if (preview.display) setModelDisplay(preview.display)
   }
 
   // Folder problems are modal rather than a line of text in the sidebar: they always
@@ -1475,6 +1462,17 @@ function App() {
         </main>
       </div>
       {confirmDialogElement}
+      {itemModelPreview && cacheHandle && (
+        <ModelPreviewModal
+          title={`Model ${itemModelPreview.modelId}${itemModelPreview.display ? ` — ${itemModelPreview.display.label}` : ''}`}
+          modelId={itemModelPreview.modelId}
+          display={itemModelPreview.display}
+          rootHandle={cacheHandle}
+          openLabel="Open in Models"
+          onOpen={handleOpenPreviewInModels}
+          onClose={() => setItemModelPreview(null)}
+        />
+      )}
     </div>
   )
 }

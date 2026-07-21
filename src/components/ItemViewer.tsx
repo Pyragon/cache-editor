@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ItemData, ItemDef } from '../loaders/items'
 import type { CursorDef } from '../loaders/config/cursors'
 import type { ModelDisplayParams } from './ModelViewer'
+import { itemIconDisplayParams } from './modelDisplay'
 import { loadSpriteMeta, renderFrameToCanvas } from './spriteRender'
 import { NumberInput, ItemIcon, NumGrid, PairTable, ParamsTable  } from './defFields'
 import type { NumFieldDef } from './defFields'
@@ -358,27 +359,9 @@ export default function ItemViewer({ data, onSave, onDirtyChange, onOpenModel, o
           onChange={(k, v) => set(k, v)}
           links={{ modelId: onOpenModel && {
             label: 'View',
-            // Carry the item's display params so the model viewer can pose the
-            // model the way the client draws this item's inventory icon.
-            // Defaults per client ItemDefinitions (zoom 2000, resize 128).
-            onOpen: (id) => onOpenModel(id, {
-              label: `item ${data.id}`,
-              zoom: Number(draft.modelZoom ?? 2000) || 2000,
-              rotationX: Number(draft.modelRotationX ?? 0),
-              rotationY: Number(draft.modelRotationY ?? 0),
-              rotationZ: Number(draft.modelRotationZ ?? 0),
-              offsetX: Number(draft.modelOffsetX ?? 0),
-              offsetY: Number(draft.modelOffsetY ?? 0),
-              resizeX: Number(draft.resizeX ?? 128) || 128,
-              resizeY: Number(draft.resizeY ?? 128) || 128,
-              resizeZ: Number(draft.resizeZ ?? 128) || 128,
-              ambient: Number(draft.ambient ?? 0),
-              contrast: Number(draft.contrast ?? 0),
-              recolorFrom: (draft.originalModelColours as number[] | undefined) ?? [],
-              recolorTo: (draft.modifiedModelColours as number[] | undefined) ?? [],
-              retextureFrom: (draft.originalTextureIds as number[] | undefined) ?? [],
-              retextureTo: (draft.modifiedTextureIds as number[] | undefined) ?? [],
-            }),
+            // Carry the item's display params so the model preview can pose
+            // the model the way the client draws this item's inventory icon.
+            onOpen: (id) => onOpenModel(id, itemIconDisplayParams(draft as Record<string, unknown>, `item ${data.id}`)),
           } }}
         />
       </section>

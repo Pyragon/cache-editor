@@ -207,10 +207,13 @@ export function NpcFitTable({ npcs, emptyText, onNavigate, onPreviewAnim, previe
   )
 }
 
-export function ItemUseTable({ items, emptyText, onNavigate }: {
+export function ItemUseTable({ items, emptyText, onNavigate, onPreviewModel }: {
   items: ItemUse[]
   emptyText: string
   onNavigate?: (entryName: string, itemId: number) => void
+  /** When set, rows swap the "View" navigation for a "View Model" button
+      that previews the item's inventory model in a modal. */
+  onPreviewModel?: (item: ItemUse) => void
 }) {
   const [filter, setFilter] = useState('')
   const [sort, setSort] = useState<SortState>({ key: 'id', dir: 1 })
@@ -262,7 +265,11 @@ export function ItemUseTable({ items, emptyText, onNavigate }: {
                 <td>{it.name}</td>
                 <td className="map-sprite-use-id">{it.id}</td>
                 <td>
-                  {onNavigate && (
+                  {onPreviewModel ? (
+                    <button type="button" className="field-link-btn" title={`Preview item ${it.id}'s inventory model`} onClick={() => onPreviewModel(it)}>
+                      View Model
+                    </button>
+                  ) : onNavigate && (
                     <button type="button" className="field-link-btn" title={`Open item ${it.id}`} onClick={() => onNavigate('items', it.id)}>
                       View
                     </button>

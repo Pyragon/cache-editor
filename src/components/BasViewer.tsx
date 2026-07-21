@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react'
 import type { BasData, BasDef } from '../loaders/config/bas'
 import { OBJ_SLOT_COUNT } from '../loaders/config/bas'
 import { DEFAULT_PLAYER_BAS, RENDER_ANIM_PARAM, buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
-import type { NpcUse } from '../loaders/animCompat'
+import type { ItemUse, NpcUse } from '../loaders/animCompat'
+import type { ModelDisplayParams } from './ModelViewer'
+import ModelPreviewModal from './ModelPreviewModal'
+import { itemIconDisplayParams, resolveRetextureAssets } from './modelDisplay'
 import type { AnimationDef } from '../loaders/animations'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { IntListInput, NumberInput, NumGrid, PairTable, ToggleGrid } from './defFields'
@@ -127,10 +130,15 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
   const [draft, setDraft] = useState<BasDef>(data.def)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
-  const [compatReady, setCompatReady] = useState(peekAnimCompatIndex() != null)
   const [compatProgress, setCompatProgress] = useState<{ done: number; total: number } | null>(null)
   const [preview, setPreview] = useState<{ animation: AnimationDef; modelId: number } | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  // Item row "View Model": the item's inventory model, posed, in a modal.
+  const [itemPreview, setItemPreview] = useState<{ itemId: number; modelId: number; display: ModelDisplayParams } | null>(null)
+  // Readiness is derived from the module cache each render (not held in
+  // state) so a save that invalidates the index drops these tables back to
+  // the scan button instead of crashing on a vanished cache.
+  const compat = peekAnimCompatIndex()
 
   // The dropdown choices in the NPC fit table: this BAS's movement-matrix
   // main sequences that are actually set.
@@ -172,9 +180,28 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
     setCompatProgress({ done: 0, total: 0 })
     try {
       await buildAnimCompatIndex(cacheRoot, (done, total) => setCompatProgress({ done, total }))
-      setCompatReady(true)
     } finally {
+      // also the post-scan re-render that reveals the tables (compat is
+      // re-peeked every render)
       setCompatProgress(null)
+    }
+  }
+
+  // Item row "View Model": read the item def straight off disk (freshest
+  // data, no index involvement) and pose its inventory model like the items
+  // page would.
+  async function handlePreviewItemModel(item: ItemUse) {
+    if (!cacheRoot) return
+    try {
+      const dir = await resolveEntryHandle(cacheRoot, getEntryPath('items'))
+      if (!dir) throw new Error('items entry not available')
+      const file = await (await dir.getFileHandle(`${item.id}.json`)).getFile()
+      const def = JSON.parse(await file.text()) as Record<string, unknown>
+      const display = await resolveRetextureAssets(cacheRoot, itemIconDisplayParams(def, `item ${item.id}`))
+      setItemPreview({ itemId: item.id, modelId: Number(def.modelId ?? 0), display })
+      setPreviewError(null)
+    } catch {
+      setPreviewError(`Couldn't load item ${item.id} for a model preview.`)
     }
   }
 
@@ -382,14 +409,15 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
           <p className="map-sprite-none">
             Scanning… {compatProgress.done.toLocaleString()}{compatProgress.total > 0 ? ` / ${compatProgress.total.toLocaleString()}` : ''}
           </p>
-        ) : !compatReady ? (
+        ) : compat == null ? (
           <div className="map-sprite-uses-scan">
             <button type="button" className="cursor-pick-btn" disabled={!cacheRoot} onClick={handleCompatScan}>
               Scan usages
             </button>
             <span className="map-sprite-hint">
               builds the session-wide animation-compatibility index once (~68k files — shared with the
-              animation viewer's fit tables, which is why it reads more than just NPC and item defs)
+              animation viewer's fit tables, which is why it reads more than just NPC and item defs).
+              Saving a BAS, NPC, item or animation clears it for a fresh rescan.
             </span>
           </div>
         ) : (
@@ -397,7 +425,7 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
             <h4 className="anim-fit-subhead">NPCs</h4>
             {previewError && <p className="cursor-sprite-error">{previewError}</p>}
             <NpcFitTable
-              npcs={peekAnimCompatIndex()!.npcsByBas.get(data.id) ?? []}
+              npcs={compat.npcsByBas.get(data.id) ?? []}
               emptyText="No NPC uses this BAS as its render anim."
               onNavigate={onNavigate}
               onPreviewAnim={handlePreviewAnim}
@@ -409,9 +437,10 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
               {data.id === DEFAULT_PLAYER_BAS && ' — and this BAS is additionally the implicit default stance for every item without that param'}.
             </p>
             <ItemUseTable
-              items={peekAnimCompatIndex()!.itemsByBas.get(data.id) ?? []}
+              items={compat.itemsByBas.get(data.id) ?? []}
               emptyText="No item names this BAS in its render-anim param."
               onNavigate={onNavigate}
+              onPreviewModel={handlePreviewItemModel}
             />
           </>
         )}
@@ -480,6 +509,18 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
           rootHandle={cacheRoot ?? undefined}
           initialModelId={preview.modelId}
           onClose={() => setPreview(null)}
+        />
+      )}
+
+      {itemPreview && cacheRoot && (
+        <ModelPreviewModal
+          title={`Item ${itemPreview.itemId} — inventory model ${itemPreview.modelId}`}
+          modelId={itemPreview.modelId}
+          display={itemPreview.display}
+          rootHandle={cacheRoot}
+          openLabel="Open Item"
+          onOpen={() => { setItemPreview(null); onNavigate?.('items', itemPreview.itemId) }}
+          onClose={() => setItemPreview(null)}
         />
       )}
 
