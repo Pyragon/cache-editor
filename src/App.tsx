@@ -1347,7 +1347,7 @@ function App() {
                 : objectContent != null
                 ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : npcContent != null
-                ? <NpcViewer data={npcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <NpcViewer data={npcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : varbitContent != null
                 ? <VarbitViewer data={varbitContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : structContent != null

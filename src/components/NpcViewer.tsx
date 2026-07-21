@@ -9,6 +9,7 @@ type Props = {
   data: NpcData
   onSave: (data: NpcData) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
+  onNavigate?: (entryName: string, itemId: number) => void
 }
 
 const GENERAL_FIELDS: NumFieldDef[] = [
@@ -86,7 +87,7 @@ const VAR_FIELDS: NumFieldDef[] = [
 
 const DIRECTIONS = ['NORTH', 'NORTHEAST', 'EAST', 'SOUTHEAST', 'SOUTH', 'SOUTHWEST', 'WEST', 'NORTHWEST']
 
-export default function NpcViewer({ data, onSave, onDirtyChange }: Props) {
+export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate }: Props) {
   const [draft, setDraft] = useState<NpcDef>(data.npc)
   const [paramRows, setParamRows] = useState<ParamRow[]>(() => toParamRows(data.npc.parameters))
   const [newQuestId, setNewQuestId] = useState('')
@@ -180,6 +181,56 @@ export default function NpcViewer({ data, onSave, onDirtyChange }: Props) {
     set('modelTranslation', next.every((t) => t === null) ? undefined : next)
   }
 
+  // Model rows edit modelIds and modelTranslation TOGETHER — the two arrays
+  // pair positionally (opcode 121), so add/remove always splices both.
+  function setModelId(index: number, value: number) {
+    const ids = [...modelIds]
+    ids[index] = value
+    set('modelIds', ids)
+  }
+
+  function addModel() {
+    setDraft((prev) => {
+      const prevIds = (prev.modelIds as number[] | undefined) ?? []
+      const prevTr = prev.modelTranslation as (number[] | null)[] | undefined
+      const next = { ...prev, modelIds: [...prevIds, 0] }
+      if (prevTr) next.modelTranslation = [...prevIds.map((_, i) => prevTr[i] ?? null), null]
+      return next
+    })
+    setIsDirty(true)
+  }
+
+  const headModels = (draft.headModels as number[] | undefined) ?? []
+
+  function setHeadModel(index: number, value: number) {
+    const ids = [...headModels]
+    ids[index] = value
+    set('headModels', ids)
+  }
+
+  function removeHeadModel(index: number) {
+    const ids = headModels.filter((_, i) => i !== index)
+    set('headModels', ids.length === 0 ? undefined : ids)
+  }
+
+  function removeModel(index: number) {
+    setDraft((prev) => {
+      const prevIds = (prev.modelIds as number[] | undefined) ?? []
+      const prevTr = prev.modelTranslation as (number[] | null)[] | undefined
+      const ids = prevIds.filter((_, i) => i !== index)
+      const next = { ...prev }
+      if (ids.length === 0) delete next.modelIds
+      else next.modelIds = ids
+      if (prevTr) {
+        const tr = prevIds.map((_, i) => prevTr[i] ?? null).filter((_, i) => i !== index)
+        if (ids.length === 0 || tr.every((t) => t === null)) delete next.modelTranslation
+        else next.modelTranslation = tr
+      }
+      return next
+    })
+    setIsDirty(true)
+  }
+
   function addQuest() {
     const id = parseInt(newQuestId, 10)
     if (isNaN(id)) return
@@ -245,22 +296,6 @@ export default function NpcViewer({ data, onSave, onDirtyChange }: Props) {
 
       <section className="item-section">
         <h3>Models</h3>
-        <div className="object-int-list-row">
-          <span className="item-field-label">Model IDs</span>
-          <IntListInput
-            value={(draft.modelIds as number[] | undefined)}
-            onChange={(v) => set('modelIds', v)}
-            placeholder="model ids, comma-separated"
-          />
-        </div>
-        <div className="object-int-list-row">
-          <span className="item-field-label">Head Models</span>
-          <IntListInput
-            value={(draft.headModels as number[] | undefined)}
-            onChange={(v) => set('headModels', v)}
-            placeholder="head model ids, comma-separated"
-          />
-        </div>
         {modelIds.length > 0 && (
           <div className="quest-table-wrap object-shapes-wrap">
             <table className="quest-table">
@@ -270,24 +305,33 @@ export default function NpcViewer({ data, onSave, onDirtyChange }: Props) {
                   const triple = modelTranslation[i] ?? null
                   return (
                     <tr key={i}>
-                      <td className="item-stack-index">{modelId}</td>
+                      <td><NumberInput className="cell-input" value={modelId} onChange={(v) => setModelId(i, v)} /></td>
                       {triple ? (
-                        <>
-                          {([0, 1, 2] as const).map((axis) => (
-                            <td key={axis}>
-                              <NumberInput className="cell-input" value={triple[axis] ?? 0} onChange={(v) => setTranslation(i, axis,v)} />
-                            </td>
-                          ))}
-                          <td><button type="button" className="row-remove-btn" title="Remove translation" onClick={() => clearTranslation(i)}>×</button></td>
-                        </>
-                      ) : (
-                        <>
-                          <td colSpan={3} className="item-stack-index">no translation</td>
-                          <td>
-                            <button type="button" className="add-row-btn" onClick={() => addTranslation(i)}>+ Set</button>
+                        ([0, 1, 2] as const).map((axis) => (
+                          <td key={axis}>
+                            <NumberInput className="cell-input" value={triple[axis] ?? 0} onChange={(v) => setTranslation(i, axis, v)} />
                           </td>
-                        </>
+                        ))
+                      ) : (
+                        <td colSpan={3}>
+                          <button type="button" className="add-row-btn" onClick={() => addTranslation(i)}>+ Set translation</button>
+                        </td>
                       )}
+                      <td>
+                        <span className="anim-fit-actions">
+                          {onNavigate && (
+                            <button type="button" className="field-link-btn" title={`Open model ${modelId} in the model viewer`} onClick={() => onNavigate('models', modelId)}>
+                              View Model
+                            </button>
+                          )}
+                          {triple && (
+                            <button type="button" className="field-link-btn" title="Remove this model's translation" onClick={() => clearTranslation(i)}>
+                              Clear TX
+                            </button>
+                          )}
+                          <button type="button" className="row-remove-btn" title="Remove this model (its translation slot goes with it)" onClick={() => removeModel(i)}>×</button>
+                        </span>
+                      </td>
                     </tr>
                   )
                 })}
@@ -295,6 +339,35 @@ export default function NpcViewer({ data, onSave, onDirtyChange }: Props) {
             </table>
           </div>
         )}
+        <button type="button" className="add-row-btn" onClick={addModel}>+ Add model</button>
+
+        <h3 className="npc-headmodels-title">Head Models</h3>
+        <p className="tex-op-note">Chathead pieces — the client merges these into one head mesh (head/hair/beard), like the body models above.</p>
+        {headModels.length > 0 && (
+          <div className="quest-table-wrap object-shapes-wrap">
+            <table className="quest-table">
+              <thead><tr><th>Model</th><th></th></tr></thead>
+              <tbody>
+                {headModels.map((modelId, i) => (
+                  <tr key={i}>
+                    <td><NumberInput className="cell-input" value={modelId} onChange={(v) => setHeadModel(i, v)} /></td>
+                    <td>
+                      <span className="anim-fit-actions">
+                        {onNavigate && (
+                          <button type="button" className="field-link-btn" title={`Open model ${modelId} in the model viewer`} onClick={() => onNavigate('models', modelId)}>
+                            View Model
+                          </button>
+                        )}
+                        <button type="button" className="row-remove-btn" title="Remove this head model" onClick={() => removeHeadModel(i)}>×</button>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <button type="button" className="add-row-btn" onClick={() => set('headModels', [...headModels, 0])}>+ Add head model</button>
       </section>
 
       <section className="item-section">
@@ -355,14 +428,23 @@ export default function NpcViewer({ data, onSave, onDirtyChange }: Props) {
 
       <section className="item-section">
         <h3>Var Transforms</h3>
-        <NumGrid fields={VAR_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
-        <div className="object-int-list-row">
-          <span className="item-field-label">Transform To</span>
-          <IntListInput
-            value={(draft.transformTo as number[] | undefined)}
-            onChange={(v) => set('transformTo', v)}
-            placeholder="npc ids, comma-separated (-1 = none)"
-          />
+        {/* one grid, with Transform To spanning the two var columns so its
+            width always matches them exactly */}
+        <div className="item-grid">
+          {VAR_FIELDS.map(([key, label]) => (
+            <label key={key} className="item-field">
+              <span className="item-field-label" title={label}>{label}</span>
+              <NumberInput value={Number(draft[key] ?? 0)} onChange={(v) => set(key, v)} />
+            </label>
+          ))}
+          <label className="item-field npc-transform-cell">
+            <span className="item-field-label">Transform To</span>
+            <IntListInput
+              value={(draft.transformTo as number[] | undefined)}
+              onChange={(v) => set('transformTo', v)}
+              placeholder="npc ids, comma-separated (-1 = none)"
+            />
+          </label>
         </div>
       </section>
 

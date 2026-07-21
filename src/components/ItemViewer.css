@@ -63,6 +63,22 @@
   background: #1a1d26;
 }
 
+/* a second heading within one section (e.g. NPC Head Models under Models) */
+.item-section h3.npc-headmodels-title {
+  margin-top: 18px;
+}
+
+/* NPC Var Transforms: the Transform To cell spans the two var columns, so
+   its width tracks theirs exactly at any container size */
+.npc-transform-cell {
+  grid-column: 1 / span 2;
+}
+
+.npc-transform-cell .def-int-list {
+  max-width: none;
+  width: 100%;
+}
+
 .item-section h3 {
   margin: 0 0 10px;
   font-size: 13px;
