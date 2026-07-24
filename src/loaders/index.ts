@@ -28,6 +28,7 @@ import config_structs from './config/structs'
 import config_sun from './config/sun'
 import config_vars from './config/vars'
 import cs2 from './cs2'
+import cutscenes from './cutscenes'
 import defaults from './defaults'
 import enums from './enums'
 import font_metrics from './font_metrics'
@@ -81,6 +82,7 @@ const registry: Record<string, CacheLoader> = {
   config_sun,
   config_vars,
   cs2,
+  cutscenes,
   defaults,
   enums,
   font_metrics,

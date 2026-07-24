@@ -56,7 +56,7 @@ All field-renamed entries (`items`, `objects`, `npcs`, `billboards`, `texture_de
 | 32 | `normal_fonts` | Merged into **Fonts** | Glyph bitmaps for the real typefaces — dumped by cryogen's FontGlyphs to `fonts/glyphs/normal/`, served by the `font_metrics` entry (no separate sidebar row). |
 | 33 | `game_tips` | ✅ **Done** | Loading-screen tips — per-tip component scenes with a live 765×503 preview (sprites, cache-font text, sprite-assembled animated loading bars), and a visual stage table: master-rotation editor rebuilding all 36 stages, tip thumbnails, and a crossfading load simulation with editable duration; dumper + byte-verified repack in cryogen (`GameTipsDefinitions`). In-game repack verification pending (see TODO) |
 | 34 | `jagex_fonts` | Merged into **Fonts** | Single-glyph logo/wordmark entries — dumped to `fonts/glyphs/jagex/`, served by the `font_metrics` entry (no separate sidebar row). |
-| 35 | `cutscenes` | Not implemented upstream | |
+| 35 | `cutscenes` | Viewer | Scene overview canvas (camera paths + walk routes), cast list with NPC icons/links, map areas, camera keyframes, a full decoded action timeline, and a **3D playback preview**: assembles the scene from the areas recipe (the client's constructed-map chunk copy) through the maps renderer, then plays the timeline — client Bézier camera splines, NPC composites walking routes with BAS stand/walk + timeline animations, object spawns, screen fades, scrub/pause. Cryogen decode/dump/encode completed alongside (all 31 action types decoded — cryogen previously skipped the whole action list — **16/16 byte-identical round-trip**) |
 | 36 | `vorbis` | Not implemented upstream | |
 
 ### Config sub-archives

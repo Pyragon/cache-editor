@@ -35,6 +35,8 @@ import ObjectViewer from './components/ObjectViewer'
 import type { ObjectData } from './loaders/objects'
 import NpcViewer from './components/NpcViewer'
 import type { NpcData } from './loaders/npcs'
+import CutsceneViewer from './components/CutsceneViewer'
+import type { CutsceneData } from './loaders/cutscenes'
 import VarbitViewer from './components/VarbitViewer'
 import type { VarbitData } from './loaders/varbits'
 import StructViewer from './components/StructViewer'
@@ -387,6 +389,10 @@ function App() {
 
   const npcContent = selectedEntry?.name === 'npcs' && selectedItemContent != null
     ? selectedItemContent as NpcData
+    : null
+
+  const cutsceneContent = selectedEntry?.name === 'cutscenes' && selectedItemContent != null
+    ? selectedItemContent as CutsceneData
     : null
 
   const varbitContent = selectedEntry?.name === 'varbits' && selectedItemContent != null
@@ -1405,6 +1411,8 @@ function App() {
                 ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} />
                 : npcContent != null
                 ? <NpcViewer data={npcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} />
+                : cutsceneContent
+                ? <CutsceneViewer data={cutsceneContent} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} />
                 : varbitContent != null
                 ? <VarbitViewer data={varbitContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : structContent != null
