@@ -3,6 +3,7 @@ import type { NpcData, NpcDef } from '../loaders/npcs'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { hslToRgb } from '../loaders/models'
 import { npcCompositeSpec } from '../loaders/npcComposite'
+import type { ModelCompositeSpec } from '../loaders/npcComposite'
 import { getNpcIcon, peekNpcIcon } from './npcSnapshot'
 import { CursorPreview, ModelSnapshotIcon, SpriteFramePreview } from './spriteCards'
 import { NpcMenuPreview } from './NpcMenuPreview'
@@ -29,7 +30,7 @@ type NpcModelPreview = {
   modelIds: number[]
   translations?: (number[] | null)[]
   recolor?: { from?: number[]; to?: number[]; textureFrom?: number[]; textureTo?: number[] }
-  scale?: { xz: number; y: number }
+  scale?: ModelCompositeSpec['scale']
   tint?: { hue: number; saturation: number; lightness: number; opacity: number }
   /** Hide skin-255 static marker faces (full-model view). */
   hideMarkerFaces?: boolean
@@ -706,16 +707,20 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate, cac
         <NumGrid fields={CURSOR_FIELDS} values={draft} onChange={(k, v) => set(k, v)} />
         {(['primaryCursor', 'secondaryCursor', 'attackCursor'] as const).some((key) => Number(draft[key] ?? -1) >= 0) && (
           <div className="item-cursor-row">
-            {([['primaryCursor', 'Primary'], ['secondaryCursor', 'Secondary'], ['attackCursor', 'Attack']] as const).map(([key, label]) => (
-              <CursorPreview
-                key={key}
-                cursorsDir={cursorsDir}
-                spritesDir={spritesDir}
-                cursorId={Number(draft[key] ?? -1)}
-                label={label}
-                onOpen={onNavigate && ((id) => onNavigate('config_cursors', id))}
-              />
-            ))}
+            {([['primaryCursor', 'primaryCursorActionIndex', 'Primary'], ['secondaryCursor', 'secondaryCursorActionIndex', 'Secondary'], ['attackCursor', null, 'Attack']] as const).map(([key, opKey, label]) => {
+              // the cursor applies to the option its action index points at
+              const option = opKey ? ((draft.options as (string | null)[] | undefined) ?? [])[Number(draft[opKey] ?? -1)] : null
+              return (
+                <CursorPreview
+                  key={key}
+                  cursorsDir={cursorsDir}
+                  spritesDir={spritesDir}
+                  cursorId={Number(draft[key] ?? -1)}
+                  label={option ? `${label} · ${option}` : label}
+                  onOpen={onNavigate && ((id) => onNavigate('config_cursors', id))}
+                />
+              )
+            })}
           </div>
         )}
       </section>

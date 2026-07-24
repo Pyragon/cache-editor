@@ -1,28 +1,15 @@
 import * as THREE from 'three'
-import { hslToRgb } from '../loaders/models'
 import type { ModelData } from '../loaders/models'
-import { loadModelComposite, npcCompositeSpec } from '../loaders/npcComposite'
+import { loadModelComposite, npcCompositeSpec, objectCompositeSpec } from '../loaders/npcComposite'
+import { buildTexturedModelMesh } from './modelMesh'
 
 // ---------------------------------------------------------------------------
 // NPC thumbnail icons: when an NPC page opens, its full composite model
 // (npcComposite.ts — translations, recolours, scale, tint) is rendered once
 // into a small transparent PNG data-URL, session-cached, and shown beside the
-// NPC's name and in its sidebar row.
-//
-// Deliberately texture-less for now — faces render their flat HSL16 colour
-// even when they carry a texture. TO ADD TEXTURES LATER: the composite's
-// ModelData already carries everything needed — `faceTextures` (per-face
-// texture id), `textures` (Map<id, Blob> of the rendered material PNGs) and
-// the texture-mapping arrays. Follow ModelViewer.tsx's build: bucket faces by
-// texture id into geometry groups, one MeshBasicMaterial per group with
-// `map` = a THREE.Texture from `await createImageBitmap(blob)` (colorSpace
-// SRGBColorSpace, RepeatWrapping), and copy its writeUVs() logic for the UV
-// attribute (planar P/M/N triangles plus the type 1–3 cylinder/cube/sphere
-// projections). The only structural change here is that snapshot() becomes
-// async across the bitmap decodes before it can render — everything else
-// (camera, lighting, caching) stays as is. Face colour still tints the
-// texture (the material PNGs are greyscale detail maps), so keep vertexColors
-// on. See also memory: project_npc_icon_textures.
+// NPC's name and in its sidebar row. Rendering goes through modelMesh.ts, so
+// faces with a dumped material PNG draw textured (face colour tints the
+// greyscale detail map, like the client); the rest keep their flat HSL16.
 // ---------------------------------------------------------------------------
 
 const ICON_SIZE = 128
@@ -57,58 +44,19 @@ function getRenderer(): THREE.WebGLRenderer {
   return renderer
 }
 
-// Palette RGB is sRGB; three works linear and encodes on output (same
-// double-encode trap ModelViewer documents).
-function srgbToLinear(c: number): number {
-  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
-}
-
-/** Flat-colour render of the composite to a transparent PNG data-URL. */
-function snapshot(model: ModelData): string | null {
-  const { vertexCount, faceCount, vertexX, vertexY, vertexZ, triangleX, triangleY, triangleZ, faceColor, faceAlpha } = model
-
-  // count visible faces first (skip fully-transparent marker faces)
-  const faces: number[] = []
-  for (let f = 0; f < faceCount; f++) {
-    if (faceAlpha[f] === -1) continue
-    const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
-    if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount) continue
-    faces.push(f)
-  }
-  if (faces.length === 0) return null
-
-  const positions = new Float32Array(faces.length * 9)
-  const colors = new Float32Array(faces.length * 9)
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
-  let vert = 0
-  for (const f of faces) {
-    const corners = [triangleX[f], triangleY[f], triangleZ[f]]
-    const rgb = hslToRgb(faceColor[f] & 0xffff)
-    const r = srgbToLinear(((rgb >> 16) & 0xff) / 255)
-    const g = srgbToLinear(((rgb >> 8) & 0xff) / 255)
-    const b = srgbToLinear((rgb & 0xff) / 255)
-    for (const v of corners) {
-      const base = vert * 3
-      // same RS → three mapping as ModelViewer: (x, −y, −z)
-      const x = vertexX[v], y = -vertexY[v], z = -vertexZ[v]
-      positions[base] = x; positions[base + 1] = y; positions[base + 2] = z
-      colors[base] = r; colors[base + 1] = g; colors[base + 2] = b
-      if (x < minX) minX = x; if (x > maxX) maxX = x
-      if (y < minY) minY = y; if (y > maxY) maxY = y
-      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
-      vert++
-    }
-  }
-
-  const geo = new THREE.BufferGeometry()
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
-  const mesh = new THREE.Mesh(geo, mat)
-  mesh.frustumCulled = false
+/** Textured render of the composite to a transparent PNG data-URL. */
+async function snapshot(model: ModelData): Promise<string | null> {
+  const built = await buildTexturedModelMesh(model)
+  if (!built) return null
 
   const scene = new THREE.Scene()
-  scene.add(mesh)
+  scene.add(built.mesh)
+
+  built.mesh.geometry.computeBoundingBox()
+  const bb = built.mesh.geometry.boundingBox!
+  const minX = bb.min.x, maxX = bb.max.x
+  const minY = bb.min.y, maxY = bb.max.y
+  const minZ = bb.min.z, maxZ = bb.max.z
 
   // 3/4 view: slight yaw so the icon reads as a figure, slight look-down
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2
@@ -124,8 +72,7 @@ function snapshot(model: ModelData): string | null {
   r3.render(scene, camera)
   const url = r3.domElement.toDataURL('image/png')
 
-  geo.dispose()
-  mat.dispose()
+  built.dispose()
   return url
 }
 
@@ -154,6 +101,49 @@ export function getNpcIcon(
   task.then((url) => {
     cache.set(npcId, url)
     inFlight.delete(npcId)
+  })
+  return task
+}
+
+// object composites (the ObjectViewer header icon), keyed by object id
+const objectCache = new Map<number, string | null>()
+const objectInFlight = new Map<number, Promise<string | null>>()
+
+export function peekObjectIcon(id: number): string | null | undefined {
+  return objectCache.get(id)
+}
+
+/** Call after saving an object so its icon regenerates from the new def. */
+export function invalidateObjectIcon(id: number): void {
+  objectCache.delete(id)
+}
+
+/** Load + render (or serve from the session cache) an object's icon —
+ *  its shape-10 (or first-shape) composite with recolours/scale/tint. */
+export function getObjectIcon(
+  cacheRoot: FileSystemDirectoryHandle,
+  objectId: number,
+  def: Record<string, unknown>,
+): Promise<string | null> {
+  const cached = objectCache.get(objectId)
+  if (cached !== undefined) return Promise.resolve(cached)
+  const pending = objectInFlight.get(objectId)
+  if (pending) return pending
+
+  const task = (async (): Promise<string | null> => {
+    try {
+      const spec = objectCompositeSpec(def)
+      if (spec.modelIds.length === 0) return null
+      const composite = await loadModelComposite(cacheRoot, spec)
+      return snapshot(composite)
+    } catch {
+      return null
+    }
+  })()
+  objectInFlight.set(objectId, task)
+  task.then((url) => {
+    objectCache.set(objectId, url)
+    objectInFlight.delete(objectId)
   })
   return task
 }

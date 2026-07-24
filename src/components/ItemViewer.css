@@ -172,6 +172,24 @@
   width: 90px;
 }
 
+/* object shape rows: per-model chips (icon + id input + remove) */
+.object-model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.object-model-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.object-model-chip .cell-input {
+  width: 80px;
+}
+
 /* NPC right-click menu preview (Options section) */
 .npc-menu-preview {
   display: flex;

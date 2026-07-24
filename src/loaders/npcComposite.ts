@@ -14,8 +14,8 @@ export type ModelCompositeSpec = {
   /** Per-model [x, y, z] vertex nudges, paired positionally with modelIds. */
   translations?: (number[] | null)[]
   recolor?: { from?: number[]; to?: number[]; textureFrom?: number[]; textureTo?: number[] }
-  /** 128 = unscaled. */
-  scale?: { xz: number; y: number }
+  /** 128 = unscaled (NPCs share one value for x/z; objects scale each axis). */
+  scale?: { x: number; y: number; z: number }
   /** Ignored when opacity is 0; −1 components leave that channel untouched. */
   tint?: { hue: number; saturation: number; lightness: number; opacity: number }
   /** Hide faces whose corners all carry skin label 255. Those are static
@@ -40,7 +40,42 @@ export function npcCompositeSpec(def: Record<string, unknown>): ModelCompositeSp
       textureFrom: def.originalTextures as number[] | undefined,
       textureTo: def.modifiedTextures as number[] | undefined,
     },
-    scale: { xz: Number(def.scaleXZ ?? 128) || 128, y: Number(def.scaleY ?? 128) || 128 },
+    scale: {
+      x: Number(def.scaleXZ ?? 128) || 128,
+      y: Number(def.scaleY ?? 128) || 128,
+      z: Number(def.scaleXZ ?? 128) || 128,
+    },
+    tint: {
+      hue: Number(def.tintHue ?? 0),
+      saturation: Number(def.tintSaturation ?? 0),
+      lightness: Number(def.tintLightness ?? 0),
+      opacity: Number(def.tintOpacity ?? 0),
+    },
+  }
+}
+
+/** The composite spec an OBJECT def describes: the model list of its shape-10
+ *  row (centrepiece scenery) or the first shape row, with the def's
+ *  recolours, per-axis scale and tint. */
+export function objectCompositeSpec(def: Record<string, unknown>): ModelCompositeSpec {
+  const shapes = (def.shapes as number[] | undefined) ?? []
+  const modelLists = (def.objectModelIds as number[][] | undefined) ?? []
+  let shapeIndex = shapes.indexOf(10)
+  if (shapeIndex < 0) shapeIndex = 0
+  return {
+    hideMarkerFaces: true,
+    modelIds: [...(modelLists[shapeIndex] ?? [])],
+    recolor: {
+      from: def.originalColors as number[] | undefined,
+      to: def.modifiedColors as number[] | undefined,
+      textureFrom: def.originalTextures as number[] | undefined,
+      textureTo: def.modifiedTextures as number[] | undefined,
+    },
+    scale: {
+      x: Number(def.scaleX ?? 128) || 128,
+      y: Number(def.scaleY ?? 128) || 128,
+      z: Number(def.scaleZ ?? 128) || 128,
+    },
     tint: {
       hue: Number(def.tintHue ?? 0),
       saturation: Number(def.tintSaturation ?? 0),
@@ -95,12 +130,44 @@ export async function loadModelComposite(
     applyRecolor(merged, recolor.from ?? [], recolor.to ?? [], recolor.textureFrom ?? [], recolor.textureTo ?? [])
   }
 
-  // Client Model.scale: v · scale >> 7 per axis (x/z share scaleXZ).
-  if (scale && (scale.xz !== 128 || scale.y !== 128)) {
+  // applyRecolor may retexture faces onto materials the base parts never loaded
+  // (a tree swapping its leaf detail texture) — the parts' loadItem only fetched
+  // PNGs for the ORIGINAL faceTextures, so pull any now-referenced-but-missing
+  // material PNGs (and scroll speeds) into the merged maps, else those faces fall
+  // back to flat colour (the "leaves are green blobs" bug).
+  if (merged.faceTextures) {
+    const missing = new Set<number>()
+    for (const id of merged.faceTextures) if (id >= 0 && !merged.textures.has(id)) missing.add(id)
+    if (missing.size > 0) {
+      let texturesDir: FileSystemDirectoryHandle | null = null
+      let defsDir: FileSystemDirectoryHandle | null = null
+      try { texturesDir = await cacheRoot.getDirectoryHandle('textures') } catch { /* not dumped */ }
+      try { defsDir = await cacheRoot.getDirectoryHandle('texture_definitions') } catch { /* not dumped */ }
+      await Promise.all([...missing].map(async (id) => {
+        if (texturesDir) {
+          try {
+            const dir = await texturesDir.getDirectoryHandle(String(id))
+            merged.textures.set(id, await (await dir.getFileHandle(`${id}.png`)).getFile())
+          } catch { /* missing texture — flat fallback */ }
+        }
+        if (defsDir) {
+          try {
+            const file = await (await defsDir.getFileHandle(`${id}.json`)).getFile()
+            const def = JSON.parse(await file.text())
+            const u = def.textureSpeedU ?? 0, v = def.textureSpeedV ?? 0
+            if (u !== 0 || v !== 0) merged.textureSpeeds.set(id, { u, v })
+          } catch { /* no definition */ }
+        }
+      }))
+    }
+  }
+
+  // Client Model.scale: v · scale >> 7 per axis.
+  if (scale && (scale.x !== 128 || scale.y !== 128 || scale.z !== 128)) {
     for (let v = 0; v < merged.vertexCount; v++) {
-      merged.vertexX[v] = (merged.vertexX[v] * scale.xz) >> 7
+      merged.vertexX[v] = (merged.vertexX[v] * scale.x) >> 7
       merged.vertexY[v] = (merged.vertexY[v] * scale.y) >> 7
-      merged.vertexZ[v] = (merged.vertexZ[v] * scale.xz) >> 7
+      merged.vertexZ[v] = (merged.vertexZ[v] * scale.z) >> 7
     }
   }
 
