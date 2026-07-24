@@ -4,10 +4,13 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { LocEntry, MapData, MapRegionDef, MapTerrain } from '../loaders/maps'
-import { SIZE, decodeTerrain, tileIndex, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS, LOC_TYPE_LABELS } from '../loaders/maps'
-import { rgbToRenderedHex } from '../loaders/models'
+import { SIZE, decodeTerrain, decodeUnderwaterTerrain, tileIndex, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS, LOC_TYPE_LABELS } from '../loaders/maps'
+import { rgbToRenderedHex, DEFAULT_MODEL_SUN } from '../loaders/models'
 import { NumberInput } from './defFields'
-import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildRegionOutline, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS } from './mapScene'
+import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildRegionOutline, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh } from './mapScene'
+import { LocAnimator } from './locAnimator'
+import type { AnimationDef } from '../loaders/animations'
+import type { ModelData } from '../loaders/models'
 import type { SceneConfigs, LocRef, MarkerInfo, SunConfig } from './mapScene'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import './MapSceneViewer.css'
@@ -27,6 +30,80 @@ const REGION_UNITS = SIZE * 512
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree
 THREE.Mesh.prototype.raycast = acceleratedRaycast
+
+// Env-mapped water — mirrors the client's water fragment shader (dumped GLSL
+// "EnvMappedWater", 1_1.frag, non-`waves` branch):
+//   SurfaceColour.rgb = EnvColour + (Diffuse + Specular) * shoreFactor * SunColour
+//   EnvColour = textureCube(EnvMap, reflect(view, waveNormal))
+// The client's EnvMap is a sky cube; we synthesise that sky procedurally from the
+// reflection direction (zenith→horizon gradient) so it never depends on a captured
+// cube. Wave normal is procedural here (the client samples an animated 3D normal
+// texture). shoreFactor (depth-based transparency) is not modelled yet — there's no
+// underwater riverbed layer to reveal, so the surface is opaque (shoreFactor = 1).
+const WATER_VERT = `
+  attribute float waterDepth;
+  varying vec3 vWorldPos;
+  varying vec3 vViewVec;
+  varying float vDepth;
+  uniform vec3 uEyePos;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    vViewVec = uEyePos - wp.xyz;
+    vDepth = waterDepth;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`
+// Mirrors the client EnvMappedWater fragment (1_1.frag, non-`waves` branch):
+//   SurfaceColour.rgb = EnvColour + (Diffuse + Specular) * shoreFactor * SunColour
+//   SurfaceColour.a   = Fresnel * shoreFactor * smoothstep(depth/40)
+// with shoreFactor = clamp(depth/breakWaterDepth, 0, 1). The surface is
+// transparent — shallow water (low depth) fades to clear so the riverbed mesh
+// beneath shows through (sandy shores); deep water reflects the sky. The
+// EnvMap is synthesised as a procedural sky. breakWaterDepth/specExp are the
+// client's literal constants (256 / 32).
+const WATER_FRAG = `
+  precision highp float;
+  uniform vec3 uSunDir;
+  uniform vec3 uSunColour;
+  uniform vec3 uSkyZenith;
+  uniform vec3 uSkyHorizon;
+  uniform vec3 uDeepTint;
+  uniform float uSpecExp;
+  uniform float uBreakDepth;
+  uniform float uTime;
+  varying vec3 vWorldPos;
+  varying vec3 vViewVec;
+  varying float vDepth;
+  vec3 skyEnv(vec3 dir) {
+    float up = clamp(dir.y, 0.0, 1.0);
+    return mix(uSkyHorizon, uSkyZenith, pow(up, 0.55));
+  }
+  void main() {
+    vec2 p = vWorldPos.xz * 0.006;
+    float t = uTime * 0.55;
+    vec3 n = normalize(vec3(
+      sin(p.x * 1.5 + t) * 0.05 + sin(p.x * 3.1 - p.y * 2.0 + t * 1.7) * 0.022,
+      1.0,
+      cos(p.y * 1.3 + t * 1.1) * 0.05 + sin(p.x * 2.2 + p.y * 2.7 - t * 1.3) * 0.022
+    ));
+    vec3 E = normalize(vViewVec);
+    vec3 R = reflect(-E, n);
+    vec3 sun = normalize(uSunDir);
+    vec3 env = skyEnv(R);
+    float fres = 1.0 - abs(dot(R, n));
+    float spec = pow(clamp(dot(sun, R), 0.0, 1.0), uSpecExp) * 0.5;
+    float diffuse = max(0.0, dot(sun, n)) * (1.0 - fres) * 0.25;
+    float shore = clamp(vDepth / uBreakDepth, 0.0, 1.0);
+    float depthFade = smoothstep(0.0, 1.0, clamp(vDepth / 40.0, 0.0, 1.0));
+    // Deep water reads as a saturated dark blue and is nearly opaque (the sandy
+    // riverbed must NOT bleed through the centre); shallow shores fade to clear
+    // so the bed shows. alpha rises steeply with depth (shore²).
+    vec3 colour = mix(env, uDeepTint, shore * 0.8) + (diffuse + spec) * shore * uSunColour;
+    float alpha = depthFade * clamp(shore * shore * 0.9 + shore * 0.2 + fres * shore * 0.35, 0.0, 1.0);
+    gl_FragColor = vec4(colour, alpha);
+  }
+`
 
 let cachedConfigs: { root: FileSystemDirectoryHandle; configs: SceneConfigs } | null = null
 
@@ -392,23 +469,48 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
   const [multiSel, setMultiSel] = useState<number[]>([])
   const setMultiSelRef = useRef(setMultiSel)
   setMultiSelRef.current = setMultiSel
-  const [visiblePlanes, setVisiblePlanes] = useState([true, true, true, true])
+  // Defaults tuned for perf/clarity: only plane 0, no neighbour regions, no
+  // region outlines (all still toggleable in the controls).
+  const [visiblePlanes, setVisiblePlanes] = useState([true, false, false, false])
   const [showLocs, setShowLocs] = useState(true)
-  const [showNeighbors, setShowNeighbors] = useState(true)
-  const [showOutlines, setShowOutlines] = useState(true)
+  const [showNeighbors, setShowNeighbors] = useState(false)
+  const [showOutlines, setShowOutlines] = useState(false)
   const [showMarkers, setShowMarkers] = useState(true)
   const [showSky, setShowSky] = useState(true)
   const skyMeshRef = useRef<THREE.Mesh | null>(null)
   const highlightClearRef = useRef<(() => void) | null>(null)
   const [status, setStatus] = useState('building terrain…')
   const [hoverText, setHoverText] = useState('')
+  // Loading bar = the actual fraction of the build's passes completed (the build
+  // drives `setLoadProgress` directly, see below). This effect only handles the
+  // reset-to-0 at the start of a fresh build and the show/hide of the overlay.
+  const [loadProgress, setLoadProgress] = useState(0)
+  const [loadVisible, setLoadVisible] = useState(true)
+  const wasBuildingRef = useRef(false)
+  useEffect(() => {
+    const failed = status.startsWith('scene build failed') || status.startsWith('no cache')
+    const building = status !== '' && !failed
+    if (building && !wasBuildingRef.current) { setLoadProgress(0); setLoadVisible(true) }
+    wasBuildingRef.current = building
+    if (failed) { setLoadVisible(false); return }
+    if (!building) {
+      setLoadProgress(100)
+      const t = setTimeout(() => setLoadVisible(false), 300)
+      return () => clearTimeout(t)
+    }
+  }, [status])
   const [selection, setSelection] = useState<Selection | null>(null)
   const selectionRef = useRef<Selection | null>(null)
   selectionRef.current = selection
   const planeGroupsRef = useRef<(THREE.Group | null)[]>([null, null, null, null])
-  type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'loc' | 'marker' | 'outline' }
+  type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'riverbed' | 'loc' | 'marker' | 'outline' }
   const taggedRef = useRef<Tagged[]>([])
+  // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
+  type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; mesh: THREE.Mesh; sphere: THREE.Sphere }
+  const animLocsRef = useRef<AnimLocRecord[]>([])
   const assetsRef = useRef<LocAssets | null>(null)
+  // FPS label — updated directly on the DOM node (no React re-render per frame).
+  const fpsRef = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -424,6 +526,18 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     renderer.setSize(w, h)
     renderer.setClearColor(0x0b0d12)
     mount.appendChild(renderer.domElement)
+    // Report the actual GPU/driver the browser handed WebGL — a "SwiftShader"/
+    // "software" string here means hardware acceleration is OFF (the usual cause
+    // of a slideshow-fps, whole-machine-lags-out map). Logged + on window.__gpu.
+    try {
+      const gl = renderer.getContext()
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info')
+      const gpu = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)
+      const software = /swiftshader|software|llvmpipe|basic render/i.test(String(gpu))
+      // eslint-disable-next-line no-console
+      console.log(`[map] WebGL renderer: ${gpu}${software ? '  ⚠ SOFTWARE RENDERING — enable hardware acceleration' : ''} · dpr ${window.devicePixelRatio}`)
+      ;(window as unknown as { __gpu?: unknown }).__gpu = { gpu, software, dpr: window.devicePixelRatio, canvas: `${w}x${h}` }
+    } catch { /* ignore */ }
 
     const scene = new THREE.Scene()
     scene.fog = new THREE.Fog(0x0b0d12, REGION_UNITS * 2, REGION_UNITS * 5)
@@ -446,27 +560,60 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     let lastActivity = performance.now()
     const bumpActivity = () => { lastActivity = performance.now() }
     controls.addEventListener('change', bumpActivity)
+    // #5: no hover raycasts against the huge merged meshes while actively
+    // orbiting/panning — the pick fights the drag and costs frames.
+    let orbiting = false
+    controls.addEventListener('start', () => { orbiting = true })
+    controls.addEventListener('end', () => { orbiting = false })
 
     const disposables: { dispose(): void }[] = []
     // materials with animated UVs: data-driven scroll (waterfalls, lava —
     // offset = seconds*speed/64, OpenGlToolkit convention) and still water
     // (client ripple effect approximated by a gentle drifting wobble)
     const scrollMaterials: { map: THREE.Texture; u: number; v: number }[] = []
-    const waterMaterials: THREE.Texture[] = []
+    // Shared uniforms across every water surface (updated once per frame).
+    const waterUniforms = {
+      uSunDir: { value: new THREE.Vector3(...DEFAULT_MODEL_SUN.dir).normalize() },
+      uSunColour: { value: new THREE.Vector3(...DEFAULT_MODEL_SUN.sunColour) },
+      // procedural sky reflected by the water: deep steel-blue overhead, lighter
+      // toward the horizon (approx. the client's sky env cube)
+      uSkyZenith: { value: new THREE.Color(0.10, 0.20, 0.34) },
+      uSkyHorizon: { value: new THREE.Color(0.34, 0.47, 0.60) },
+      // deep-water body colour blended in by depth (dark blue-teal)
+      uDeepTint: { value: new THREE.Color(0.05, 0.15, 0.22) },
+      uSpecExp: { value: 32 }, // client EnvMappedWater specExp
+      uBreakDepth: { value: 256 }, // client breakWaterDepth
+      uTime: { value: 0 },
+      uEyePos: { value: new THREE.Vector3() },
+    }
+    let hasWater = false
     const track = (obj: THREE.Object3D) => {
       obj.traverse((o) => {
         const mesh = o as THREE.Mesh
         if (mesh.geometry) disposables.push(mesh.geometry)
         if (mesh.material) {
-          for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+          for (let i = 0; i < mats.length; i++) {
+            const m = mats[i]
             disposables.push(m)
             const basic = m as THREE.MeshBasicMaterial
             if (basic.map && m.userData.scroll) {
               scrollMaterials.push({ map: basic.map, u: m.userData.scroll.u, v: m.userData.scroll.v })
               disposables.push(basic.map) // per-material texture clone
-            } else if (basic.map && m.userData.water) {
-              waterMaterials.push(basic.map)
-              disposables.push(basic.map)
+            } else if (m.userData.water) {
+              // swap the flat blue water material for the env-mapped water shader
+              const wm = new THREE.ShaderMaterial({
+                vertexShader: WATER_VERT,
+                fragmentShader: WATER_FRAG,
+                uniforms: waterUniforms,
+                transparent: true,
+                depthWrite: false,
+                side: THREE.DoubleSide,
+              })
+              wm.userData.water = true
+              mats[i] = wm
+              disposables.push(wm)
+              hasWater = true
             }
           }
         }
@@ -970,15 +1117,25 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     let mmFrame = 0
     let skipCounter = 0
     let lastHoverText = ''
+    // Loc idle animation is frustum-culled: solving every animated loc every frame
+    // (hundreds of them) thrashed the GC. Only what's on screen gets posed.
+    const animFrustum = new THREE.Frustum()
+    const animProjView = new THREE.Matrix4()
+    // whether the last pose tick saw a visible animated loc — lets the idle
+    // throttle engage when nothing on screen is animating (hundreds of hidden/
+    // off-screen animated locs shouldn't peg full fps forever)
+    let animVisible = false
     const pushHoverText = (text: string) => {
       if (text === lastHoverText) return // avoid re-rendering React per frame
       lastHoverText = text
       setHoverText(text)
     }
     function animate() {
-      // idle: render every 4th frame only (~15fps) — water still drifts,
-      // the GPU stops hogging the compositor
-      if (performance.now() - lastActivity > 3000 && (skipCounter++ & 3) !== 0) {
+      // idle throttle (~15fps) to stop hogging the compositor when nothing is
+      // moving — but NOT while animated materials (water/scroll) are on screen,
+      // or their animation goes choppy. Full fps whenever something animates.
+      const hasAnimation = scrollMaterials.length > 0 || hasWater || animVisible
+      if (!hasAnimation && performance.now() - lastActivity > 3000 && (skipCounter++ & 3) !== 0) {
         raf = requestAnimationFrame(animate)
         return
       }
@@ -998,18 +1155,38 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       if (skyMeshRef.current) skyMeshRef.current.position.copy(camera.position)
       // pulse the picked-loc highlight
       if (highlightFill) highlightFill.opacity = 0.24 + Math.sin(performance.now() / 170) * 0.12
-      if (scrollMaterials.length > 0 || waterMaterials.length > 0) {
+      if (scrollMaterials.length > 0) {
         const seconds = (performance.now() % 512000) / 1000
         for (const { map, u, v } of scrollMaterials) {
           map.offset.set(((seconds * u) / 64) % 1, ((seconds * v) / 64) % 1)
         }
-        // still water: slow diagonal drift with a subtle swell
-        const wu = (seconds * 0.022 + Math.sin(seconds * 0.8) * 0.012) % 1
-        const wv = (seconds * 0.031 + Math.cos(seconds * 0.6) * 0.012) % 1
-        for (const map of waterMaterials) map.offset.set(wu, wv)
       }
-      // hover raycast every other frame — cheap enough, keeps orbit smooth
-      if (pointerInside && (frame++ & 1) === 0) {
+      if (hasWater) {
+        waterUniforms.uTime.value = (performance.now() % 512000) / 1000
+        waterUniforms.uEyePos.value.copy(camera.position)
+      }
+      // Pose animated locs (waving flags) every frame, but only the ones actually
+      // on screen — culling to the visible handful (from potentially hundreds) is
+      // what keeps this cheap. Meshes off-screen are frustum-culled by three.js.
+      if (animLocsRef.current.length > 0) {
+        const seconds = (performance.now() % 3600000) / 1000
+        camera.updateMatrixWorld()
+        camera.matrixWorldInverse.copy(camera.matrixWorld).invert()
+        animProjView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+        animFrustum.setFromProjectionMatrix(animProjView)
+        animVisible = false
+        for (const rec of animLocsRef.current) {
+          if (!rec.animator) continue
+          // skip hidden planes / neighbour-toggle-hidden meshes
+          if (!rec.mesh.visible || rec.mesh.parent?.visible === false) continue
+          // skip anything not in view — the vast majority most frames
+          if (!animFrustum.intersectsSphere(rec.sphere)) continue
+          const posed = rec.animator.pose(rec.model, rec.animator.frameAt(seconds))
+          if (posed) { rec.update(posed); animVisible = true }
+        }
+      }
+      // hover raycast every other frame — but never mid-orbit (#5)
+      if (pointerInside && !orbiting && (frame++ & 1) === 0) {
         const hit = pick()
         if (hit) {
           const { wx, wy, tx, ty } = worldTileOf(hit.point)
@@ -1039,8 +1216,21 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         }
       }
       renderer.render(scene, camera)
+      // FPS readout — averaged over 20 frames, written straight to the label
+      // node. No React state per frame.
+      {
+        const now = performance.now()
+        if (perfLast) { perfSum += 1000 / (now - perfLast); perfN++ }
+        perfLast = now
+        if (perfN >= 20) {
+          const fps = Math.round(perfSum / perfN)
+          if (fpsRef.current) fpsRef.current.textContent = `${fps} fps`
+          perfSum = 0; perfN = 0
+        }
+      }
       raf = requestAnimationFrame(animate)
     }
+    let perfLast = 0, perfSum = 0, perfN = 0
     animate()
 
     function onResize() {
@@ -1067,6 +1257,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
 
         const assets = new LocAssets(data.rootHandle)
         assetsRef.current = assets
+        animLocsRef.current = []
         const mapsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('maps'))
 
         for (let plane = 0; plane < 4; plane++) {
@@ -1080,12 +1271,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         // load all 9 cells first — the mosaic needs every terrain up front so
         // heights/lighting/underlay-blur are seam-free across boundaries
         setStatus('loading regions…')
-        type Cell = { dx: number; dy: number; def: MapRegionDef; terrain: ReturnType<typeof decodeTerrain> }
+        type Cell = { dx: number; dy: number; def: MapRegionDef; terrain: ReturnType<typeof decodeTerrain>; underwater?: MapTerrain }
         // the centre region renders the parent's draft terrain (height-brush
         // edits survive a 2D/3D toggle); `let` because brush rebuilds swap it
         let currentTerrain = terrainPropRef.current ?? data.terrain
         lastBuiltTerrainRef.current = terrainPropRef.current
-        const cells: Cell[] = [{ dx: 0, dy: 0, def: data.def, terrain: currentTerrain }]
+        const cells: Cell[] = [{ dx: 0, dy: 0, def: data.def, terrain: currentTerrain, underwater: data.underwaterTerrain }]
         const regionGrid: (Cell['terrain'] | null)[][] = [[null, null, null], [null, null, null], [null, null, null]]
         regionGrid[1][1] = currentTerrain
         if (mapsDir) {
@@ -1097,7 +1288,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
                 const file = await (await mapsDir.getFileHandle(`${id}.json`)).getFile()
                 const def = JSON.parse(await file.text()) as MapRegionDef
                 const terrain = decodeTerrain(def)
-                cells.push({ dx, dy, def, terrain })
+                cells.push({ dx, dy, def, terrain, underwater: decodeUnderwaterTerrain(def) })
                 regionGrid[dx + 1][dy + 1] = terrain
               } catch { /* neighbour not dumped */ }
             }
@@ -1142,7 +1333,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             const mesh = o as THREE.Mesh
             if (!mesh.material) return
             for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
-              (m as THREE.MeshBasicMaterial).color.setRGB(...sunTint)
+              // water is a ShaderMaterial (no .color) — its sky tint lives in its
+              // own uniforms, so skip it here
+              const c = (m as THREE.MeshBasicMaterial).color
+              if (c) c.setRGB(...sunTint)
             }
           })
         }
@@ -1172,28 +1366,38 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         // centre>>1 + west>>2 + south>>2 + north>>3 + east>>3. Raw subtraction
         // makes every wall/rock a hard 1-corner dark blob (per-tile mottling);
         // the blur halves the amplitude and feathers it over neighbours.
-        const shadowLights = (lights: Uint8Array[], locBuilds: ({ shadows: Uint8Array } | null)[]) =>
-          lights.map((l, plane) => {
-            const s = locBuilds[plane]?.shadows
-            if (!s) return l
+        // Per-plane BLURRED static-shadow grid (kept separate from the sun light,
+        // as GroundGL does — the shadow is subtracted from baseStrength in the HSL
+        // stage, not from the directional multiplier). Softened via GroundGL's
+        // resetLight kernel (centre>>1 + neighbours) so walls/rocks feather into
+        // the ground instead of hard 1-corner blobs.
+        const blurredShadows = (locBuilds: ({ shadows: Uint8Array } | null)[]): Float32Array[] =>
+          locBuilds.map((b) => {
+            const s = b?.shadows
             const V = SIZE + 1
-            const out = l.slice()
+            const out = new Float32Array(V * V)
+            if (!s) return out
             for (let x = 0; x < V; x++) {
               for (let y = 0; y < V; y++) {
-                const eff =
+                out[x * V + y] =
                   (s[x * V + y] >> 1)
                   + (x > 0 ? s[(x - 1) * V + y] >> 2 : 0)
                   + (y > 0 ? s[x * V + y - 1] >> 2 : 0)
                   + (y < V - 1 ? s[x * V + y + 1] >> 3 : 0)
                   + (x < V - 1 ? s[(x + 1) * V + y] >> 3 : 0)
-                const i = x * V + y
-                out[i] = Math.max(0, out[i] - eff)
               }
             }
             return out
           })
 
-        for (const { dx, dy, def, terrain } of cells) {
+        // Real progress: 8 passes per cell (4 loc planes + 4 terrain planes);
+        // the loc passes report a done/total we use for sub-pass fraction.
+        const totalUnits = Math.max(1, cells.length * 8)
+        let doneUnits = 0
+        const reportProgress = (frac = 0) =>
+          setLoadProgress(Math.min(99, ((doneUnits + frac) / totalUnits) * 100))
+
+        for (const { dx, dy, def, terrain, underwater } of cells) {
           const isCenter = dx === 0 && dy === 0
           if (disposed) return
 
@@ -1201,6 +1405,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           const offsetZ = -dy * REGION_UNITS
           const label = isCenter ? 'this region' : `neighbour ${def.regionX},${def.regionY}`
           const { heights, lights } = mosaic.slicesFor(dx, dy)
+          // Underwater riverbed + per-vertex water depth (HD-water regions only).
+          const waterDepthAll = underwater ? computeWaterDepth(underwater) : undefined
+          const riverbedHeights = underwater && waterDepthAll
+            ? computeRiverbedHeights(heights, waterDepthAll) : undefined
           const palettes = [0, 1, 2, 3].map((plane) => mosaic.paletteFor(dx, dy, plane))
           const overlayCorners = [0, 1, 2, 3].map((plane) => mosaic.overlayCornerFor(dx, dy, plane))
           const underlayCorners = [0, 1, 2, 3].map((plane) => mosaic.underlayCornerFor(dx, dy, plane))
@@ -1208,16 +1416,21 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           // locs FIRST — their static shadows darken the terrain lighting
           const objList = isCenter ? initialObjects : def.objects
           const locBuilds: (Awaited<ReturnType<typeof buildLocsMesh>> | null)[] = [null, null, null, null]
-          if (def.hasLocations && objList.length > 0) {
-            for (let plane = 0; plane < 4; plane++) {
+          for (let plane = 0; plane < 4; plane++) {
+            if (def.hasLocations && objList.length > 0) {
               locBuilds[plane] = await buildLocsMesh(
                 terrain, objList, plane, heights, assets,
-                (done, total) => setStatus(`objects (${label}, plane ${plane}): ${done}/${total}`),
+                (done, total) => {
+                  setStatus(`objects (${label}, plane ${plane}): ${done}/${total}`)
+                  reportProgress(total > 0 ? done / total : 1)
+                },
               )
               if (disposed) return
             }
+            doneUnits++ // one loc plane pass done
+            reportProgress()
           }
-          const litShadowed = shadowLights(lights, locBuilds)
+          const shadows = blurredShadows(locBuilds)
 
           if (isCenter) {
             minimapBaseRef.current = await renderMinimapGround(terrain, configs, 0, mosaic.underlayRgbBlurFor(dx, dy, 0), assets)
@@ -1226,12 +1439,28 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
 
           setStatus(`terrain: ${label}…`)
           for (let plane = 0; plane < 4; plane++) {
+            // Riverbed FIRST (opaque, drawn under the transparent water surface):
+            // the submerged "um" terrain, positioned at surface+depth, its own
+            // underlays giving the sandy/muddy bottom seen through shallow water.
+            if (underwater && riverbedHeights) {
+              const bed = await buildTerrainMesh(underwater, plane, riverbedHeights, configs, assets)
+              if (disposed) return
+              if (bed) {
+                bed.position.set(offsetX, 0, offsetZ)
+                bed.renderOrder = -1 // ensure it draws before the water surface
+                bed.geometry.computeBoundsTree({ indirect: true })
+                // riverbed is never pickable/water-swapped — add directly
+                planeGroupsRef.current[plane]?.add(bed)
+                taggedRef.current.push({ obj: bed, neighbor: !isCenter, kind: 'riverbed' })
+              }
+            }
             const terrainMesh = await buildTerrainMesh(terrain, plane, heights, configs, assets, {
-              lights: litShadowed,
+              lights,
+              shadows,
               palettes,
               overlayCorners,
               underlayCorners,
-            })
+            }, waterDepthAll)
             if (disposed) return
             if (terrainMesh) {
               terrainMesh.position.set(offsetX, 0, offsetZ)
@@ -1242,6 +1471,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               planeGroupsRef.current[plane]?.add(terrainMesh)
               taggedRef.current.push({ obj: terrainMesh, neighbor: !isCenter, kind: 'terrain' })
             }
+            doneUnits++ // one terrain plane pass done
+            reportProgress()
           }
 
           for (let plane = 0; plane < 4; plane++) {
@@ -1253,6 +1484,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               track(built.mesh)
               planeGroupsRef.current[plane]?.add(built.mesh)
               taggedRef.current.push({ obj: built.mesh, neighbor: !isCenter, kind: 'loc' })
+            }
+            // Animated locs (waving flags etc.): a separate posable mesh each,
+            // placed with the region offset baked into the mesh transform.
+            for (const al of built.animated) {
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets)
+              if (disposed) return
+              if (!anim) continue
+              anim.mesh.matrixAutoUpdate = false
+              anim.mesh.matrix.copy(new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(al.matrix))
+              anim.mesh.updateMatrixWorld(true)
+              track(anim.mesh)
+              planeGroupsRef.current[plane]?.add(anim.mesh)
+              taggedRef.current.push({ obj: anim.mesh, neighbor: !isCenter, kind: 'loc' })
+              const sphere = anim.mesh.geometry.boundingSphere
+                ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
+                : new THREE.Sphere(new THREE.Vector3(offsetX, 0, offsetZ), 1e9)
+              animLocsRef.current.push({ update: anim.update, model: al.model, animationId: al.animationId, neighbor: !isCenter, mesh: anim.mesh, sphere })
             }
             if (built.markers.length > 0) {
               const markerGroup = buildMarkersMesh(built.markers)
@@ -1273,8 +1521,28 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           taggedRef.current.push({ obj: outline, neighbor: !isCenter, kind: 'outline' })
         }
 
+        // Resolve each distinct loc idle sequence once, preload its frames, and
+        // hand the animator to every placement that uses it (the RAF loop poses).
+        if (animLocsRef.current.length > 0 && data.rootHandle) {
+          const animsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('animations'))
+          if (animsDir) {
+            const ids = [...new Set(animLocsRef.current.map((a) => a.animationId))]
+            const animators = new Map<number, LocAnimator>()
+            await Promise.all(ids.map(async (id) => {
+              try {
+                const def = JSON.parse(await (await (await animsDir.getFileHandle(`${id}.json`)).getFile()).text()) as AnimationDef
+                const animator = new LocAnimator(def)
+                await animator.preload(data.rootHandle!)
+                animators.set(id, animator)
+              } catch { /* animation not dumped — that flag stays at rest */ }
+            }))
+            if (disposed) return
+            for (const rec of animLocsRef.current) rec.animator = animators.get(rec.animationId)
+          }
+        }
+
         for (const { obj, kind } of taggedRef.current) {
-          if (kind === 'terrain' || kind === 'loc') applyTint(obj)
+          if (kind === 'terrain' || kind === 'riverbed' || kind === 'loc') applyTint(obj)
         }
 
         let centerHeights = mosaic.slicesFor(0, 0).heights
@@ -1496,12 +1764,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           const underlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.underlayCornerFor(0, 0, pl))
 
           const stale = taggedRef.current.filter((t) => !t.neighbor
-            && (t.kind === 'terrain' || t.kind === 'outline' || t.kind === 'loc' || t.kind === 'marker'))
+            && (t.kind === 'terrain' || t.kind === 'riverbed' || t.kind === 'outline' || t.kind === 'loc' || t.kind === 'marker'))
           taggedRef.current = taggedRef.current.filter((t) => !stale.includes(t))
           for (const { obj } of stale) {
             obj.parent?.remove(obj)
             disposeDeep(obj)
           }
+          // the centre's animated-loc meshes were just disposed with the loc
+          // meshes above — drop their pose records (neighbours survive)
+          animLocsRef.current = animLocsRef.current.filter((r) => r.neighbor)
 
           const locBuilds: (Awaited<ReturnType<typeof buildLocsMesh>> | null)[] = [null, null, null, null]
           if (nextObjects.length > 0) {
@@ -1513,19 +1784,35 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               if (disposed) return
             }
           }
-          const litShadowed = shadowLights(slices.lights, locBuilds)
+          const shadows = blurredShadows(locBuilds)
 
           minimapBaseRef.current = await renderMinimapGround(nextTerrain, configs, 0, nextMosaic.underlayRgbBlurFor(0, 0, 0), assets)
           setMinimapVersion((v) => v + 1)
 
+          const uwCenter = data.underwaterTerrain
+          const uwDepthCenter = uwCenter ? computeWaterDepth(uwCenter) : undefined
+          const riverbedCenter = uwCenter && uwDepthCenter
+            ? computeRiverbedHeights(centerHeights, uwDepthCenter) : undefined
           for (let plane = 0; plane < 4; plane++) {
             setStatus(`rebuilding terrain (plane ${plane})…`)
+            if (uwCenter && riverbedCenter) {
+              const bed = await buildTerrainMesh(uwCenter, plane, riverbedCenter, configs, assets)
+              if (disposed) return
+              if (bed) {
+                bed.renderOrder = -1
+                bed.geometry.computeBoundsTree({ indirect: true })
+                applyTint(bed)
+                planeGroupsRef.current[plane]?.add(bed)
+                taggedRef.current.push({ obj: bed, neighbor: false, kind: 'riverbed' })
+              }
+            }
             const terrainMesh = await buildTerrainMesh(nextTerrain, plane, centerHeights, configs, assets, {
-              lights: litShadowed,
+              lights: slices.lights,
+              shadows,
               palettes,
               overlayCorners,
               underlayCorners,
-            })
+            }, uwDepthCenter)
             if (disposed) return
             if (terrainMesh) {
               terrainMesh.geometry.computeBoundsTree({ indirect: true })
@@ -1535,6 +1822,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               taggedRef.current.push({ obj: terrainMesh, neighbor: false, kind: 'terrain' })
             }
           }
+          const rebuiltAnim: AnimLocRecord[] = []
           for (let plane = 0; plane < 4; plane++) {
             const built = locBuilds[plane]
             if (!built) continue
@@ -1545,6 +1833,22 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               planeGroupsRef.current[plane]?.add(built.mesh)
               taggedRef.current.push({ obj: built.mesh, neighbor: false, kind: 'loc' })
             }
+            for (const al of built.animated) {
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets)
+              if (disposed) return
+              if (!anim) continue
+              anim.mesh.matrixAutoUpdate = false
+              anim.mesh.matrix.copy(al.matrix)
+              anim.mesh.updateMatrixWorld(true)
+              track(anim.mesh)
+              applyTint(anim.mesh)
+              planeGroupsRef.current[plane]?.add(anim.mesh)
+              taggedRef.current.push({ obj: anim.mesh, neighbor: false, kind: 'loc' })
+              const sphere = anim.mesh.geometry.boundingSphere
+                ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
+                : new THREE.Sphere(new THREE.Vector3(), 1e9)
+              rebuiltAnim.push({ update: anim.update, model: al.model, animationId: al.animationId, neighbor: false, mesh: anim.mesh, sphere })
+            }
             if (built.markers.length > 0) {
               const markerGroup = buildMarkersMesh(built.markers)
               if (markerGroup) {
@@ -1553,6 +1857,24 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
                 taggedRef.current.push({ obj: markerGroup, neighbor: false, kind: 'marker' })
               }
             }
+          }
+          // re-resolve animators for the rebuilt centre flags, then re-register
+          if (rebuiltAnim.length > 0 && data.rootHandle) {
+            const animsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('animations'))
+            if (animsDir) {
+              const cache = new Map<number, LocAnimator>()
+              await Promise.all([...new Set(rebuiltAnim.map((a) => a.animationId))].map(async (id) => {
+                try {
+                  const def = JSON.parse(await (await (await animsDir.getFileHandle(`${id}.json`)).getFile()).text()) as AnimationDef
+                  const animator = new LocAnimator(def)
+                  await animator.preload(data.rootHandle!)
+                  cache.set(id, animator)
+                } catch { /* animation not dumped */ }
+              }))
+              if (disposed) return
+              for (const rec of rebuiltAnim) rec.animator = cache.get(rec.animationId)
+            }
+            animLocsRef.current.push(...rebuiltAnim)
           }
           const outline = buildRegionOutline(centerHeights[0], 0x2f8fff)
           track(outline)
@@ -2046,10 +2368,22 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         </label>
         {status && <span className="mapscene-status">{status}</span>}
         {!status && hoverText && <span className="mapscene-hover">{hoverText}</span>}
+        <span ref={fpsRef} className="mapscene-fps" title="Render frames per second">–</span>
       </div>
       <div className="mapscene-view">
         <div className="mapscene-canvas-wrap">
           <div ref={mountRef} className="mapscene-mount" />
+          {loadVisible && (
+            <div className="rs-loading">
+              <div className="rs-loading-inner">
+                <p className="rs-loading-title">Loading - please wait.</p>
+                <div className="rs-loading-bar">
+                  <div className="rs-loading-fill" style={{ width: `${loadProgress}%` }} />
+                </div>
+                <p className="rs-loading-sub">{Math.round(loadProgress)}%</p>
+              </div>
+            </div>
+          )}
           <div className="mapscene-minimap" title="Centre region, plane 0 — north up">
             <canvas ref={minimapRef} width={SIZE * 4} height={SIZE * 4} />
             <div ref={minimapCamRef} className="mapscene-minimap-cam" />
@@ -2201,6 +2535,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           <LocList
             entries={listEntries}
             names={locNames}
+            regionX={data.def.regionX}
+            regionY={data.def.regionY}
             selectedIndex={selection?.kind === 'loc' && selection.inCenter ? selection.index : -1}
             onPick={(entry, index) => selectFromListRef.current?.(entry, index)}
           />
@@ -2608,14 +2944,19 @@ function PlacePanel({ draft, onDraft, placing, canPlace, name, onToggle, placeMu
 
 // All placed objects in the centre region: filterable, virtualized (regions
 // carry up to ~2000 placements), row click selects + flies the camera there.
-function LocList({ entries, names, selectedIndex, onPick }: {
+function LocList({ entries, names, regionX, regionY, selectedIndex, onPick }: {
   entries: LocEntry[]
   names: Map<number, string>
+  regionX: number
+  regionY: number
   selectedIndex: number
   onPick: (entry: LocEntry, index: number) => void
 }) {
   const [filter, setFilter] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  // placement x/y are region-local; the list shows absolute world tile coords.
+  const worldX = (e: LocEntry) => regionX * 64 + e[3]
+  const worldY = (e: LocEntry) => regionY * 64 + e[4]
 
   const filtered = useMemo(() => {
     const rows = entries.map((e, i) => ({ e, i }))
@@ -2624,8 +2965,8 @@ function LocList({ entries, names, selectedIndex, onPick }: {
     return rows.filter(({ e }) =>
       String(e[0]).includes(q)
       || (names.get(e[0])?.toLowerCase().includes(q) ?? false)
-      || `${e[3]},${e[4]}`.includes(q))
-  }, [entries, names, filter])
+      || `${regionX * 64 + e[3]},${regionY * 64 + e[4]}`.includes(q))
+  }, [entries, names, filter, regionX, regionY])
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -2645,12 +2986,15 @@ function LocList({ entries, names, selectedIndex, onPick }: {
   return (
     <div className="mapscene-loclist">
       <div className="mapscene-loclist-head">
-        <span className="item-field-label">Objects — {filtered.length}{filter ? ` of ${entries.length}` : ''}</span>
+        <span className="item-field-label">
+          Objects — {filtered.length}{filter ? ` of ${entries.length}` : ''}
+          <span className="mapscene-loclist-region"> · region {regionX}, {regionY}</span>
+        </span>
         <input
           className="mapscene-loclist-filter"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="filter by name, id or x,y"
+          placeholder="filter by name, id or world x,y"
         />
       </div>
       <div ref={scrollRef} className="mapscene-loclist-scroll">
@@ -2668,7 +3012,7 @@ function LocList({ entries, names, selectedIndex, onPick }: {
               >
                 <span className="mapscene-loclist-dot" style={{ background: SLOT_COLORS[OBJECT_SLOTS[e[1]] ?? 2] }} />
                 <span className="mapscene-loclist-name">{names.get(e[0]) ?? 'Object'} ({e[0]})</span>
-                <span className="mapscene-loclist-pos">{e[3]},{e[4]} · p{e[5]}</span>
+                <span className="mapscene-loclist-pos">{worldX(e)}, {worldY(e)}, {e[5]}</span>
               </button>
             )
           })}

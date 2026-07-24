@@ -54,6 +54,23 @@
   margin-left: auto;
 }
 
+/* FPS readout — right-aligned, tabular so it doesn't jitter as digits change */
+.mapscene-fps {
+  margin-left: auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim, #8a90a0);
+  min-width: 48px;
+  text-align: right;
+}
+
+/* when a hover/status label is present it takes the auto-margin; the fps then
+   sits just to its right */
+.mapscene-hover + .mapscene-fps,
+.mapscene-status + .mapscene-fps {
+  margin-left: 0;
+}
+
 .mapscene-gamma input[type='range'] {
   width: 90px;
   accent-color: var(--electric-blue-bright, #2f8fff);
@@ -372,6 +389,11 @@
   gap: 6px;
 }
 
+.mapscene-loclist-region {
+  color: var(--text-dim, #8a90a0);
+  font-weight: 500;
+}
+
 .mapscene-loclist-filter {
   padding: 4px 8px;
   border-radius: 6px;
@@ -474,4 +496,49 @@
 .mapscene-info-close:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.08);
+}
+
+/* Classic RuneScape loading screen — black backdrop, dark-red bordered bar with
+   a red fill, "Loading - please wait." — shown over the 3D mount while a region
+   builds (status !== ''). */
+.rs-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.rs-loading-inner {
+  text-align: center;
+  user-select: none;
+}
+.rs-loading-title {
+  margin: 0 0 10px;
+  color: #ffffff;
+  font-family: "Trebuchet MS", Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  text-shadow: 1px 1px 0 #000;
+}
+.rs-loading-bar {
+  width: 280px;
+  height: 20px;
+  margin: 0 auto;
+  padding: 1px;
+  background: #000;
+  border: 1px solid #5a0000;
+  box-sizing: border-box;
+}
+.rs-loading-fill {
+  height: 100%;
+  width: 0%;
+  background: #8c0000;
+}
+.rs-loading-sub {
+  margin: 10px 0 0;
+  color: #8f8f8f;
+  font-family: "Trebuchet MS", Helvetica, Arial, sans-serif;
+  font-size: 11px;
 }

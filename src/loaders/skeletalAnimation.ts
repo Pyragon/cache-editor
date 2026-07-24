@@ -161,10 +161,15 @@ export type PosedVertices = {
 // same coordinate scale — already downscaled back from the transform math's
 // internal fixed-point precision) plus posed face alphas/colours when the
 // frame carried type 5/7 face-group transforms.
-export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameBaseDef, frame: AnimationFrameDef): PosedVertices | null {
-  if (!model.vertexSkins || frame.rawFallbackBytes) return null
+// Vertex/face skin groups are a pure function of the model's skin arrays, so
+// cache them per model — rebuilding them on every posed frame (e.g. hundreds of
+// animated map locs at 60fps) was pure allocation churn.
+const skinGroupCache = new WeakMap<ModelData, { vertexGroups: number[][]; faceGroups: number[][] | null }>()
 
-  const vertexGroups = buildVertexGroups(model.vertexSkins, model.vertexCount)
+function skinGroupsFor(model: ModelData): { vertexGroups: number[][]; faceGroups: number[][] | null } {
+  let cached = skinGroupCache.get(model)
+  if (cached) return cached
+  const vertexGroups = buildVertexGroups(model.vertexSkins!, model.vertexCount)
   // Face groups (darkan Mesh.createFaceGroups): label −1 = unlabelled.
   let faceGroups: number[][] | null = null
   if (model.faceSkins) {
@@ -178,6 +183,15 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
       }
     }
   }
+  cached = { vertexGroups, faceGroups }
+  skinGroupCache.set(model, cached)
+  return cached
+}
+
+export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameBaseDef, frame: AnimationFrameDef): PosedVertices | null {
+  if (!model.vertexSkins || frame.rawFallbackBytes) return null
+
+  const { vertexGroups, faceGroups } = skinGroupsFor(model)
 
   function verticesForSlot(slot: number): number[] {
     const labels = frameBase.labels[slot] ?? []

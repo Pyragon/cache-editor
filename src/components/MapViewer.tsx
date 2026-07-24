@@ -12,7 +12,7 @@ const ZOOM_LEVELS = [4, 6, 8, 10, 14]
 
 const NO_OVERLAY_COLOR = 0xff00ff
 
-const HOME = { x: 3333, y: 3333, plane: 0 }
+const HOME = { x: 3220, y: 3218, plane: 0 }
 
 type SelectedTile = { x: number; y: number }
 type WorldCoords = { x: number; y: number; plane: number }

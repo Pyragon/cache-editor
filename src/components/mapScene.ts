@@ -2,10 +2,11 @@ import * as THREE from 'three'
 import type { MapTerrain } from '../loaders/maps'
 import { SIZE, tileIndex } from '../loaders/maps'
 import type { ModelData } from '../loaders/models'
-import { hslToRgb, parseModel, applyRecolor } from '../loaders/models'
+import { hslToRgb, parseModel, applyRecolor, computeModelLitRgb, DEFAULT_MODEL_SUN, type ModelSun } from '../loaders/models'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { makeUVWriter } from './modelUVs'
 import type { UVWriter } from './modelUVs'
+import type { PosedVertices } from '../loaders/skeletalAnimation'
 
 // Builds a Three.js scene for one map region, ported from the darkan client
 // scene pipeline (MapLoader/SceneGraph/GroundSM in darkan-bot-refactor and the
@@ -85,25 +86,6 @@ function packBlurredHsl(hue: number, saturation: number, lightness: number): num
   return (((hue & 0xff) >> 2) << 10) + (lightness >> 1) + ((s >> 5) << 7)
 }
 
-/** ColorUtil.adjustHsv — remaps packed colour before lighting. */
-function adjustHsv(packed: number): number {
-  const hue = (packed >> 10) & 0x3f
-  const saturation = (packed >> 3) & 0x70
-  const value = packed & 0x7f
-  const chroma = value <= 64 ? (value * saturation) >> 7 : (saturation * (127 - value)) >> 7
-  const brightness = chroma + value
-  const newSaturation = brightness !== 0 ? Math.trunc((chroma << 8) / brightness) : chroma << 1
-  return (hue << 10) | ((newSaturation >> 4) << 7) | brightness
-}
-
-/** ColorUtil.repackHsl — scales lightness by a 0-127 light level. */
-function repackHsl(hsl: number, light: number): number {
-  let l = ((hsl & 0x7f) * light) >> 7
-  if (l < 2) l = 2
-  else if (l > 126) l = 126
-  return (hsl & 0xff80) + l
-}
-
 /** ColorUtil.blend — interpolate two packed HSL16 colours, factor 0-128. */
 function blendHsl16(colorA: number, colorB: number, factor: number): number {
   if (colorA === colorB) return colorA
@@ -118,13 +100,36 @@ function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
 }
 
-/** Final per-vertex colour: client-lit HSL16 → linear RGB floats. */
-function litColor(hsl: number, light: number): [number, number, number] {
-  const rgb = hslToRgb(repackHsl(adjustHsv(hsl), light))
+/** Binary-alpha cutout for effectCombiner-1 materials: black texels → fully
+ *  transparent, everything else opaque (client getTextureForMaterial). Turns an
+ *  opaque foliage PNG into a see-through leaf/fence texture. */
+function binaryAlphaTexture(bitmap: ImageBitmap): THREE.CanvasTexture {
+  const w = bitmap.width, h = bitmap.height
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(bitmap, 0, 0)
+  bitmap.close()
+  const img = ctx.getImageData(0, 0, w, h)
+  const d = img.data
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i] + d[i + 1] + d[i + 2] < 8) d[i + 3] = 0 // near-black → transparent
+  }
+  ctx.putImageData(img, 0, 0)
+  return new THREE.CanvasTexture(canvas)
+}
+
+/** Final per-vertex ground colour (GroundGL): two stages — (1) scale the tile
+ *  colour's HSL lightness by `lightStrength/128` (ambient 74 minus static shadow,
+ *  the source of the ground's shading), then (2) multiply the resulting RGB by
+ *  the directional sun multiplier. Both clamped like the client. */
+function litColor(hsl: number, mul: number): [number, number, number] {
+  const rgb = hslToRgb(hsl)
   return [
-    srgbToLinear(((rgb >> 16) & 0xff) / 255),
-    srgbToLinear(((rgb >> 8) & 0xff) / 255),
-    srgbToLinear((rgb & 0xff) / 255),
+    srgbToLinear(Math.min(1, (((rgb >> 16) & 0xff) / 255) * mul)),
+    srgbToLinear(Math.min(1, (((rgb >> 8) & 0xff) / 255) * mul)),
+    srgbToLinear(Math.min(1, ((rgb & 0xff) / 255) * mul)),
   ]
 }
 
@@ -466,6 +471,43 @@ export function computeHeights(terrain: MapTerrain, regionX: number, regionY: nu
   return planes
 }
 
+/** Per-vertex water depth grid from the underwater ("um") terrain: the um
+ *  explicit-height value (client units, heightValue*32) at each vertex corner,
+ *  0 where absent. This is the riverbed's downward offset from the water
+ *  surface — the client's texcoord0.z that drives shoreFactor. */
+export function computeWaterDepth(underwater: MapTerrain): Int32Array[] {
+  const presence = underwater.heightPresence
+  const values = underwater.heightValue
+  const planes: Int32Array[] = []
+  for (let plane = 0; plane < 4; plane++) {
+    const depth = new Int32Array(VERTS * VERTS)
+    for (let x = 0; x < VERTS; x++) {
+      for (let y = 0; y < VERTS; y++) {
+        const tx = Math.min(x, SIZE - 1)
+        const ty = Math.min(y, SIZE - 1)
+        const idx = tileIndex(plane, tx, ty)
+        const hasHeight = (presence[idx >> 3] & (1 << (idx & 0x7))) !== 0
+        // um heights are stored positive = downward depth (client i_13*8 << 2).
+        depth[x * VERTS + y] = hasHeight ? ((values[idx] & 0xff) * 8) << 2 : 0
+      }
+    }
+    planes.push(depth)
+  }
+  return planes
+}
+
+/** Riverbed vertex heights = surface height + water depth (deeper = more
+ *  positive in the decode convention, i.e. lower once rendered as Y = -h).
+ *  Feeding these to buildTerrainMesh with the underwater terrain draws the
+ *  submerged bed beneath the transparent water. */
+export function computeRiverbedHeights(surface: Int32Array[], depth: Int32Array[]): Int32Array[] {
+  return surface.map((plane, p) => {
+    const out = new Int32Array(plane.length)
+    for (let i = 0; i < plane.length; i++) out[i] = plane[i] + depth[p][i]
+    return out
+  })
+}
+
 /** Ground.getAverageHeight — bilinear height at 512-scale scene coords. */
 export function averageHeight(heights: Int32Array, sceneX: number, sceneY: number): number {
   const tileX = sceneX >> 9
@@ -498,18 +540,19 @@ export type SunConfig = {
 
 export const DEFAULT_SUN: SunConfig = { x: -50, y: -60, z: -50, ambient: 1.1523438 }
 
-/** GroundSM init — slope-directional light per vertex, 2..126, over an
- *  arbitrary square vertex grid. */
-function computeVertexLightGrid(heights: Int32Array, verts: number, sun: SunConfig = DEFAULT_SUN): Uint8Array {
-  // client: EnvironmentManager applies (0.7 + brightness·0.1) · sunAmbient;
-  // mid brightness (0.2) gives the default 75518 for ambient 1.1523438
-  const baseLight = Math.trunc(0.9 * sun.ambient * 65535) >> 9
-  const sx = sun.x << 2, sy = sun.y << 2, sz = sun.z << 2
-  const mag = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1
-  const lightX = Math.trunc((sx * 65535) / mag)
-  const lightY = Math.trunc((sy * 65535) / mag)
-  const lightZ = Math.trunc((sz * 65535) / mag)
-  const light = new Uint8Array(verts * verts).fill(84)
+// HD ground lighting — the client (OpenGLGround) uploads a per-vertex surface
+// NORMAL (from the height gradient) and lights it with the SAME scene shader as
+// models: the half-Lambert of the dumped "Model" GLSL. So the ground light is a
+// float multiplier per vertex, `hl·(sunColour + 0.5·ambient) + 0.5·ambient`, with
+// `hl = clamp(dot(groundNormal, sunDir)·0.5 + 0.5, 0, 1)`. Static shadows are a
+// separate multiply (baked into the client's ground vertex colour). Gray sun/
+// ambient (DEFAULT_MODEL_SUN) so a single scalar multiplier suffices for terrain.
+const GROUND_SUN_GRAY = (DEFAULT_MODEL_SUN.sunColour[0] + DEFAULT_MODEL_SUN.sunColour[1] + DEFAULT_MODEL_SUN.sunColour[2]) / 3
+const GROUND_AMB_GRAY = (DEFAULT_MODEL_SUN.ambientColour[0] + DEFAULT_MODEL_SUN.ambientColour[1] + DEFAULT_MODEL_SUN.ambientColour[2]) / 3
+function computeVertexLightGrid(heights: Int32Array, verts: number, _sun: SunConfig = DEFAULT_SUN): Float32Array {
+  const sl = Math.hypot(DEFAULT_MODEL_SUN.dir[0], DEFAULT_MODEL_SUN.dir[1], DEFAULT_MODEL_SUN.dir[2]) || 1
+  const sdx = DEFAULT_MODEL_SUN.dir[0] / sl, sdy = DEFAULT_MODEL_SUN.dir[1] / sl, sdz = DEFAULT_MODEL_SUN.dir[2] / sl
+  const light = new Float32Array(verts * verts)
   for (let x = 0; x < verts; x++) {
     for (let y = 0; y < verts; y++) {
       // client computes 1..size-1 only; clamp neighbours so edges get lit too
@@ -517,33 +560,30 @@ function computeVertexLightGrid(heights: Int32Array, verts: number, sun: SunConf
       const ym = Math.max(y - 1, 0), yp = Math.min(y + 1, verts - 1)
       const dhx = heights[xp * verts + y] - heights[xm * verts + y]
       const dhy = heights[x * verts + yp] - heights[x * verts + ym]
-      const len = Math.trunc(Math.sqrt(512 * 512 + dhx * dhx + dhy * dhy))
-      const nx = Math.trunc((dhx << 8) / len)
-      const ny = Math.trunc((512 * -512) / len)
-      const nz = Math.trunc((dhy << 8) / len)
-      let l = baseLight + ((lightX * nx + lightY * ny + lightZ * nz) >> 17)
-      l >>= 1
-      if (l < 2) l = 2
-      else if (l > 126) l = 126
-      light[x * verts + y] = l
+      // GL ground normal from the height surface (positions are (x, −h, −y)):
+      // n = normalize(dhx, 1024, −dhy) → flat ground points +y (up).
+      const len = Math.hypot(dhx, 1024, dhy) || 1
+      const nx = dhx / len, ny = 1024 / len, nz = -dhy / len
+      const hl = Math.min(1, Math.max(0, (sdx * nx + sdy * ny + sdz * nz) * 0.5 + 0.5))
+      light[x * verts + y] = hl * (GROUND_SUN_GRAY + GROUND_AMB_GRAY * 0.5) + GROUND_AMB_GRAY * 0.5
     }
   }
   return light
 }
 
-function computeVertexLight(heights: Int32Array): Uint8Array {
+function computeVertexLight(heights: Int32Array): Float32Array {
   return computeVertexLightGrid(heights, VERTS)
 }
 
-/** Bilinear light at 512-scale coords (GroundSM.calculateBlockTiles vertex light). */
-function lightAt(light: Uint8Array, sceneX: number, sceneY: number): number {
+/** Bilinear brightness multiplier at 512-scale coords (GL ground vertex light). */
+function lightAt(light: Float32Array, sceneX: number, sceneY: number): number {
   const tileX = Math.min(sceneX >> 9, VERTS - 2)
   const tileY = Math.min(sceneY >> 9, VERTS - 2)
   const offX = sceneX & 511
   const offY = sceneY & 511
   const la = light[(tileX + 1) * VERTS + tileY] * offX + light[tileX * VERTS + tileY] * (512 - offX)
   const lb = light[tileX * VERTS + tileY + 1] * (512 - offX) + light[(tileX + 1) * VERTS + tileY + 1] * offX
-  return (la * (512 - offY) + lb * offY) >> 18
+  return (la * (512 - offY) + lb * offY) / (512 * 512)
 }
 
 // ---------------------------------------------------------------------------
@@ -557,8 +597,8 @@ const MVERTS = MOSAIC + 1
 
 export class SceneMosaic {
   private heights: Int32Array[] = [] // per plane, MVERTS²
-  private lights: Uint8Array[] = []
-  private sliceCache = new Map<string, { heights: Int32Array[]; lights: Uint8Array[] }>()
+  private lights: Float32Array[] = []
+  private sliceCache = new Map<string, { heights: Int32Array[]; lights: Float32Array[] }>()
   /** regions[dx+1][dy+1]; null when that neighbour isn't dumped. */
   private regions: (MapTerrain | null)[][]
   private regionX: number
@@ -613,17 +653,17 @@ export class SceneMosaic {
   }
 
   /** 65×65 per-plane height slices for one region (region-local layout). */
-  slicesFor(dx: number, dy: number): { heights: Int32Array[]; lights: Uint8Array[] } {
+  slicesFor(dx: number, dy: number): { heights: Int32Array[]; lights: Float32Array[] } {
     const key = `${dx},${dy}`
     let cached = this.sliceCache.get(key)
     if (cached) return cached
     const baseX = (dx + 1) * SIZE
     const baseY = (dy + 1) * SIZE
     const heights: Int32Array[] = []
-    const lights: Uint8Array[] = []
+    const lights: Float32Array[] = []
     for (let plane = 0; plane < 4; plane++) {
       const h = new Int32Array(VERTS * VERTS)
-      const l = new Uint8Array(VERTS * VERTS)
+      const l = new Float32Array(VERTS * VERTS)
       for (let x = 0; x < VERTS; x++) {
         for (let y = 0; y < VERTS; y++) {
           h[x * VERTS + y] = this.heights[plane][(baseX + x) * MVERTS + baseY + y]
@@ -939,7 +979,7 @@ export function isWaterMaterial(meta: MaterialMeta): boolean {
   return hue >= 34 && hue <= 45
 }
 
-type Bucket = { positions: number[]; colors: number[]; uvs: number[]; owners: number[]; alphas: number[] }
+type Bucket = { positions: number[]; colors: number[]; uvs: number[]; owners: number[]; alphas: number[]; depths: number[] }
 
 // blend buckets (terrain texture splatting) share the map under offset keys
 const BLEND_KEY = 1 << 20
@@ -949,7 +989,7 @@ class BucketSet {
 
   get(textureId: number): Bucket {
     let b = this.buckets.get(textureId)
-    if (!b) this.buckets.set(textureId, (b = { positions: [], colors: [], uvs: [], owners: [], alphas: [] }))
+    if (!b) this.buckets.set(textureId, (b = { positions: [], colors: [], uvs: [], owners: [], alphas: [], depths: [] }))
     return b
   }
 
@@ -968,6 +1008,10 @@ class BucketSet {
   async toMesh(
     getTexture: (id: number) => Promise<THREE.Texture | null>,
     getMeta?: (id: number) => Promise<MaterialMeta | null>,
+    // Locs bake their lit colour but not the detail-map normalisation the
+    // terrain path does inline — set true so greyscale detail maps (tree leaves,
+    // bark) don't darken the baked colour (255/avgLuma, same as emitTri).
+    boostDetailMaps = false,
   ): Promise<THREE.Mesh | null> {
     const entries = [...this.buckets.entries()].filter(([, b]) => b.positions.length > 0)
       // opaque buckets first, blend passes after (drawn over their base)
@@ -979,6 +1023,11 @@ class BucketSet {
     const colors = new Float32Array(total * 4).fill(1)
     const uvs = new Float32Array(total * 2)
     const owners = new Int32Array(total / 3)
+    // Per-vertex water depth (0 for non-water verts) — drives the water
+    // surface shader's shore/transparency fade. Only populated when the caller
+    // passed a depth grid and the vertex belongs to a water material.
+    const waterDepth = new Float32Array(total)
+    let anyDepth = false
     const geometry = new THREE.BufferGeometry()
     const materials: THREE.Material[] = []
     let vert = 0
@@ -987,11 +1036,19 @@ class BucketSet {
       const textureId = blend ? key - BLEND_KEY : key
       const count = b.positions.length / 3
       positions.set(b.positions, vert * 3)
+      // Fetch material meta up front so the detail-map boost can scale the
+      // baked colours as they're copied (leaves/bark greyscale-neutralised).
+      const meta = textureId >= 0 && getMeta ? await getMeta(textureId) : null
+      const boost = boostDetailMaps && meta?.detailsOnly ? 255 / meta.avgLuma : 1
       for (let i = 0; i < count; i++) {
-        colors[(vert + i) * 4] = b.colors[i * 3]
-        colors[(vert + i) * 4 + 1] = b.colors[i * 3 + 1]
-        colors[(vert + i) * 4 + 2] = b.colors[i * 3 + 2]
+        colors[(vert + i) * 4] = b.colors[i * 3] * boost
+        colors[(vert + i) * 4 + 1] = b.colors[i * 3 + 1] * boost
+        colors[(vert + i) * 4 + 2] = b.colors[i * 3 + 2] * boost
         if (b.alphas.length > 0) colors[(vert + i) * 4 + 3] = b.alphas[i]
+      }
+      if (b.depths.length > 0) {
+        waterDepth.set(b.depths, vert)
+        anyDepth = true
       }
       uvs.set(b.uvs, vert * 2)
       owners.set(b.owners, vert / 3)
@@ -1008,7 +1065,6 @@ class BucketSet {
         if (texture) {
           // each animated material needs its own texture instance so offsets
           // don't leak across materials sharing a cached THREE.Texture
-          const meta = getMeta ? await getMeta(textureId) : null
           const animated = meta && (meta.speedU !== 0 || meta.speedV !== 0 || isWaterMaterial(meta))
           material.map = animated ? texture.clone() : texture
           // foliage/fence textures use hard alpha cutouts — but crossfade
@@ -1028,6 +1084,7 @@ class BucketSet {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4))
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
+    if (anyDepth) geometry.setAttribute('waterDepth', new THREE.BufferAttribute(waterDepth, 1))
     const mesh = new THREE.Mesh(geometry, materials)
     mesh.userData.triangleOwners = owners
     return mesh
@@ -1051,14 +1108,21 @@ export async function buildTerrainMesh(
   heightsAll: Int32Array[],
   configs: SceneConfigs,
   assets: LocAssets,
-  pre?: { lights: Uint8Array[]; palettes: Int32Array[]; overlayCorners?: Int32Array[]; underlayCorners?: Int32Array[] },
+  pre?: { lights: Float32Array[]; shadows?: Float32Array[]; palettes: Int32Array[]; overlayCorners?: Int32Array[]; underlayCorners?: Int32Array[] },
+  // Per-plane water-depth grids (VERTS×VERTS, client units) — riverbed minus
+  // surface height. When present, water-material vertices get a `waterDepth`
+  // attribute for the shore/transparency fade.
+  waterDepthAll?: Int32Array[],
 ): Promise<THREE.Mesh | null> {
-  const lightCache: (Uint8Array | null)[] = [null, null, null, null]
+  const lightCache: (Float32Array | null)[] = [null, null, null, null]
   const paletteCache: (Int32Array | null)[] = [null, null, null, null]
   const cornerCache: (Int32Array | null)[] = [null, null, null, null]
   const fluCornerCache: (Int32Array | null)[] = [null, null, null, null]
   const lightOf = (dp: number) =>
     (lightCache[dp] ??= pre?.lights?.[dp] ?? computeVertexLight(heightsAll[dp]))
+  // Blurred static-shadow grid per plane (0 = no shadow). Subtracted from the
+  // GroundGL base strength; empty when no locs have been built yet.
+  const shadowOf = (dp: number): Float32Array | null => pre?.shadows?.[dp] ?? null
   const paletteOf = (dp: number) =>
     (paletteCache[dp] ??= pre?.palettes?.[dp] ?? computeUnderlayPalette(terrain, dp, configs))
   const cornersOf = (dp: number) =>
@@ -1066,9 +1130,10 @@ export async function buildTerrainMesh(
   const fluCornersOf = (dp: number) =>
     (fluCornerCache[dp] ??= pre?.underlayCorners?.[dp] ?? computeUnderlayCornerIds(terrain, dp))
   const buckets = new BucketSet()
-  // lighting-only tint for self-coloured textures (water etc.)
-  const neutral = (l: number): [number, number, number] => {
-    const c = srgbToLinear(Math.min(1, (l * 2) / 255))
+  // lighting-only tint for self-coloured textures (water etc.): the scene light
+  // multiplier as a grey the texture multiplies.
+  const neutral = (mul: number): [number, number, number] => {
+    const c = srgbToLinear(Math.min(1, mul))
     return [c, c, c]
   }
 
@@ -1100,6 +1165,7 @@ export async function buildTerrainMesh(
   function emitTile(plane: number, x: number, y: number) {
       const heights = heightsAll[plane]
       const light = lightOf(plane)
+      const shadow = shadowOf(plane)
       const palette = paletteOf(plane)
       const ocorners = cornersOf(plane)
       const fcorners = fluCornersOf(plane)
@@ -1209,20 +1275,32 @@ export async function buildTerrainMesh(
         // average so the modulation is brightness-neutral
         const boost = textureId >= 0 && meta?.detailsOnly && hsl !== -1 ? 255 / meta.avgLuma : 1
         const useTint = textureId < 0 || (meta?.detailsOnly === true && hsl !== -1)
+        // water tiles carry a per-vertex depth (surface→riverbed height gap, in
+        // client units) so the water shader can fade to transparent at shallow
+        // shores. Non-water buckets leave depths empty (default 0 in toMesh).
+        const isWater = meta ? isWaterMaterial(meta) : false
         for (let vi = 0; vi < 3; vi++) {
           const [px, py] = pts[vi]
           const sceneX = (x << 9) + px
           const sceneY = (y << 9) + py
           const h = averageHeight(heights, sceneX, sceneY)
           bucket.positions.push(sceneX, -h, -sceneY)
-          const l = Math.max(2, lightAt(light, sceneX, sceneY))
+          if (isWater) {
+            bucket.depths.push(waterDepthAll ? averageHeight(waterDepthAll[plane], sceneX, sceneY) : 0)
+          }
+          // Scene-shader half-Lambert light (from the ground normal) × the static
+          // shadow (baked into the client's ground vertex colour). One multiplier.
+          const sceneLight = Math.max(0, lightAt(light, sceneX, sceneY))
+          const shadowVal = shadow ? lightAt(shadow, sceneX, sceneY) : 0
+          const shadowFactor = Math.max(0, 1 - shadowVal / 128)
+          const mul = sceneLight * shadowFactor
           const vHsl = hsl === -1 ? hsl
             : mode === 1 ? underlayVertexHsl(px, py)
             : mode === 2 ? overlayVertexHsl(px, py, hsl)
             : hsl
           let rgb: [number, number, number]
-          if (useTint && vHsl !== -1) rgb = litColor(vHsl, l)
-          else rgb = neutral(l)
+          if (useTint && vHsl !== -1) rgb = litColor(vHsl, mul)
+          else rgb = neutral(mul)
           bucket.colors.push(rgb[0] * boost, rgb[1] * boost, rgb[2] * boost)
           if (alphas) bucket.alphas.push(alphas[vi])
           // world-planar UVs: one repeat per `texScale` scene units
@@ -1335,8 +1413,11 @@ export type ObjectDefJson = {
   inverted?: boolean
   originalColors?: number[]
   modifiedColors?: number[]
-  originalTextureIds?: number[]
-  modifiedTextureIds?: number[]
+  // Loc texture-swap fields as named in the dumped object JSON (ObjectViewer /
+  // objects.ts loader use the same). Reading them as *TextureIds silently
+  // disabled all loc retexturing — trees kept their base leaf textures.
+  originalTextures?: number[]
+  modifiedTextures?: number[]
   name?: string
   options?: (string | null)[]
   staticShadow?: boolean
@@ -1348,6 +1429,16 @@ export type ObjectDefJson = {
   mapSpriteId?: number
   mapSpriteRotation?: number
   flipMapSprite?: boolean
+  /** Ground-contour ("hillskew") mode — 0 none, 1 follow ground, 2 partial,
+   *  4/5 stretch to the next plane (bridges/raised floors). */
+  groundContourType?: number
+  groundContourModifier?: number
+  /** ModelSM lighting: model ambient = 64 + this, contrast = 850 + this. */
+  ambient?: number
+  contrast?: number
+  /** Sequence ids this loc idles through (ObjectType animation array) — e.g. a
+   *  waving flag. Empty/absent = static. The scene animates these. */
+  animations?: number[]
 }
 
 export type MaterialMeta = {
@@ -1359,6 +1450,10 @@ export type MaterialMeta = {
   speedU: number
   speedV: number
   colorHsl: number
+  /** Material alpha mode (client anInt1226): 0 = opaque, 1 = binary alpha
+   *  (black texels → transparent, foliage/fence cutouts), 2 = per-pixel alpha
+   *  from an opacity op the dump doesn't bake. */
+  effectCombiner: number
 }
 
 export class LocAssets {
@@ -1411,7 +1506,12 @@ export class LocAssets {
           const dir = await texturesDir.getDirectoryHandle(String(id))
           const file = await (await dir.getFileHandle(`${id}.png`)).getFile()
           const bitmap = await createImageBitmap(file)
-          const texture = new THREE.Texture(bitmap)
+          // effectCombiner 1 materials (leaf/foliage/fence cutouts) carry their
+          // shape as black texels the client turns transparent (binary alpha).
+          // Our dumped PNGs are opaque, so derive that alpha here, else the
+          // canopy renders as a solid dark mass instead of see-through leaves.
+          const combiner = (await this.getMaterialMeta(id))?.effectCombiner ?? 0
+          const texture = combiner === 1 ? binaryAlphaTexture(bitmap) : new THREE.Texture(bitmap)
           texture.wrapS = THREE.RepeatWrapping
           texture.wrapT = THREE.RepeatWrapping
           texture.colorSpace = THREE.SRGBColorSpace
@@ -1440,6 +1540,7 @@ export class LocAssets {
           let speedU = 0
           let speedV = 0
           let colorHsl = -1
+          let effectCombiner = 0
           try {
             const defsDir = await this.textureDefsDir()
             if (!defsDir) throw new Error('no texture_definitions')
@@ -1449,6 +1550,7 @@ export class LocAssets {
             speedU = def.textureSpeedU ?? 0
             speedV = def.textureSpeedV ?? 0
             colorHsl = def.colorHsl ?? -1
+            effectCombiner = def.effectCombiner ?? 0
           } catch { /* definition missing — treat as self-coloured */ }
           let avgLuma = 128
           let avgRgb = -1
@@ -1480,7 +1582,7 @@ export class LocAssets {
               avgRgb = (Math.round(sr / n) << 16) | (Math.round(sg / n) << 8) | Math.round(sb / n)
             }
           } catch { /* keep default */ }
-          return { detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl }
+          return { detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl, effectCombiner }
         } catch {
           return null
         }
@@ -1549,17 +1651,93 @@ function isMarkerModel(model: ModelData): boolean {
   return true
 }
 
+// Ground-contour ("hillskew") for locs — port of ModelSM.contourToGround. RS
+// loc models can be deformed so their vertices follow the terrain: paths/floors
+// hug the ground (type 1/2), and — crucially for bridges/raised buildings —
+// their tops stretch up to the NEXT plane's heightmap (type 4/5). Without it a
+// bridge stays flat (its stone arch sinks under the water surface and is
+// occluded) and hillside decorations float. Returns a contoured copy of the
+// model's vertexY (RS units, relative to the tile so the render matrix's
+// −avgHeight translate still applies), or null if the contour can't run.
+//
+// heights/nextHeights are VERTS×VERTS RS height grids (heights[x*VERTS+y]);
+// worldX/Z are fine scene coords (512/tile). Only upscale-1 (v13+) models are
+// contoured — pre-v13 upscaling would need the ground terms upscaled too, and
+// no map loc in the dump uses both.
+function contourVertexY(
+  model: ModelData,
+  contourType: number,
+  contourModifier: number,
+  heights: Int32Array,
+  nextHeights: Int32Array | undefined,
+  sceneX: number,
+  sceneY: number,
+  avgHeight: number,
+): Int32Array | null {
+  if (model.version < 13) return null
+  const { vertexCount, vertexX, vertexY, vertexZ } = model
+  // interpolated ground height at a fine world position (MeshRasterizer bilerp)
+  const groundAt = (h: Int32Array, wx: number, wz: number): number | null => {
+    const tx = wx >> 9, tz = wz >> 9
+    if (tx < 0 || tz < 0 || tx >= VERTS - 1 || tz >= VERTS - 1) return null
+    const rx = wx & 511, rz = wz & 511
+    const a = (h[tx * VERTS + tz] * (512 - rx) + rx * h[(tx + 1) * VERTS + tz]) >> 9
+    const b = (h[tx * VERTS + tz + 1] * (512 - rx) + rx * h[(tx + 1) * VERTS + tz + 1]) >> 9
+    return (a * (512 - rz) + b * rz) >> 9
+  }
+  const out = new Int32Array(vertexCount)
+  let minY = 0, maxY = 0
+  for (let v = 0; v < vertexCount; v++) { if (vertexY[v] < minY) minY = vertexY[v]; if (vertexY[v] > maxY) maxY = vertexY[v] }
+
+  for (let v = 0; v < vertexCount; v++) {
+    const wx = sceneX + vertexX[v]
+    const wz = sceneY + vertexZ[v]
+    let ny = vertexY[v]
+    if (contourType === 1) {
+      const g = groundAt(heights, wx, wz)
+      if (g !== null) ny = g + vertexY[v] - avgHeight
+    } else if (contourType === 2) {
+      if (minY !== 0) {
+        const frac = (vertexY[v] << 16) / minY
+        if (frac < contourModifier) {
+          const g = groundAt(heights, wx, wz)
+          if (g !== null) ny = vertexY[v] + ((g - avgHeight) * (contourModifier - frac)) / contourModifier
+        }
+      }
+    } else if ((contourType === 4 || contourType === 5) && nextHeights) {
+      const gn = groundAt(nextHeights, wx, wz)
+      if (gn === null) return null
+      if (contourType === 4) {
+        ny = vertexY[v] + (maxY - minY) + (gn - avgHeight)
+      } else {
+        const g = groundAt(heights, wx, wz)
+        if (g === null) return null
+        const sizeY = maxY - minY
+        if (sizeY === 0) return null
+        ny = (((g - gn - contourModifier) * ((vertexY[v] << 8) / sizeY)) >> 8) - (avgHeight - g)
+      }
+    }
+    out[v] = Math.round(ny)
+  }
+  return out
+}
+
 /** Accumulates transformed model triangles into texture buckets. */
 class ModelAccumulator {
   buckets = new BucketSet()
   private uvWriters = new WeakMap<ModelData, UVWriter>()
   private uvScratch = new Float32Array(6)
 
-  addModel(model: ModelData, matrix: THREE.Matrix4, owner = -1) {
+  addModel(model: ModelData, matrix: THREE.Matrix4, owner = -1, light?: { sun?: ModelSun }) {
     const upscale = model.version < 13 ? 4 : 1
     const v = new THREE.Vector3()
     let uvWriter = this.uvWriters.get(model)
     if (!uvWriter) this.uvWriters.set(model, (uvWriter = makeUVWriter(model)))
+    // Client "Model" shader lighting (dumped GLSL): per-vertex half-Lambert in
+    // WORLD space, so lighting depends on the loc's rotation — computed per
+    // placement (the world normal matrix isn't shared across placements).
+    const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
+    const lit = computeModelLitRgb(model, normalMat, light?.sun)
     for (let f = 0; f < model.faceCount; f++) {
       if (model.faceAlpha[f] === -1) continue
       const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
@@ -1574,19 +1752,131 @@ class ModelAccumulator {
         bucket.uvs.push(0, 0, 0, 0, 0, 0)
       }
       // face colour tints the material texture — the dumped material PNGs are
-      // (mostly) greyscale detail maps the client multiplies by face HSL
-      const rgb = hslToRgb(model.faceColor[f] & 0xffff)
-      const r = srgbToLinear(((rgb >> 16) & 0xff) / 255)
-      const g = srgbToLinear(((rgb >> 8) & 0xff) / 255)
-      const b = srgbToLinear((rgb & 0xff) / 255)
-      for (const vi of [ia, ib, ic]) {
+      // (mostly) greyscale detail maps the client multiplies by face colour. The
+      // lit colour is per-vertex so untextured scenery gets smooth Gouraud shading.
+      const corners = [ia, ib, ic]
+      for (let k = 0; k < 3; k++) {
+        const base = (f * 3 + k) * 3
+        const vi = corners[k]
         v.set(model.vertexX[vi] * upscale, -model.vertexY[vi] * upscale, -model.vertexZ[vi] * upscale)
         v.applyMatrix4(matrix)
         bucket.positions.push(v.x, v.y, v.z)
-        bucket.colors.push(r, g, b)
+        bucket.colors.push(lit[base], lit[base + 1], lit[base + 2])
       }
     }
   }
+}
+
+/** A placed loc that idles through a sequence (e.g. a waving flag) — kept out
+ *  of the merged static loc mesh so the scene can pose it per frame. `matrix`
+ *  is the region-local placement transform; `model` already has recolour /
+ *  ground-contour applied and retains its vertexSkins for the pose math. */
+export type AnimatedLoc = {
+  model: ModelData
+  matrix: THREE.Matrix4
+  animationId: number
+  owner: LocRef
+}
+
+/** A built animatable loc: its three.js mesh (geometry in model-local space —
+ *  the caller sets `mesh.matrix` to the placement transform) plus an `update`
+ *  that rewrites the position buffer from a posed animation frame. */
+export type AnimatedLocMesh = {
+  mesh: THREE.Mesh
+  update: (posed: PosedVertices) => void
+}
+
+/** Build a single-model animatable mesh (mirrors ModelViewer's non-indexed
+ *  per-face buffer + ModelAccumulator's map-scene coord/upscale/lighting), and
+ *  return an in-place per-frame position updater. Geometry is in model-local
+ *  flipped space (x, −y, −z)·upscale so the caller can drive it with the
+ *  placement matrix as the mesh transform and re-pose cheaply without a
+ *  per-vertex matrix multiply. Lighting is baked once from the placement's
+ *  world-normal matrix (a waving flag's Gouraud shading barely shifts). */
+export async function buildAnimatedLocMesh(
+  model: ModelData,
+  matrix: THREE.Matrix4,
+  assets: LocAssets,
+  sun?: ModelSun,
+): Promise<AnimatedLocMesh | null> {
+  const upscale = model.version < 13 ? 4 : 1
+  const uvWriter = makeUVWriter(model)
+  const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
+  const lit = computeModelLitRgb(model, normalMat, sun)
+
+  // bucket faces by texture id (skip fully-transparent / degenerate faces)
+  const buckets = new Map<number, number[]>()
+  for (let f = 0; f < model.faceCount; f++) {
+    if (model.faceAlpha[f] === -1) continue
+    const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
+    if (ia >= model.vertexCount || ib >= model.vertexCount || ic >= model.vertexCount) continue
+    const tex = model.faceTextures?.[f] ?? -1
+    const arr = buckets.get(tex)
+    if (arr) arr.push(f)
+    else buckets.set(tex, [f])
+  }
+  const order = [...buckets.keys()].sort((a, b) => a - b)
+  const validFaces = order.reduce((n, t) => n + buckets.get(t)!.length, 0)
+  if (validFaces === 0) return null
+
+  const positions = new Float32Array(validFaces * 9)
+  const colors = new Float32Array(validFaces * 9)
+  const uvs = new Float32Array(validFaces * 6)
+  const cornerVertex = new Int32Array(validFaces * 3)
+  const scratch = new Float32Array(6)
+  const geometry = new THREE.BufferGeometry()
+  const materials: THREE.Material[] = []
+  let vert = 0
+  for (const tex of order) {
+    const faces = buckets.get(tex)!
+    geometry.addGroup(vert, faces.length * 3, materials.length)
+    for (const f of faces) {
+      const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
+      const corners = [ia, ib, ic]
+      if (tex >= 0) { uvWriter(f, ia, ib, ic, scratch, 0); uvs.set(scratch, vert * 2) }
+      for (let k = 0; k < 3; k++) {
+        const vi = corners[k]
+        const p = (vert + k) * 3
+        positions[p] = model.vertexX[vi] * upscale
+        positions[p + 1] = -model.vertexY[vi] * upscale
+        positions[p + 2] = -model.vertexZ[vi] * upscale
+        const lb = (f * 3 + k) * 3
+        colors[p] = lit[lb]; colors[p + 1] = lit[lb + 1]; colors[p + 2] = lit[lb + 2]
+        cornerVertex[vert + k] = vi
+      }
+      vert += 3
+    }
+    const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
+    if (tex >= 0) {
+      const texture = await assets.getTexture(tex)
+      if (texture) { material.map = texture; material.alphaTest = 0.35; material.needsUpdate = true }
+    }
+    materials.push(material)
+  }
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
+  // Rest-pose bounding sphere, padded so gentle animation never exceeds it —
+  // lets three.js frustum-cull the DRAW of off-screen animated locs (we don't
+  // recompute bounds per frame). frustumCulled stays at its default (true).
+  geometry.computeBoundingSphere()
+  if (geometry.boundingSphere) geometry.boundingSphere.radius *= 1.5
+  const mesh = new THREE.Mesh(geometry, materials)
+  const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute
+
+  const update = (posed: PosedVertices) => {
+    if (posed.x.length !== model.vertexCount) return
+    const X = posed.x, Y = posed.y, Z = posed.z
+    for (let i = 0; i < cornerVertex.length; i++) {
+      const v = cornerVertex[i]
+      positions[i * 3] = X[v] * upscale
+      positions[i * 3 + 1] = -Y[v] * upscale
+      positions[i * 3 + 2] = -Z[v] * upscale
+    }
+    positionAttr.needsUpdate = true
+  }
+
+  return { mesh, update }
 }
 
 /** An invisible utility loc (sound emitter / map-icon anchor) worth showing
@@ -1719,7 +2009,7 @@ export async function buildSkyboxMesh(
 
     const acc = new ModelAccumulator()
     acc.addModel(model, new THREE.Matrix4())
-    const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id))
+    const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true)
     if (!mesh) return null
     for (const m of mesh.material as THREE.MeshBasicMaterial[]) {
       m.fog = false // the dome must not be fogged out
@@ -1765,10 +2055,13 @@ export async function buildLocsMesh(
   heightsAll: Int32Array[],
   assets: LocAssets,
   onProgress?: (done: number, total: number) => void,
-): Promise<{ mesh: THREE.Mesh | null; markers: MarkerInfo[]; shadows: Uint8Array }> {
+): Promise<{ mesh: THREE.Mesh | null; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[] }> {
   const acc = new ModelAccumulator()
   const markers: MarkerInfo[] = []
   const locRefs: LocRef[] = []
+  // locs with an idle sequence (waving flags etc.) — collected out of the merged
+  // static mesh so the scene can pose them per frame.
+  const animated: AnimatedLoc[] = []
   // SceneGraph static shadows: values SUBTRACTED from the vertex lights.
   // Walls darken their edge's two corners by 50; scenery darkens every
   // footprint corner by the model's shadow displacement (size2d/4, clamped
@@ -1790,6 +2083,7 @@ export async function buildLocsMesh(
     if (onProgress && done % 64 === 0) onProgress(done, planeObjects.length)
     const def = await assets.getDef(objectId)
     if (!def || !def.objectModelIds || def.objectModelIds.length === 0) continue
+    const isAnimated = (def.animations?.length ?? 0) > 0
 
     // model list for this loc shape (ObjectType: shapes[] parallel to objectModelIds[])
     let shapeIdx = def.shapes ? def.shapes.indexOf(shape) : -1
@@ -1869,12 +2163,32 @@ export async function buildLocsMesh(
           continue
         }
         let m = model
-        if (def.originalColors?.length || def.originalTextureIds?.length) {
-          // applyRecolor mutates — work on a shallow copy of the colour array
-          m = { ...model, faceColor: model.faceColor.slice() }
-          applyRecolor(m, def.originalColors ?? [], def.modifiedColors ?? [], def.originalTextureIds ?? [], def.modifiedTextureIds ?? [])
+        if (def.originalColors?.length || def.originalTextures?.length) {
+          // applyRecolor mutates faceColor AND faceTextures — copy both so the
+          // swap doesn't leak into the shared cached model (other locs reuse it).
+          m = { ...model, faceColor: model.faceColor.slice(), faceTextures: model.faceTextures?.slice() ?? null }
+          applyRecolor(m, def.originalColors ?? [], def.modifiedColors ?? [], def.originalTextures ?? [], def.modifiedTextures ?? [])
         }
-        acc.addModel(m, matrix, locRefs.length)
+        // Ground-contour ("hillskew"): deform the model to follow the terrain /
+        // stretch up to the next plane (bridges, hillside floors, raised
+        // buildings). The render matrix still applies its −avgHeight translate,
+        // so the contoured vertexY stays tile-relative.
+        const contourType = def.groundContourType ?? 0
+        if (contourType !== 0) {
+          const contoured = contourVertexY(m, contourType, def.groundContourModifier ?? 0, heights, heightsAll[decodedPlane + 1], sceneX, sceneY, avgHeight)
+          if (contoured) m = { ...m, vertexY: contoured }
+        }
+        if (isAnimated) {
+          // keep out of the merged static mesh; the scene poses it per frame
+          animated.push({
+            model: m,
+            matrix: matrix.clone(),
+            animationId: def.animations![0],
+            owner: { objectId, shape, rotation, x, y, plane: decodedPlane },
+          })
+        } else {
+          acc.addModel(m, matrix, locRefs.length)
+        }
       }
     }
     locRefs.push({ objectId, shape, rotation, x, y, plane: decodedPlane })
@@ -1893,7 +2207,7 @@ export async function buildLocsMesh(
       markers.push({ x: sceneX, y: -avgHeight, z: -sceneY, objectId, kind, tileX: x, tileY: y })
     }
   }
-  const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id))
+  const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true)
   if (mesh) mesh.userData.locs = locRefs
-  return { mesh, markers, shadows }
+  return { mesh, markers, shadows, animated }
 }

@@ -19,6 +19,17 @@ export type MapRegionDef = {
   heightValue: string
   /** [objectId, type, rotation, x, y, plane] per placed object. */
   objects: [number, number, number, number, number, number][]
+  /** Underwater / HD-water terrain ("um" archive) — the riverbed beneath water
+   *  tiles, same channel format as the surface terrain. Present for ~half the
+   *  world (regions with HD water); undefined otherwise. Dumped by cryogen
+   *  MapDefinitions.decodeUnderwaterTerrain. */
+  hasUnderwaterTerrain?: boolean
+  uwUnderlayIds?: string
+  uwOverlayIds?: string
+  uwOverlayShapeRot?: string
+  uwTileFlags?: string
+  uwHeightPresence?: string
+  uwHeightValue?: string
 }
 
 /** One placed-object entry: [objectId, type, rotation, x, y, plane]. */
@@ -101,6 +112,21 @@ export function decodeTerrain(def: MapRegionDef): MapTerrain {
   }
 }
 
+/** Decode the underwater ("um") terrain channels, if this region has them.
+ *  Same MapTerrain shape as the surface terrain — its heightValue is the
+ *  riverbed height used to derive water depth. */
+export function decodeUnderwaterTerrain(def: MapRegionDef): MapTerrain | undefined {
+  if (!def.hasUnderwaterTerrain || def.uwHeightValue === undefined) return undefined
+  return {
+    underlayIds: b64ToBytes(def.uwUnderlayIds ?? ''),
+    overlayIds: b64ToBytes(def.uwOverlayIds ?? ''),
+    overlayShapeRot: b64ToBytes(def.uwOverlayShapeRot ?? ''),
+    tileFlags: b64ToBytes(def.uwTileFlags ?? ''),
+    heightPresence: b64ToBytes(def.uwHeightPresence ?? ''),
+    heightValue: b64ToBytes(def.uwHeightValue),
+  }
+}
+
 export function encodeTerrain(def: MapRegionDef, terrain: MapTerrain): MapRegionDef {
   return {
     ...def,
@@ -159,6 +185,9 @@ export type MapData = {
   id: number
   def: MapRegionDef
   terrain: MapTerrain
+  /** Riverbed/seabed beneath water tiles (um archive); undefined if this
+   *  region has no HD-water data. */
+  underwaterTerrain?: MapTerrain
   underlayColors: ColorLookup
   overlayColors: ColorLookup
   /** Cache root, for the 3D scene view's on-demand config/model loads. */
@@ -232,12 +261,13 @@ export async function loadRegion(
   const file = await fileHandle.getFile()
   const def = JSON.parse(await file.text()) as MapRegionDef
   const terrain = decodeTerrain(def)
+  const underwaterTerrain = decodeUnderwaterTerrain(def)
 
   const [underlayColors, overlayColors] = rootHandle
     ? await getColorLookups(rootHandle)
     : [new Map<number, number>(), new Map<number, number>()]
 
-  return { id: regionId, def, terrain, underlayColors, overlayColors, rootHandle }
+  return { id: regionId, def, terrain, underwaterTerrain, underlayColors, overlayColors, rootHandle }
 }
 
 /** Persist a region's terrain back to its own <regionId>.json. */
