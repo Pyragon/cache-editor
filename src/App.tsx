@@ -17,7 +17,7 @@ import type { TextureData } from './loaders/textures'
 import ModelPreviewModal from './components/ModelPreviewModal'
 import { resolveRetextureAssets } from './components/modelDisplay'
 import { invalidateAnimCompatIndex } from './loaders/animCompat'
-import { invalidateNpcIcon } from './components/npcSnapshot'
+import { invalidateNpcIcon, invalidateObjectIcon } from './components/npcSnapshot'
 import type { ParticleData } from './loaders/particles'
 import NativeLibrariesViewer from './components/NativeLibrariesViewer'
 import type { NativeLibrariesData } from './loaders/native_libraries'
@@ -605,8 +605,9 @@ function App() {
     if (['animations', 'animation_frame_sets', 'config_bas', 'npcs', 'spot_animations', 'items'].includes(selectedEntry.name)) {
       invalidateAnimCompatIndex()
     }
-    // The sidebar snapshot icon reflects the def — regenerate after a save.
+    // The snapshot icons reflect the def — regenerate after a save.
     if (selectedEntry.name === 'npcs') invalidateNpcIcon(selectedItem.id)
+    if (selectedEntry.name === 'objects') invalidateObjectIcon(selectedItem.id)
 
     // In a dropped (Firefox) session nothing reached disk — the shim collected the
     // bytes instead. Hand them over as a download; several files become one zip whose
@@ -1394,7 +1395,7 @@ function App() {
                 : itemContent != null
                 ? <ItemViewer data={itemContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenModel={handleOpenItemModel} onOpenCursor={(id) => handleNavigateToItem('config_cursors', id)} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : objectContent != null
-                ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <ObjectViewer data={objectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} />
                 : npcContent != null
                 ? <NpcViewer data={npcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} />
                 : varbitContent != null
