@@ -64,6 +64,7 @@ export const ENTRY_ORDER: EntryDef[] = [
   { name: 'models', path: ['models'] },
   { name: 'sprites', path: ['sprites'] },
   { name: 'textures', path: ['textures'] },
+  { name: 'shaders', path: ['shaders'] },
   { name: 'huffman', path: ['huffman'] },
   { name: 'music2', path: ['music2'] },
   { name: 'cs2', path: ['cs2'] },

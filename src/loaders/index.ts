@@ -14,6 +14,7 @@ import config_clan_var_settings from './config/clan_var_settings'
 import config_underlays from './config/underlays'
 import config_overlays from './config/overlays'
 import maps from './maps'
+import { shadersLoader } from './shaders'
 import game_tips from './game_tips'
 import config_hitsplats from './config/hitsplats'
 import config_identikit from './config/identikit'
@@ -90,6 +91,7 @@ const registry: Record<string, CacheLoader> = {
   midi_instruments,
   music,
   music2: music,
+  shaders: shadersLoader,
   models,
   native_libraries,
   npcs,

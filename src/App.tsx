@@ -9,6 +9,8 @@ import type { QuestData } from './components/QuestViewer'
 import SpriteViewer from './components/SpriteViewer'
 import type { SpriteData } from './loaders/sprites'
 import ModelViewer from './components/ModelViewer'
+import ShaderViewer from './components/ShaderViewer'
+import type { ShaderData } from './loaders/shaders'
 import type { ModelDisplayParams } from './components/ModelViewer'
 import type { ModelData } from './loaders/models'
 import TextureViewer from './components/TextureViewer'
@@ -350,6 +352,9 @@ function App() {
 
   const modelContent = selectedEntry?.name === 'models' && selectedItemContent != null
     ? selectedItemContent as ModelData
+    : null
+  const shaderContent = selectedEntry?.name === 'shaders' && selectedItemContent != null
+    ? selectedItemContent as ShaderData
     : null
 
   const textureContent = (selectedEntry?.name === 'textures' || selectedEntry?.name === 'texture_definitions') && selectedItemContent != null
@@ -1380,6 +1385,8 @@ function App() {
                 ? <QuestViewer data={questContent.quest} serverData={questContent.server ?? undefined} onSave={(quest, server) => handleSaveItem({ quest, server })} onDirtyChange={setIsContentDirty} />
                 : spriteContent != null
                 ? <SpriteViewer data={spriteContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : shaderContent != null
+                ? <ShaderViewer data={shaderContent} />
                 : modelContent != null
                 ? <ModelViewer data={modelContent} display={modelDisplay} />
                 : textureContent != null
