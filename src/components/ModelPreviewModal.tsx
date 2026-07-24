@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { loadModelComposite } from '../loaders/npcComposite'
+import type { ModelCompositeSpec } from '../loaders/npcComposite'
 import type { ModelData } from '../loaders/models'
 import type { AnimationDef } from '../loaders/animations'
 import { useSequencePlayback } from './useSequencePlayback'
@@ -19,8 +20,8 @@ type Props = {
   translations?: (number[] | null)[]
   /** Recolour/retexture pairs applied to the (merged) mesh, e.g. an NPC's. */
   recolor?: { from?: number[]; to?: number[]; textureFrom?: number[]; textureTo?: number[] }
-  /** NPC scaleXZ/scaleY (128 = unscaled) — client Model.scale, v·s >> 7. */
-  scale?: { xz: number; y: number }
+  /** Per-axis scale (128 = unscaled) — client Model.scale, v·s >> 7. */
+  scale?: ModelCompositeSpec['scale']
   /** NPC tint: each face HSL component blends toward the target by
    *  opacity/128 (client ModelSM.tint); ignored when opacity is 0, and a −1
    *  component leaves that channel untouched. */

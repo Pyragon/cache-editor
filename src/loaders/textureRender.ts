@@ -17,6 +17,8 @@
 
 import type { MaterialDefinition, TextureOperation } from './textures'
 import { ColorImageCache, MonochromeImageCache } from './textureCaches'
+import { rasterizeShapes } from './textureShapes'
+import type { RasterShape } from './textureShapes'
 import { JavaRandom, PALETTE_COS, PALETTE_SIN, boundedRandom, idiv, makeRaster, seededByteArrayCached } from './textureRaster'
 import type { Raster } from './textureRaster'
 
@@ -1405,6 +1407,37 @@ OPS[38] = {
           error -= run
           yy += stepY
         }
+      }
+    }
+  },
+}
+
+// 29: Rasterizer — draws vector shapes (lines/beziers/rects/ellipses) over the
+// WHOLE tile at once, so like op 38 it needs every row resident. The mono path
+// rasterizes the raw 24-bit shape colours straight into the palette rows
+// (TextureOpRasterizer.getMonochromeOutput does exactly that); the colour path
+// rasterizes into a scratch buffer and unpacks the channels.
+OPS[29] = {
+  mono: (c, i, op, y, _out) => {
+    const rows = c.monoCaches[i]!.getAllPaletteData()
+    void y
+    rasterizeShapes((op.shapes as RasterShape[] | undefined) ?? [], rows, c.raster.width, c.raster.height)
+  },
+  color: (c, i, op, y, _out) => {
+    const { width, height } = c.raster
+    const scratch: Int32Array[] = []
+    for (let k = 0; k < height; k++) scratch.push(new Int32Array(width))
+    const palettes = c.colorCaches[i]!.getAllPalettes()
+    void y
+    rasterizeShapes((op.shapes as RasterShape[] | undefined) ?? [], scratch, width, height)
+    for (let yy = 0; yy < height; yy++) {
+      const src = scratch[yy]
+      const [r, g, b] = palettes[yy]
+      for (let x = 0; x < width; x++) {
+        const v = src[x]
+        b[x] = (v & 0xff) << 4
+        g[x] = (v & 0xff00) >> 4
+        r[x] = (v & 0xff0000) >> 12
       }
     }
   },

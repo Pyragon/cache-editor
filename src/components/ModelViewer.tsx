@@ -92,6 +92,132 @@ const PARTICLE_FRAG = `
   }
 `
 
+// Lit model shader (non-pose world view), ported from the darkanrs tools viewer
+// (color/textured .vert/.frag). Non-colour-managed like that pipeline: vertex
+// colours and textures are raw display RGB, the diffuse multiply happens in that
+// space, and the result is written straight out. Per-pixel Lambert diffuse with a
+// two-sided normal flip. Uniforms mirror the tools' Scene defaults.
+// The real client model shader (dumped GLSL, shaders index 31, "Model"/1_31.vert):
+//   worldN  = modelMatrix3x3 * normal
+//   hl      = clamp(dot(worldN, sunDirection)*0.5 + 0.5, 0, 1)   // HALF-LAMBERT
+//   lighting= hl*(sunColour + ambientColour*0.5) + ambientColour*0.5
+//   colour  = vertexColour.rgb * lighting
+// sunColour = white·sunLight(0.699); ambientColour from the env; sunDirection is
+// the sun position (−200,−240,−200) in GL space (RS→GL flips y,z). Values start
+// from the default environment and are rig-tunable via window.__ml.
+const MODEL_LIGHT = {
+  ambient: new THREE.Vector3(0.6, 0.6, 0.6), // ambientColour
+  direction: new THREE.Vector3(-0.5, 0.6, 0.5).normalize(), // sun (−200,−240,−200) → GL (x,−y,−z)
+  color: new THREE.Vector3(0.7, 0.7, 0.7), // sunColour = white·0.699
+}
+// Headless-rig lighting override (window.__ml = { amb, dir:[x,y,z], col }); no-op
+// in the app. Lets the rig sweep values without recompiling.
+function modelLight() {
+  const o = (typeof window !== 'undefined' ? (window as unknown as { __ml?: { amb?: number; dir?: number[]; col?: number } }).__ml : null)
+  if (!o) return MODEL_LIGHT
+  return {
+    ambient: new THREE.Vector3(o.amb ?? 0.6, o.amb ?? 0.6, o.amb ?? 0.6),
+    direction: new THREE.Vector3(...((o.dir ?? [-0.5, 0.6, 0.5]) as [number, number, number])).normalize(),
+    color: new THREE.Vector3(o.col ?? 0.7, o.col ?? 0.7, o.col ?? 0.7),
+  }
+}
+const MODEL_VERT = `
+  attribute vec3 color;
+  varying vec3 vColor;
+  varying vec3 vNormal;
+  varying vec2 vUv;
+  void main() {
+    vColor = color;
+    vUv = uv;
+    vNormal = normalMatrix * normal;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`
+const MODEL_FRAG = `
+  uniform sampler2D uMap;
+  uniform bool uUseTexture;
+  uniform vec3 uAmbient;
+  uniform vec3 uLightDir;
+  uniform vec3 uLightColor;
+  uniform vec2 uUvOffset;
+  uniform float uDetailBoost;
+  varying vec3 vColor;
+  varying vec3 vNormal;
+  varying vec2 vUv;
+  void main() {
+    vec3 base = vColor;
+    float alpha = 1.0;
+    if (uUseTexture) {
+      vec4 t = texture2D(uMap, vUv + uUvOffset);
+      alpha = t.a;
+      if (alpha < 0.01) discard;
+      // Dumped material PNGs are mostly greyscale DETAIL maps: the client
+      // multiplies them by the face colour and normalises by the map's own
+      // average brightness (255/avgLuma) so the modulation is neutral. Without
+      // that, dark detail maps mud out the colour (leaves went near-black).
+      base = t.rgb * uDetailBoost * vColor;
+    }
+    vec3 n = normalize(vNormal);
+    if (!gl_FrontFacing) n = -n;
+    // Client "Model" shader: half-Lambert × (sun + 0.5·ambient) + 0.5·ambient.
+    // uLightColor = sunColour, uAmbient = ambientColour, uLightDir = sun dir.
+    float hl = clamp(dot(n, normalize(uLightDir)) * 0.5 + 0.5, 0.0, 1.0);
+    vec3 lighting = hl * (uLightColor + uAmbient * 0.5) + uAmbient * 0.5;
+    vec3 result = base * lighting;
+    gl_FragColor = vec4(result, alpha);
+  }
+`
+
+// Inspect a material PNG for two things the client bakes but our dump doesn't:
+//  - detail-map boost (`255/avgLuma`): near-greyscale detail maps modulate the
+//    face colour and must be brightness-neutralised, else they mud it out.
+//  - cutout: effectCombiner-1 foliage/fence textures carry their shape as black
+//    texels the client turns transparent. We detect these by a large black
+//    fraction (opaque detail maps have ~none) and derive binary alpha below.
+function analyzeTexture(bitmap: ImageBitmap): { boost: number; cutout: boolean } {
+  try {
+    const size = 32
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const ctx = canvas.getContext('2d')!
+    ctx.drawImage(bitmap, 0, 0, size, size)
+    const px = ctx.getImageData(0, 0, size, size).data
+    let sum = 0, chroma = 0, n = 0, black = 0
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i + 3] === 0) continue
+      const r = px[i], g = px[i + 1], b = px[i + 2]
+      sum += (r + g + b) / 3
+      chroma += Math.max(r, g, b) - Math.min(r, g, b)
+      if (r + g + b < 8) black++
+      n++
+    }
+    if (n === 0) return { boost: 1, cutout: false }
+    const isDetail = chroma / n < 16 // near-greyscale ⇒ a detail map
+    const cutout = !isDetail && black / n > 0.06 // colour-on-black ⇒ foliage cutout
+    return { boost: isDetail ? 255 / Math.max(32, sum / n) : 1, cutout }
+  } catch {
+    return { boost: 1, cutout: false }
+  }
+}
+
+/** Build a texture with binary alpha from a foliage PNG (black texels → clear). */
+function binaryAlphaTexture(bitmap: ImageBitmap): THREE.CanvasTexture {
+  const w = bitmap.width, h = bitmap.height
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(bitmap, 0, 0)
+  const img = ctx.getImageData(0, 0, w, h)
+  const d = img.data
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i] + d[i + 1] + d[i + 2] < 8) d[i + 3] = 0
+  }
+  ctx.putImageData(img, 0, 0)
+  return new THREE.CanvasTexture(canvas)
+}
+
 // Fallback when a producer has no material: a soft radial dot, which is what most
 // particle materials look like anyway.
 function makeDotTexture(): THREE.Texture {
@@ -169,14 +295,14 @@ function jagexNormalSpace(
 
 export default function ModelViewer({ data, display, posedVertices, cameraStateRef, statsExtra }: Props) {
   const mountRef = useRef<HTMLDivElement>(null)
-  const matsRef = useRef<THREE.MeshBasicMaterial[]>([])
+  const matsRef = useRef<(THREE.MeshBasicMaterial | THREE.ShaderMaterial)[]>([])
   // Decoded material textures, keyed by texture id and kept across scene
   // rebuilds (e.g. reloading a different model that shares texture ids) —
   // without this, each rebuild re-decoded every texture from scratch via
   // createImageBitmap, and since that's async, the model visibly rendered
   // flat-coloured (no texture) for a moment. Only disposed on true unmount,
   // or when a texture id's blob actually changes underneath it.
-  const textureCacheRef = useRef(new Map<number, { blob: Blob; texture: THREE.Texture }>())
+  const textureCacheRef = useRef(new Map<number, { blob: Blob; texture: THREE.Texture; detailBoost: number }>())
   useEffect(() => () => {
     for (const { texture } of textureCacheRef.current.values()) texture.dispose()
     textureCacheRef.current.clear()
@@ -213,7 +339,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
 
     const renderer = new THREE.WebGLRenderer({ antialias: true })
     renderer.setPixelRatio(window.devicePixelRatio)
-    renderer.setClearColor(0x000000)
+    renderer.setClearColor((typeof window !== 'undefined' ? (window as unknown as { __bg?: number }).__bg : undefined) ?? 0x000000)
     renderer.setSize(w, h)
     mount.appendChild(renderer.domElement)
 
@@ -275,6 +401,50 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
         }
       }
     }
+    // Smooth per-vertex normals for the lit shader (non-pose world view), matching
+    // the darkanrs tools ModelLoader: accumulate UNIT face normals from render
+    // type-0 faces only (type 1 = flat, type 2 = hidden), average, normalise, then
+    // convert RS→GL space (nx, −ny, −nz). Only built when there's no pose, since
+    // the pose/icon path bakes its own lighting into vertex colours below.
+    let smoothNX: Float32Array | null = null
+    let smoothNY: Float32Array | null = null
+    let smoothNZ: Float32Array | null = null
+    let smoothMag: Int32Array | null = null
+    if (!pose) {
+      smoothNX = new Float32Array(vertexCount)
+      smoothNY = new Float32Array(vertexCount)
+      smoothNZ = new Float32Array(vertexCount)
+      smoothMag = new Int32Array(vertexCount)
+      for (let f = 0; f < faceCount; f++) {
+        if ((data.faceType?.[f] ?? 0) !== 0) continue // only smooth faces contribute
+        const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
+        if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount) continue
+        const e1x = vertexX[ib] - vertexX[ia], e1y = vertexY[ib] - vertexY[ia], e1z = vertexZ[ib] - vertexZ[ia]
+        const e2x = vertexX[ic] - vertexX[ia], e2y = vertexY[ic] - vertexY[ia], e2z = vertexZ[ic] - vertexZ[ia]
+        let nx = e1y * e2z - e1z * e2y
+        let ny = e1z * e2x - e1x * e2z
+        let nz = e1x * e2y - e1y * e2x
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz)
+        if (len === 0) continue
+        nx /= len; ny /= len; nz /= len
+        for (const v of [ia, ib, ic]) {
+          smoothNX[v] += nx; smoothNY[v] += ny; smoothNZ[v] += nz; smoothMag[v]++
+        }
+      }
+    }
+    // GL-space normal for one corner: smoothed vertex normal, falling back to the
+    // supplied face normal for flat/isolated corners. `fn*` are already unit RS-space.
+    const cornerNormalGL = (v: number, fnx: number, fny: number, fnz: number, out: Float32Array, off: number) => {
+      let nx = fnx, ny = fny, nz = fnz
+      if (smoothMag && v >= 0 && v < vertexCount && smoothMag[v] > 0) {
+        nx = smoothNX![v] / smoothMag[v]
+        ny = smoothNY![v] / smoothMag[v]
+        nz = smoothNZ![v] / smoothMag[v]
+        const l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+        nx /= l; ny /= l; nz /= l
+      }
+      out[off] = nx; out[off + 1] = -ny; out[off + 2] = -nz // RS → GL space
+    }
     const LIGHT_LEN = Math.sqrt(50 * 50 + 10 * 10 + 50 * 50)
     const LX = -50 / LIGHT_LEN, LY = -10 / LIGHT_LEN, LZ = -50 / LIGHT_LEN
     const ambientScale = 64 + (pose?.ambient ?? 0)
@@ -306,6 +476,9 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
       // wrong for ANY invisible face, emitter or not. (Emitter faces with alpha 0
       // stay visible: lava-style surfaces genuinely show while emitting.)
       if (data.faceAlpha[f] === -1) continue
+      // Render type 2 = hidden face (billboard anchors etc.) — the client excludes
+      // these from rendering entirely (ModelLoader/ModelGL).
+      if (data.faceType && data.faceType[f] === 2) continue
       const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
       if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount)
         continue
@@ -322,6 +495,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
 
     const positions = new Float32Array(validFaces * 9)
     const colors    = new Float32Array(validFaces * 9)
+    const normals   = new Float32Array(validFaces * 9)
     const uvs       = new Float32Array(validFaces * 6)
     // Which model vertex each buffer corner came from — the geometry is
     // non-indexed (corners duplicated per face), so this is the map an
@@ -582,6 +756,22 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
         for (const y of [ay, by, cy]) { if (y < minY) minY = y; if (y > maxY) maxY = y }
         for (const z of [az, bz, cz]) { if (z < minZ) minZ = z; if (z > maxZ) maxZ = z }
 
+        // Unit face normal (RS space) — the flat/fallback normal for the shader,
+        // and used by the pose path's diffuse term.
+        let fnx = (by - ay) * (cz - az) - (bz - az) * (cy - ay)
+        let fny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az)
+        let fnz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        {
+          const fl = Math.sqrt(fnx * fnx + fny * fny + fnz * fnz) || 1
+          fnx /= fl; fny /= fl; fnz /= fl
+        }
+        // Per-corner smooth normals (GL space) for the lit shader. `fn*` here are in
+        // GL space already (computed from GL-space positions above), so pass through
+        // and let cornerNormalGL negate the RS-space smoothed normals to match.
+        cornerNormalGL(ia, fnx, -fny, -fnz, normals, base)
+        cornerNormalGL(ib, fnx, -fny, -fnz, normals, base + 3)
+        cornerNormalGL(ic, fnx, -fny, -fnz, normals, base + 6)
+
         // Face colour tints the material texture — the dumped material images
         // are greyscale detail maps and the client multiplies them by face HSL.
         if (pose) {
@@ -604,13 +794,16 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
             colors[base + i * 3 + 2] = srgbToLinear(Math.min(Math.max((bb * f30) / 255, 0), 1))
           }
         } else {
-          const rgb = hslToRgb(faceHsl(f))
-          const r = srgbToLinear(((rgb >> 16) & 0xFF) / 255)
-          const g = srgbToLinear(((rgb >> 8)  & 0xFF) / 255)
-          const b = srgbToLinear((rgb         & 0xFF) / 255)
-          colors[base]     = r; colors[base + 1] = g; colors[base + 2] = b
-          colors[base + 3] = r; colors[base + 4] = g; colors[base + 5] = b
-          colors[base + 6] = r; colors[base + 7] = g; colors[base + 8] = b
+          // Non-pose world view: flat ambient-scaled base colour per corner (raw
+          // display RGB — the lit shader is non-colour-managed, matching the
+          // darkanrs tools shader). The shader adds per-pixel diffuse from normals.
+          const rgb = hslToRgb(litHsl(faceHsl(f)))
+          const r = ((rgb >> 16) & 0xFF) / 255
+          const g = ((rgb >> 8)  & 0xFF) / 255
+          const b =  (rgb        & 0xFF) / 255
+          for (let i = 0; i < 3; i++) {
+            colors[base + i * 3] = r; colors[base + i * 3 + 1] = g; colors[base + i * 3 + 2] = b
+          }
         }
 
         if (tex >= 0) writeUVs(f, ia, ib, ic, vert * 2)
@@ -622,24 +815,57 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     geo.setAttribute('color',    new THREE.BufferAttribute(colors,    3))
+    geo.setAttribute('normal',   new THREE.BufferAttribute(normals,   3))
     geo.setAttribute('uv',       new THREE.BufferAttribute(uvs,       2))
-    geo.computeVertexNormals()
 
-    // One material per group: flat vertex colours, or the texture's material PNG.
+    // Non-pose world view uses the lit shader (per-pixel diffuse from normals,
+    // non-colour-managed). The pose/icon path keeps its managed MeshBasicMaterial
+    // with lighting already baked into the vertex colours.
+    const lit = !pose
+    const texColorSpace = lit ? THREE.NoColorSpace : THREE.SRGBColorSpace
     const wireframe = matsRef.current[0]?.wireframe ?? false
-    const materials: THREE.MeshBasicMaterial[] = []
+    const materials: (THREE.MeshBasicMaterial | THREE.ShaderMaterial)[] = []
     // Materials with a UV scroll (the fire cape's flowing lava): the client offsets
     // sampling by seconds * speed / 64 each frame (OpenGlToolkit.renderAnimatedTexture).
-    const scrollingTextures: { texture: THREE.Texture; u: number; v: number }[] = []
+    const scrollingTextures: { u: number; v: number; setOffset: (u: number, v: number) => void }[] = []
     let disposed = false
+
+    const assignMap = (mat: THREE.MeshBasicMaterial | THREE.ShaderMaterial, texture: THREE.Texture, detailBoost: number) => {
+      if (mat instanceof THREE.ShaderMaterial) {
+        mat.uniforms.uMap.value = texture
+        mat.uniforms.uUseTexture.value = true
+        mat.uniforms.uDetailBoost.value = detailBoost
+      } else {
+        mat.map = texture
+        mat.needsUpdate = true
+      }
+    }
+    const pushScroll = (mat: THREE.MeshBasicMaterial | THREE.ShaderMaterial, texture: THREE.Texture, u: number, v: number) => {
+      const setOffset = mat instanceof THREE.ShaderMaterial
+        ? (ou: number, ov: number) => (mat.uniforms.uUvOffset.value as THREE.Vector2).set(ou, ov)
+        : (ou: number, ov: number) => texture.offset.set(ou, ov)
+      scrollingTextures.push({ u, v, setOffset })
+    }
 
     groups.forEach((g, i) => {
       geo.addGroup(g.start, g.count, i)
-      const mat = new THREE.MeshBasicMaterial({
-        vertexColors: true,
-        side: THREE.DoubleSide,
-        wireframe,
-      })
+      const mat: THREE.MeshBasicMaterial | THREE.ShaderMaterial = lit
+        ? new THREE.ShaderMaterial({
+            vertexShader: MODEL_VERT,
+            fragmentShader: MODEL_FRAG,
+            side: THREE.DoubleSide,
+            wireframe,
+            uniforms: {
+              uMap: { value: null },
+              uUseTexture: { value: false },
+              uAmbient: { value: modelLight().ambient },
+              uLightDir: { value: modelLight().direction },
+              uLightColor: { value: modelLight().color },
+              uUvOffset: { value: new THREE.Vector2(0, 0) },
+              uDetailBoost: { value: 1 },
+            },
+          })
+        : new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, wireframe })
       materials.push(mat)
 
       if (g.tex >= 0) {
@@ -650,22 +876,27 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
         if (cached && cached.blob === blob) {
           // same texture as last rebuild (e.g. the previous animation frame)
           // — reuse the already-decoded GPU texture, no async gap.
-          if (speed) scrollingTextures.push({ texture: cached.texture, u: speed.u, v: speed.v })
-          mat.map = cached.texture
-          mat.needsUpdate = true
+          if (cached.texture.colorSpace !== texColorSpace) {
+            cached.texture.colorSpace = texColorSpace
+            cached.texture.needsUpdate = true
+          }
+          if (speed) pushScroll(mat, cached.texture, speed.u, speed.v)
+          assignMap(mat, cached.texture, cached.detailBoost)
         } else {
           createImageBitmap(blob).then((bitmap) => {
             if (disposed) { bitmap.close(); return }
-            const texture = new THREE.Texture(bitmap)
+            const { boost, cutout } = analyzeTexture(bitmap)
+            // Foliage cutouts get binary alpha; the lit shader discards the clear
+            // texels (alpha < 0.01), so the canopy reads as see-through leaves.
+            const texture = cutout ? binaryAlphaTexture(bitmap) : new THREE.Texture(bitmap)
             texture.wrapS = THREE.RepeatWrapping
             texture.wrapT = THREE.RepeatWrapping
-            texture.colorSpace = THREE.SRGBColorSpace
+            texture.colorSpace = texColorSpace
             texture.needsUpdate = true
             cached?.texture.dispose()
-            textureCacheRef.current.set(g.tex, { blob, texture })
-            if (speed) scrollingTextures.push({ texture, u: speed.u, v: speed.v })
-            mat.map = texture
-            mat.needsUpdate = true
+            textureCacheRef.current.set(g.tex, { blob, texture, detailBoost: boost })
+            if (speed) pushScroll(mat, texture, speed.u, speed.v)
+            assignMap(mat, texture, boost)
           })
         }
       }
@@ -1069,7 +1300,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
       if (scrollingTextures.length > 0) {
         const seconds = (now % 128000) / 1000
         for (const entry of scrollingTextures) {
-          entry.texture.offset.set(((seconds * entry.u) / 64) % 1, ((seconds * entry.v) / 64) % 1)
+          entry.setOffset(((seconds * entry.u) / 64) % 1, ((seconds * entry.v) / 64) % 1)
         }
       }
 

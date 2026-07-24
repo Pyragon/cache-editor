@@ -44,6 +44,204 @@ export function hslToRgb(hsl: number): number {
   return HSL_2_RGB[hsl & 0xFFFF] & 0xFFFFFF
 }
 
+// --- Model lighting (ModelGL HD shading + calculateNormals, darkan) ----------
+// The HD/GPU client (ModelGL, the path the real client runs) bakes Gouraud
+// per-vertex lighting: every vertex gets a normal (sum of its faces' geometric
+// normals, each scaled to length 256, with a count "magnitude"). The base
+// colour is the palette RGB of the ambient-scaled HSL16, then each corner is
+// multiplied by  sunColour · (sunBrightness + cos · (cos<0 ? antiScale : scale)),
+// where cos is the vertex normal against the (unit) sun direction and scale =
+// intensity · 768 / contrast. Constants are the default map environment (sun
+// -200,-240,-200; sunLight 0.699; backlight 1.2; white sun; brightness pref 2).
+export type LightDir = { x: number; y: number; z: number }
+export type SunLight = {
+  /** Sun position (client shifts sunPosition <<2); normalised to unit here. */
+  dir: LightDir
+  /** sunBrightness = (0.7 + brightnessPref·0.1) · sunAmbient. */
+  brightness: number
+  /** sunColorIntensity (env sunLight) and antiSunColorIntensity (backlight). */
+  intensity: number
+  antiIntensity: number
+  /** Sun colour, each channel 0-1 (white = 1,1,1). */
+  colorR: number
+  colorG: number
+  colorB: number
+}
+export const DEFAULT_SUN_LIGHT: SunLight = {
+  dir: { x: -200, y: -240, z: -200 },
+  brightness: 0.9 * 1.1523438, // brightness pref 2 · default sunAmbient
+  intensity: 0.69921875,
+  antiIntensity: 1.2,
+  colorR: 1, colorG: 1, colorB: 1,
+}
+
+function srgbToLinear(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+}
+
+/** ModelGL.adjustLuminance — ambient-scale a HSL16's 7-bit lightness (2..126). */
+function adjustLuminance(hsl: number, factor: number): number {
+  let l = ((hsl & 0x7f) * factor) >> 7
+  if (l < 2) l = 2
+  else if (l > 126) l = 126
+  return (hsl & 0xff80) + l
+}
+
+type LitModel = Pick<ModelData,
+  'faceCount' | 'vertexCount' | 'vertexX' | 'vertexY' | 'vertexZ' |
+  'triangleX' | 'triangleY' | 'triangleZ' | 'faceColor'>
+
+/**
+ * Per-face-vertex LINEAR RGB (Gouraud) for an untextured/colour-tinted model,
+ * matching ModelGL's HD shading. Returns a `faceCount·9` Float32Array laid out
+ * as 3 corners × (r,g,b) per face, ready to copy straight into a vertex-colour
+ * buffer. `ambient`/`contrast` are the *model* fields (64 + loc ambient,
+ * 850 + loc contrast). Every face is treated as smooth (render type 0) — we
+ * don't parse per-face render types, and smooth is the default that gives
+ * trees/scenery their rounded shading.
+ */
+export function computeLitFaceRgb(
+  model: LitModel,
+  ambient = 64,
+  contrast = 850,
+  sun: SunLight = DEFAULT_SUN_LIGHT,
+): Float32Array {
+  const len = Math.sqrt(sun.dir.x * sun.dir.x + sun.dir.y * sun.dir.y + sun.dir.z * sun.dir.z) || 1
+  const sunX = sun.dir.x / len
+  const sunY = sun.dir.y / len
+  const sunZ = sun.dir.z / len
+  const normalScale = (sun.intensity * 768) / contrast
+  const antiScale = (sun.antiIntensity * 768) / contrast
+
+  const { faceCount, vertexCount, vertexX, vertexY, vertexZ, triangleX, triangleY, triangleZ, faceColor } = model
+  const nsx = new Float64Array(vertexCount)
+  const nsy = new Float64Array(vertexCount)
+  const nsz = new Float64Array(vertexCount)
+  const ncnt = new Int32Array(vertexCount)
+  for (let f = 0; f < faceCount; f++) {
+    const a = triangleX[f], b = triangleY[f], c = triangleZ[f]
+    if (a < 0 || b < 0 || c < 0 || a >= vertexCount || b >= vertexCount || c >= vertexCount) continue
+    const baX = vertexX[b] - vertexX[a], baY = vertexY[b] - vertexY[a], baZ = vertexZ[b] - vertexZ[a]
+    const caX = vertexX[c] - vertexX[a], caY = vertexY[c] - vertexY[a], caZ = vertexZ[c] - vertexZ[a]
+    let dx = baY * caZ - caY * baZ
+    let dy = baZ * caX - caZ * baX
+    let dz = baX * caY - caX * baY
+    while (dx > 8192 || dy > 8192 || dz > 8192 || dx < -8192 || dy < -8192 || dz < -8192) {
+      dx >>= 1; dy >>= 1; dz >>= 1
+    }
+    let div = Math.trunc(Math.sqrt(dx * dx + dy * dy + dz * dz))
+    if (div <= 0) div = 1
+    dx = Math.trunc((dx * 256) / div)
+    dy = Math.trunc((dy * 256) / div)
+    dz = Math.trunc((dz * 256) / div)
+    nsx[a] += dx; nsy[a] += dy; nsz[a] += dz; ncnt[a]++
+    nsx[b] += dx; nsy[b] += dy; nsz[b] += dz; ncnt[b]++
+    nsx[c] += dx; nsy[c] += dy; nsz[c] += dz; ncnt[c]++
+  }
+
+  const out = new Float32Array(faceCount * 9)
+  const idx = [0, 0, 0]
+  for (let f = 0; f < faceCount; f++) {
+    const rgb = hslToRgb(adjustLuminance(faceColor[f] & 0xffff, ambient))
+    const baseR = ((rgb >> 16) & 0xff) * sun.colorR
+    const baseG = ((rgb >> 8) & 0xff) * sun.colorG
+    const baseB = (rgb & 0xff) * sun.colorB
+    idx[0] = triangleX[f]; idx[1] = triangleY[f]; idx[2] = triangleZ[f]
+    for (let k = 0; k < 3; k++) {
+      const v = idx[k]
+      let cos = 0
+      if (v >= 0 && v < vertexCount) {
+        const dot = sunX * nsx[v] + sunY * nsy[v] + sunZ * nsz[v]
+        cos = ncnt[v] === 0 ? dot * 0.0026041667 : dot / (ncnt[v] * 256)
+      }
+      const bright = sun.brightness + cos * (cos < 0 ? antiScale : normalScale)
+      const base = (f * 3 + k) * 3
+      out[base] = srgbToLinear(Math.min(Math.max((baseR * bright) / 255, 0), 1))
+      out[base + 1] = srgbToLinear(Math.min(Math.max((baseG * bright) / 255, 0), 1))
+      out[base + 2] = srgbToLinear(Math.min(Math.max((baseB * bright) / 255, 0), 1))
+    }
+  }
+  return out
+}
+
+// --- Client "Model" shader lighting (dumped GLSL, shaders index 31, 1_31.vert) -
+// Per-VERTEX (Gouraud) half-Lambert, in WORLD space:
+//   hl       = clamp(dot(worldNormal, sunDirection)*0.5 + 0.5, 0, 1)
+//   lighting = hl*(sunColour + ambientColour*0.5) + ambientColour*0.5
+//   colour   = faceColour.rgb * lighting
+// worldNormal = the loc's normal matrix × the RS-local vertex normal (RS→GL flips
+// y,z, so we negate those before the transform). sunDirection is in GL space.
+export type ModelSun = {
+  dir: [number, number, number]
+  sunColour: [number, number, number]
+  ambientColour: [number, number, number]
+}
+export const DEFAULT_MODEL_SUN: ModelSun = {
+  dir: [-0.5, 0.6, 0.5], // sun (−200,−240,−200) → GL (x,−y,−z), normalised in-fn
+  sunColour: [0.7, 0.7, 0.7], // white · sunLight(0.699)
+  ambientColour: [0.6, 0.6, 0.6],
+}
+
+/**
+ * Per-face-vertex LINEAR RGB (Gouraud) for a placed loc, matching the client's
+ * "Model" shader. `normalMat` is the loc's world normal matrix as a THREE.Matrix3
+ * `.elements` array (column-major 9). Returns `faceCount·9` linear RGB.
+ */
+export function computeModelLitRgb(
+  model: LitModel,
+  normalMat: ArrayLike<number>,
+  sun: ModelSun = DEFAULT_MODEL_SUN,
+): Float32Array {
+  const sl = Math.hypot(sun.dir[0], sun.dir[1], sun.dir[2]) || 1
+  const sdx = sun.dir[0] / sl, sdy = sun.dir[1] / sl, sdz = sun.dir[2] / sl
+  const [sr, sg, sb] = sun.sunColour
+  const [ar, ag, ab] = sun.ambientColour
+  const m = normalMat
+
+  const { faceCount, vertexCount, vertexX, vertexY, vertexZ, triangleX, triangleY, triangleZ, faceColor } = model
+  const nsx = new Float64Array(vertexCount)
+  const nsy = new Float64Array(vertexCount)
+  const nsz = new Float64Array(vertexCount)
+  for (let f = 0; f < faceCount; f++) {
+    const a = triangleX[f], b = triangleY[f], c = triangleZ[f]
+    if (a < 0 || b < 0 || c < 0 || a >= vertexCount || b >= vertexCount || c >= vertexCount) continue
+    const baX = vertexX[b] - vertexX[a], baY = vertexY[b] - vertexY[a], baZ = vertexZ[b] - vertexZ[a]
+    const caX = vertexX[c] - vertexX[a], caY = vertexY[c] - vertexY[a], caZ = vertexZ[c] - vertexZ[a]
+    let dx = baY * caZ - caY * baZ, dy = baZ * caX - caZ * baX, dz = baX * caY - caX * baY
+    const l = Math.hypot(dx, dy, dz) || 1
+    dx /= l; dy /= l; dz /= l
+    nsx[a] += dx; nsy[a] += dy; nsz[a] += dz
+    nsx[b] += dx; nsy[b] += dy; nsz[b] += dz
+    nsx[c] += dx; nsy[c] += dy; nsz[c] += dz
+  }
+
+  const out = new Float32Array(faceCount * 9)
+  const idx = [0, 0, 0]
+  for (let f = 0; f < faceCount; f++) {
+    const rgb = hslToRgb(faceColor[f] & 0xffff)
+    const baseR = ((rgb >> 16) & 0xff) / 255
+    const baseG = ((rgb >> 8) & 0xff) / 255
+    const baseB = (rgb & 0xff) / 255
+    idx[0] = triangleX[f]; idx[1] = triangleY[f]; idx[2] = triangleZ[f]
+    for (let k = 0; k < 3; k++) {
+      const v = idx[k]
+      // RS-local normal → GL-local (negate y,z), then × loc normal matrix → world
+      const lx = nsx[v], ly = -nsy[v], lz = -nsz[v]
+      let wx = m[0] * lx + m[3] * ly + m[6] * lz
+      let wy = m[1] * lx + m[4] * ly + m[7] * lz
+      let wz = m[2] * lx + m[5] * ly + m[8] * lz
+      const wl = Math.hypot(wx, wy, wz) || 1
+      wx /= wl; wy /= wl; wz /= wl
+      const hl = Math.min(1, Math.max(0, (sdx * wx + sdy * wy + sdz * wz) * 0.5 + 0.5))
+      const base = (f * 3 + k) * 3
+      out[base] = srgbToLinear(Math.min(1, baseR * (hl * (sr + ar * 0.5) + ar * 0.5)))
+      out[base + 1] = srgbToLinear(Math.min(1, baseG * (hl * (sg + ag * 0.5) + ag * 0.5)))
+      out[base + 2] = srgbToLinear(Math.min(1, baseB * (hl * (sb + ab * 0.5) + ab * 0.5)))
+    }
+  }
+  return out
+}
+
 // Exact analytic inverse of the palette above, ported from darkan
 // ColorUtil.rgbToHsl24 (used by map underlay/overlay tile colours, which
 // store raw 24-bit RGB and convert to this packed HSL16 form at render
