@@ -1500,6 +1500,9 @@ export type ObjectDefJson = {
   offsetY?: number
   offsetZ?: number
   inverted?: boolean
+  /** How far a wall pushes the decorations hanging on it (default 64). Read off
+   *  the WALL, not the decoration — see buildLocsMesh's wallDisplacement. */
+  decorDisplacement?: number
   originalColors?: number[]
   modifiedColors?: number[]
   // Loc texture-swap fields as named in the dumped object JSON (ObjectViewer /
@@ -2170,6 +2173,14 @@ export async function buildAnimatedLocMesh(
   return { mesh, update }
 }
 
+// Which way a wall decoration is pushed off its wall, per rotation — the
+// client's own tables (Class329_Sub1.anIntArray7724/7720 for the straight
+// decorations, 7721/7713 for the diagonal ones), in RS x/z.
+const DECOR_DX = [1, 0, -1, 0]
+const DECOR_DZ = [0, -1, 0, 1]
+const DECOR_DIAG_DX = [1, -1, -1, 1]
+const DECOR_DIAG_DZ = [-1, -1, 1, 1]
+
 /** An invisible utility loc (sound emitter / map-icon anchor) worth showing
  *  as an editor marker instead of its teal quad. Scene-local coordinates. */
 export type MarkerInfo = {
@@ -2698,6 +2709,19 @@ export async function buildLocsMesh(
     const bridge = x >= 0 && y >= 0 && x < SIZE && y < SIZE && isBridgeTile(terrain, x, y)
     return (bridge ? Math.max(p - 1, 0) : p) === renderPlane
   })
+
+  // Wall decorations are pushed away from the wall they hang on by that WALL's
+  // `decorDisplacement` (Class329_Sub1.method12465 reads it off getWall for the
+  // decoration's own tile). Only walls — shapes 0-3, the ones the client files
+  // under method3395 — are wall nodes, and only non-default values are worth
+  // storing: with no wall the client falls back to 64, which is the default.
+  const wallDisplacement = new Map<number, number>()
+  for (const [objectId, shape, , x, y] of planeObjects) {
+    if (shape > 3 || x < 0 || y < 0 || x >= SIZE || y >= SIZE) continue
+    const dd = (await assets.getDef(objectId))?.decorDisplacement
+    if (dd !== undefined && dd !== 64) wallDisplacement.set(x * SIZE + y, dd)
+  }
+
   let done = 0
   for (const [objectId, shape, rotation, x, y, decodedPlane] of planeObjects) {
     const heights = heightsAll[decodedPlane]
@@ -2752,22 +2776,57 @@ export async function buildLocsMesh(
       ? lightGrid.at(decodedPlane, x, y, x + sizeX - 1, y + sizeY - 1)
       : undefined
 
-
-    // ObjectType.getStationaryModel applies, in model space and this order:
-    // mirror (negate RS z) → rotate 90°·r (RS x'=x·cos+z·sin ⇒ three −θ) →
-    // scale (resizeX/Y/Z) → translate (offsetX/Y/Z). A whole-corner wall
-    // (shape 2) is TWO pieces: mirrored at `rotation`, plain at `rotation+1`.
-    const pieces: { rot: number; mirror: boolean }[] =
-      shape === 2
-        ? [{ rot: rotation, mirror: true }, { rot: (rotation + 1) & 0x3, mirror: false }]
-        : [{ rot: rotation, mirror: def.inverted ?? false }]
+    // `ObjectDefinition.method7971` applies, in model space and this order:
+    // mirror (negate RS z, `wa`) → the rotation≥4 extras → rotate 90°·r
+    // (`S(4096·r)`; RS x'=x·cos+z·sin ⇒ three −θ) → scale (resize) → translate
+    // (offsetX/Y/Z). `variant` is that rotation≥4 branch:
+    //   'decor'  shape 4 with rotation>3 — an extra 45° THEN a (180, 0, -180)
+    //            model-space shift, which is how the client builds every
+    //            diagonal wall decoration (types 6/7/8).
+    //   'rot45'  shape 10 with rotation>3 — `method8012`'s `f(2048)`, the extra
+    //            45° diagonal scenery (type 11) is drawn with, and no shift.
+    // `offX/offZ` is the world-space displacement the scene node adds on top
+    // (GraphNode_Sub1_Sub4_Sub1.method12990's `method5219`).
+    type Piece = { rot: number; mirror: boolean; variant: 'plain' | 'decor' | 'rot45'; offX: number; offZ: number }
+    const inverted = def.inverted ?? false
+    const piece = (rot: number, variant: Piece['variant'] = 'plain', offX = 0, offZ = 0, mirror = inverted): Piece =>
+      ({ rot, mirror, variant, offX, offZ })
+    // the wall's displacement, defaulting to 64 exactly as the client does
+    const wallDisp = wallDisplacement.get(x * SIZE + y) ?? 64
+    const straightOff = wallDisp + 1
+    const diagonalOff = (wallDisp >> 1) + 1
+    let pieces: Piece[]
+    if (shape === 2) {
+      // whole-corner wall: two pieces, the first from the mirrored model
+      // (rotation+4), the second rotated one step on (method12464)
+      pieces = [piece(rotation, 'plain', 0, 0, true), piece((rotation + 1) & 0x3)]
+    } else if (shape === 5) {
+      pieces = [piece(rotation, 'plain', straightOff * DECOR_DX[rotation], straightOff * DECOR_DZ[rotation])]
+    } else if (shape === 6) {
+      pieces = [piece(rotation, 'decor', diagonalOff * DECOR_DIAG_DX[rotation], diagonalOff * DECOR_DIAG_DZ[rotation])]
+    } else if (shape === 7) {
+      pieces = [piece((rotation + 2) & 0x3, 'decor')]
+    } else if (shape === 8) {
+      // in-wall diagonal decoration: displaced outer piece + inner piece
+      pieces = [
+        piece(rotation, 'decor', diagonalOff * DECOR_DIAG_DX[rotation], diagonalOff * DECOR_DIAG_DZ[rotation]),
+        piece((rotation + 2) & 0x3, 'decor'),
+      ]
+    } else if (shape === 11) {
+      pieces = [piece(rotation, 'rot45')]
+    } else {
+      pieces = [piece(rotation)]
+    }
 
     let markerModels = 0
     let markerIsBarrier = false
     // this loc's transparent faces — becomes its own mesh, like the client
     const locTrans = new BucketSet()
     for (const piece of pieces) {
-      const matrix = new THREE.Matrix4().makeTranslation(sceneX, -avgHeight, -sceneY)
+      // the decoration displacement is a world-space shift of the placement
+      // (RS x/z → scene x/−z), so it rides on the tile-centre translate
+      const matrix = new THREE.Matrix4().makeTranslation(
+        sceneX + piece.offX, -avgHeight, -(sceneY + piece.offZ))
       if (def.offsetX || def.offsetY || def.offsetZ) {
         matrix.multiply(new THREE.Matrix4().makeTranslation(def.offsetX ?? 0, -(def.offsetY ?? 0), -(def.offsetZ ?? 0)))
       }
@@ -2779,6 +2838,15 @@ export async function buildLocsMesh(
       }
       if (piece.rot !== 0) {
         matrix.multiply(new THREE.Matrix4().makeRotationY(-(piece.rot * Math.PI) / 2))
+      }
+      // rotation≥4 extras, applied BEFORE the 90° steps (the shift isn't
+      // rotation-symmetric, so the order is load-bearing)
+      if (piece.variant !== 'plain') {
+        if (piece.variant === 'decor') {
+          // `ia(180, 0, -180)` in RS model space — scene z is flipped
+          matrix.multiply(new THREE.Matrix4().makeTranslation(180, 0, 180))
+        }
+        matrix.multiply(new THREE.Matrix4().makeRotationY(-Math.PI / 4))
       }
       if (piece.mirror) {
         matrix.multiply(new THREE.Matrix4().makeScale(1, 1, -1))
