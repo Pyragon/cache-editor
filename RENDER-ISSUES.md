@@ -29,9 +29,10 @@ not the long-form project log.
   the procedural sky would have to be rendered into one. Until then those
   materials just get the alpha drop, so reflective surfaces read flat.
 - **Model lighting** not calibrated against the live client.
-- **Rugs in Lumbridge castle are the wrong colour.** Untraced. Check whether
-  they're a recolour (`applyRecolor`) or a `detailsOnly` material taking the
-  tile tint down the wrong path.
+- **The "lighting detail" setting is unexplored** and reportedly makes things
+  look far better. Find what it switches on in the client — likely the branch
+  that decides baked vs per-pixel lighting. Affects the point lights below, but
+  probably not only them.
 - **Point lights** — implemented 2026-07-25 but **not yet signed off**. Region
   `lights[]` are baked into loc vertex colours (`buildLightGrid` in mapScene.ts,
   the point-light term in `computeModelLitRgb`). Locs only, which matches the
@@ -52,9 +53,6 @@ Compared against the live client, all still open:
   sitting *on* the tile instead of mixing into it — same two screenshots. Could
   be the intensity scale, could be that we bake into vertex colours so the
   falloff is only as smooth as the tessellation.
-- **The "lighting detail" setting is unexplored** and reportedly makes things
-  look far better. Find what it switches on in the client — likely the branch
-  that decides baked vs per-pixel lighting.
 - **Flicker.** The dumped light record's flicker field looks data-only
   <https://i.imgur.com/bNPahmX.png> and we always bake full intensity, as
   though "Flickering effects" were off. Open question: is that just because we
@@ -62,9 +60,7 @@ Compared against the live client, all still open:
   Trace the client before building anything. **Wanted editable either way.**
 
 ## Geometry / placement
-- **Missing objects** — some locs don't render at all.
 - **Signposts** render incorrectly — specifically **green blocks** on them.
-- **Torches in Lumbridge** are rotated wrong.
 - **The bridge** looks off.
 - **The stairs up to Lumbridge castle** are still wrong. Been on the list a
   while and never actually fixed.
@@ -78,6 +74,3 @@ Compared against the live client, all still open:
   a crossfade/blend-strength bug to tune. The overlay is covering the wrong
   tiles or the wrong shape within them. Check the overlay shape/rotation split
   before touching any blending.
-
-## Map view / UI
-- **Drop the blue "You are here" markers** on the minimap.
