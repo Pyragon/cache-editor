@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+import { ClientBloomPass } from './clientBloom'
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { LocEntry, MapData, MapRegionDef, MapTerrain } from '../loaders/maps'
@@ -26,6 +30,35 @@ const REGION_UNITS = SIZE * 512
 // (SceneObjectManager.method3441). renderOrder is three.js's primary sort key in
 // both passes, so mirroring that order here is what stops water compositing over
 // foliage that stands in front of it.
+/** The client's graphics preferences (`ClientPreferences`, `client/prefs/impl/*`)
+ *  with the default each one ships with, and what our renderer actually does about
+ *  it. Reference table only — we don't read or write the client's prefs file; this
+ *  exists so we can see at a glance which client behaviour we mirror. Defaults were
+ *  read from each Preference's `getDefaultValue()`. */
+type GfxStatus = 'applied' | 'partial' | 'no' | 'n/a'
+const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note: string }[] = [
+  { name: 'Bloom', def: '0 (off)', status: 'applied', note: 'On, using the client’s own FilterBloom params: luminance threshold 1.0, additive strength 0.25 (client default is OFF).' },
+  { name: 'Fog', def: '1', status: 'applied', note: 'scene.fog from the region environment.' },
+  { name: 'Ground blending', def: '1', status: 'applied', note: 'Underlay/overlay corner blending + the crossfade splat pass.' },
+  { name: 'Ground decoration', def: '1', status: 'applied', note: 'Ground-decor locs are built.' },
+  { name: 'Idle animations', def: '1', status: 'applied', note: 'Loc idle sequences are posed each frame.' },
+  { name: 'Flickering effects', def: '1', status: 'applied', note: 'Type-5 face-alpha animation (fireplace/candle flames).' },
+  { name: 'Textures', def: '1', status: 'applied', note: 'Material textures on terrain and locs.' },
+  { name: 'Water', def: '1', status: 'applied', note: 'Env-mapped water surface + underwater depth; colour not signed off.' },
+  { name: 'Sky boxes', def: '1', status: 'applied', note: 'Skybox mesh from the region environment (toggleable).' },
+  { name: 'Light detail', def: '1', status: 'partial', note: 'HD Gouraud model lighting, but no point lights and not calibrated.' },
+  { name: 'Scenery shadows', def: '2', status: 'partial', note: 'Static shadow grid only — no projected/dynamic scenery shadows.' },
+  { name: 'Brightness', def: '3', status: 'partial', note: 'Only the minimap gamma slider; the 3D scene ignores it.' },
+  { name: 'Anti-aliasing', def: '0 (off)', status: 'applied', note: 'WebGL antialias is ON — deliberately differs from the client default.' },
+  { name: 'Build area', def: '104 tiles', status: 'no', note: 'We render one 64×64 region; neighbours are decoded for seam-free lighting only.' },
+  { name: 'Particles', def: '2 (0 on low RAM)', status: 'no', note: 'Model particle emitters are parsed but not simulated in the map view.' },
+  { name: 'Character shadows', def: '1', status: 'no', note: 'No NPCs/players in the map view.' },
+  { name: 'Remove roofs', def: '2', status: 'no', note: 'We use per-plane toggles instead of the client’s roof-removal rule.' },
+  { name: 'Graphics preset', def: '0', status: 'n/a', note: 'Preset selector that drives the others; no equivalent here.' },
+  { name: 'Max screen size', def: 'toolkit-dependent', status: 'n/a', note: 'Canvas sizing is the browser’s.' },
+  { name: 'Custom cursors', def: '1', status: 'n/a', note: 'Editor UI concern, not the 3D view.' },
+]
+
 const ORDER_RIVERBED = -2
 const ORDER_OPAQUE_LOC = -1
 const ORDER_TERRAIN = 0
@@ -481,6 +514,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
   // still toggleable in the controls).
   const [visiblePlanes, setVisiblePlanes] = useState([true, false, false, false])
   const [showLocs, setShowLocs] = useState(true)
+  const [showGfxPanel, setShowGfxPanel] = useState(false)
+  // Bloom is live-tunable so it can be matched against the client side by side.
+  // The client's own FilterBloom params are (threshold 1.0, strength 0.25), but its
+  // blur normalisation differs from UnrealBloomPass's mip chain, so the strength
+  // does not transfer 1:1 — hence the sliders.
+  const [bloomOn, setBloomOn] = useState(true)
+  const bloomOnRef = useRef(true)
+  bloomOnRef.current = bloomOn
+  const bloomPassRef = useRef<ClientBloomPass | null>(null)
+  /** re-applies the sun tint (and the HDR overbright factor) to every built mesh */
+  const refreshTintRef = useRef<(() => void) | null>(null)
   const [showOutlines, setShowOutlines] = useState(false)
   const [showMarkers, setShowMarkers] = useState(true)
   const [showSky, setShowSky] = useState(true)
@@ -571,6 +615,20 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     const camera = new THREE.PerspectiveCamera(50, w / h, 8, REGION_UNITS * 10)
     const center = new THREE.Vector3(REGION_UNITS / 2, 0, -REGION_UNITS / 2)
     camera.position.set(center.x, REGION_UNITS * 0.55, center.z + REGION_UNITS * 0.75)
+
+    // HDR + bloom. `hdr` materials are pushed past 1.0 by their overbright
+    // multiplier (see MaterialMeta.hdrMultiplier); a half-float target keeps those
+    // values instead of clipping, and the bloom pass — thresholded at 1.0 so only
+    // genuinely overbright pixels qualify — turns them into the client's glow.
+    const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(w, h, {
+      type: THREE.HalfFloatType,
+      colorSpace: THREE.LinearSRGBColorSpace,
+    }))
+    composer.addPass(new RenderPass(scene, camera))
+    const bloomPass = new ClientBloomPass(w, h)
+    bloomPassRef.current = bloomPass
+    composer.addPass(bloomPass)
+    composer.addPass(new OutputPass())
 
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.target.copy(center)
@@ -1293,7 +1351,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           obj.userData.sortZ = sortVec.z
         }
       }
-      renderer.render(scene, camera)
+      composer.render()
       // FPS readout — averaged over 20 frames, written straight to the label
       // node. No React state per frame.
       {
@@ -1317,6 +1375,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       const nw = mount!.clientWidth || w
       const nh = mount!.clientHeight || h
       renderer.setSize(nw, nh)
+      composer.setSize(nw, nh)
+      bloomPass.setSize(nw, nh)
       camera.aspect = nw / nh
       camera.updateProjectionMatrix()
     }
@@ -1377,6 +1437,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         }
         // region environment (map_environments dump): fog, sun, skybox
         const env = await loadRegionEnvironment(data.rootHandle, data.id)
+        // Per-region bloom parameters (map-environment opcode 2). Regions that
+        // don't override them keep the client's class defaults.
+        if (bloomPassRef.current) {
+          bloomPassRef.current.threshold = env?.hdr?.bloomThreshold ?? 1.0
+          bloomPassRef.current.strength = env?.hdr?.bloomStrength ?? 0.25
+          bloomPassRef.current.whitePoint = env?.hdr?.whitePoint ?? 1.0
+        }
         const sun: SunConfig = env?.environment
           ? {
               x: env.environment.sunPosition?.[0] ?? DEFAULT_SUN.x,
@@ -1409,7 +1476,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           ]
         }
         const applyTint = (obj: THREE.Object3D) => {
-          if (!sunTint) return
+          // Runs even with no sun tint: HDR materials still need their overbright
+          // factor re-applied when bloom is toggled.
+          const tint = sunTint ?? [1, 1, 1]
           obj.traverse((o) => {
             const mesh = o as THREE.Mesh
             if (!mesh.material) return
@@ -1417,9 +1486,19 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               // water is a ShaderMaterial (no .color) — its sky tint lives in its
               // own uniforms, so skip it here
               const c = (m as THREE.MeshBasicMaterial).color
-              if (c) c.setRGB(...sunTint)
+              if (!c) continue
+              // Scale by the material's HDR overbright factor rather than
+              // overwriting — a plain setRGB here silently discarded it, which is
+              // why HDR materials never reached the bloom threshold.
+              const hdr = bloomOnRef.current ? ((m.userData.hdrMultiplier as number) ?? 1) : 1
+              if (!sunTint && hdr === 1) continue // nothing to change
+              c.setRGB(tint[0] * hdr, tint[1] * hdr, tint[2] * hdr)
             }
           })
+        }
+
+        refreshTintRef.current = () => {
+          for (const t of taggedRef.current) applyTint(t.obj)
         }
 
         // the centre region renders the parent's draft placements, so an
@@ -1647,6 +1726,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         for (const { obj, kind } of taggedRef.current) {
           if (kind === 'terrain' || kind === 'riverbed' || kind === 'loc') applyTint(obj)
         }
+
 
         let centerHeights = mosaic.slicesFor(0, 0).heights
 
@@ -2018,6 +2098,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       for (const d of disposables) d.dispose()
       void assetsRef.current?.dispose()
       assetsRef.current = null
+      composer.dispose()
       renderer.dispose()
       mount.removeChild(renderer.domElement)
       clearLocHighlight()
@@ -2416,6 +2497,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     if (skyMeshRef.current) skyMeshRef.current.visible = showSky
   }, [showSky, status])
 
+  useEffect(() => {
+    if (bloomPassRef.current) bloomPassRef.current.enabled = bloomOn
+    // The client gates HDR float textures on the bloom filter being live
+    // (Class66 checks method8471(), which IS the bloom filter), so turning bloom
+    // off must also drop the overbright multiplier — otherwise the flame would
+    // clamp to white instead of the client's dim orange.
+    refreshTintRef.current?.()
+  }, [bloomOn, status])
+
   // visibility = plane toggle (via group) AND per-kind toggle
   useEffect(() => {
     planeGroupsRef.current.forEach((group, plane) => {
@@ -2451,6 +2541,45 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           <input type="checkbox" checked={showSky} onChange={(e) => setShowSky(e.target.checked)} />
           Sky
         </label>
+        <div className="mapscene-gfx">
+          <button type="button" className="mapscene-gfx-btn" onClick={() => setShowGfxPanel((v) => !v)}>
+            Client graphics settings {showGfxPanel ? '▾' : '▸'}
+          </button>
+          {showGfxPanel && (
+            <div className="mapscene-gfx-panel">
+              <div className="mapscene-gfx-head">
+                The client’s graphics preferences and what we mirror. The bloom controls below are live;
+                the table is reference only.
+              </div>
+              <div className="mapscene-gfx-live">
+                <label className="mapscene-toggle">
+                  <input type="checkbox" checked={bloomOn} onChange={(e) => setBloomOn(e.target.checked)} />
+                  Bloom <span className="mapscene-gfx-def">
+                    (client default: off — threshold 1.0, strength 0.25; HDR overbright
+                    textures only load while bloom is on, exactly like the client)
+                  </span>
+                </label>
+              </div>
+              <table className="mapscene-gfx-table">
+                <thead>
+                  <tr><th>Setting</th><th>Client default</th><th>Us</th><th>Notes</th></tr>
+                </thead>
+                <tbody>
+                  {CLIENT_GFX_SETTINGS.map((g) => (
+                    <tr key={g.name}>
+                      <td>{g.name}</td>
+                      <td className="mapscene-gfx-def">{g.def}</td>
+                      <td><span className={`mapscene-gfx-badge is-${g.status.replace('/', '')}`}>{
+                        g.status === 'applied' ? 'applied' : g.status === 'partial' ? 'partial' : g.status === 'no' ? 'not applied' : 'n/a'
+                      }</span></td>
+                      <td className="mapscene-gfx-note">{g.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showMarkers} onChange={(e) => setShowMarkers(e.target.checked)} />
           <span className="mapscene-marker-key">

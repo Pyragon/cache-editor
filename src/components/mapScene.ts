@@ -1150,6 +1150,13 @@ class BucketSet {
           // cutouts keep the hard 0.35 threshold; crossfade and blended loc
           // faces draw at any alpha (the client's alpha test never rejects)
           material.alphaTest = blend || trans ? 0 : 0.35
+          // HDR overbright: push the material past 1.0 so the bloom pass sees it.
+          // Recorded in userData too — the scene's sun tint re-writes material.color
+          // and must multiply by this rather than overwrite it.
+          if (meta && meta.hdrMultiplier > 1) {
+            material.userData.hdrMultiplier = meta.hdrMultiplier
+            material.color.setScalar(meta.hdrMultiplier)
+          }
           material.needsUpdate = true
           if (meta && (meta.speedU !== 0 || meta.speedV !== 0)) {
             material.userData.scroll = { u: meta.speedU, v: meta.speedV }
@@ -1536,6 +1543,12 @@ export type MaterialMeta = {
    *  (black texels → transparent, foliage/fence cutouts), 2 = per-pixel alpha
    *  from an opacity op the dump doesn't bake. */
   effectCombiner: number
+  /** Overbright multiplier for `hdr` materials. The client uploads these as FLOAT
+   *  textures (`Class66` -> `renderMaterialPixelsF`) and scales colour by
+   *  `1 + hdrOp*31/4096` — up to 32x — which is what makes flames glow once bloom
+   *  picks them up. Our 8-bit PNG can't hold that, so the scalar is applied to the
+   *  material instead. 1 = not HDR / not recoverable. */
+  hdrMultiplier: number
 }
 
 /** distinct texture ids per model — a model is reused across many placements */
@@ -1550,6 +1563,8 @@ export class LocAssets {
   /** blendType (= texture-def effectCombiner) per texture, filled as metas
    *  resolve — lets the synchronous face loop classify transparency. */
   private blendTypes = new Map<number, number>()
+  /** overbright multiplier per texture, filled as metas resolve */
+  private hdrMults = new Map<number, number>()
   // single-flight directory resolution: cache the PROMISE, not the result —
   // dozens of parallel first calls must not each re-resolve the folder
   private objectsDirP: Promise<FileSystemDirectoryHandle | null> | undefined
@@ -1587,6 +1602,11 @@ export class LocAssets {
    *  alpha). Synchronous — `primeBlendTypes` must have run for this id. */
   blendTypeOf(id: number): number {
     return this.blendTypes.get(id) ?? 0
+  }
+
+  /** Cached HDR overbright multiplier (1 = not HDR). Sync — needs primeBlendTypes. */
+  hdrMultiplierOf(id: number): number {
+    return this.hdrMults.get(id) ?? 1
   }
 
   /** Resolve (and cache) the blendType of every texture a model uses, so the
@@ -1654,6 +1674,8 @@ export class LocAssets {
           let speedV = 0
           let colorHsl = -1
           let effectCombiner = 0
+          let isHdr = false
+          let hdrMultiplier = 1
           try {
             const defsDir = await this.textureDefsDir()
             if (!defsDir) throw new Error('no texture_definitions')
@@ -1664,7 +1686,24 @@ export class LocAssets {
             speedV = def.textureSpeedV ?? 0
             colorHsl = def.colorHsl ?? -1
             effectCombiner = def.effectCombiner ?? 0
+            isHdr = def.hdr === true
           } catch { /* definition missing — treat as self-coloured */ }
+          if (isHdr) {
+            // The overbright factor lives in the material op graph, not the
+            // texture def. Only a constant-fill op gives a single scalar (87 of
+            // the 367 hdr materials); the rest are real op graphs whose per-pixel
+            // HDR channel we don't evaluate yet, so they stay at 1.
+            try {
+              const texturesDir = await this.texturesDir()
+              const dir = await texturesDir!.getDirectoryHandle(String(id))
+              const file = await (await dir.getFileHandle(`${id}.json`)).getFile()
+              const mat = JSON.parse(await file.text())
+              const op = mat.hdrOperationIndex != null ? mat.textureOperations?.[mat.hdrOperationIndex] : null
+              if (op && op.type === 0 && typeof op.fillValue === 'number') {
+                hdrMultiplier = 1 + (op.fillValue * 31) / 4096
+              }
+            } catch { /* no op graph — leave at 1 */ }
+          }
           let avgLuma = 128
           let avgRgb = -1
           try {
@@ -1696,7 +1735,8 @@ export class LocAssets {
             }
           } catch { /* keep default */ }
           this.blendTypes.set(id, effectCombiner)
-          return { detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl, effectCombiner }
+          this.hdrMults.set(id, hdrMultiplier)
+          return { detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl, effectCombiner, hdrMultiplier }
         } catch {
           return null
         }
@@ -1848,6 +1888,7 @@ class ModelAccumulator {
     owner = -1,
     light?: { sun?: ModelSun },
     blendTypeOf?: (texId: number) => number,
+    hdrOf?: (texId: number) => number,
     // Transparent faces go here instead of the shared buckets — the client
     // renders one mesh per loc so its faces can be ordered and depth-sorted as
     // a unit. Opaque faces always stay merged (order-independent).
@@ -1862,6 +1903,7 @@ class ModelAccumulator {
     // placement (the world normal matrix isn't shared across placements).
     const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
     const lit = computeModelLitRgb(model, normalMat, light?.sun)
+    if (hdrOf) unlitHdrFaces(model, lit, hdrOf)
     for (let f = 0; f < model.faceCount; f++) {
       if (model.faceAlpha[f] === -1) continue
       const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
@@ -1895,6 +1937,33 @@ class ModelAccumulator {
         bucket.positions.push(v.x, v.y, v.z)
         bucket.colors.push(lit[base], lit[base + 1], lit[base + 2])
       }
+    }
+  }
+}
+
+
+/** Emissive (HDR) faces are not directionally shaded.
+ *
+ *  Measured on the Lumbridge fireplace (model 35878, texture 110): Gouraud
+ *  shading spread its flame faces over a 16x range (max-channel 0.062 .. 1.000).
+ *  After the 4.03x overbright that leaves the bright faces clipping to pale
+ *  yellow but the dark ones at ~0.25 — nowhere near overbright — which is
+ *  exactly the orange band the client doesn't have. The client's flame is
+ *  uniformly bright, so these faces take their colour at full value and skip the
+ *  directional term entirely. */
+function unlitHdrFaces(model: ModelData, lit: Float32Array, hdrOf: (texId: number) => number) {
+  const tex = model.faceTextures
+  if (!tex) return
+  for (let f = 0; f < model.faceCount; f++) {
+    const t = tex[f]
+    if (t < 0 || hdrOf(t) <= 1) continue
+    const rgb = hslToRgb(model.faceColor[f] & 0xffff)
+    const r = srgbToLinear(((rgb >> 16) & 0xff) / 255)
+    const g = srgbToLinear(((rgb >> 8) & 0xff) / 255)
+    const b = srgbToLinear((rgb & 0xff) / 255)
+    for (let k = 0; k < 3; k++) {
+      const base = (f * 3 + k) * 3
+      lit[base] = r; lit[base + 1] = g; lit[base + 2] = b
     }
   }
 }
@@ -1936,6 +2005,8 @@ export async function buildAnimatedLocMesh(
   const uvWriter = makeUVWriter(model)
   const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
   const lit = computeModelLitRgb(model, normalMat, sun)
+  await assets.primeBlendTypes(model)
+  unlitHdrFaces(model, lit, (t) => assets.hdrMultiplierOf(t))
 
   // bucket faces by texture id (skip fully-transparent / degenerate faces)
   const buckets = new Map<number, number[]>()
@@ -1998,10 +2069,13 @@ export async function buildAnimatedLocMesh(
         // blendType != 0 = the client's transparent test. Blend, but keep
         // depthWrite ON (the DirectX path never drops z-write per model) with a
         // small cutoff so fully-clear texels don't write depth.
-        const blendType = (await assets.getMaterialMeta(tex))?.effectCombiner ?? 0
+        const tmeta = await assets.getMaterialMeta(tex)
+        const blendType = tmeta?.effectCombiner ?? 0
         material.userData.blendType = blendType
-        if (blendType === 2) { material.transparent = true; material.depthWrite = false }
-        else { material.alphaTest = 0.35; material.userData.baseAlphaTest = 0.35 }
+        if (tmeta && tmeta.hdrMultiplier > 1) {
+          material.userData.hdrMultiplier = tmeta.hdrMultiplier
+          material.color.setScalar(tmeta.hdrMultiplier)
+        }
         material.needsUpdate = true
       }
     }
@@ -2184,7 +2258,12 @@ export type RegionEnvironment = {
   }
   skybox?: { id: number; x: number; y: number; z: number; rotation: number }
   lights?: unknown[]
-  hdr?: { bloom: number; brightpass: number; whitePoint: number }
+  /** Bloom filter parameters for this region (map-environment opcode 2 ->
+   *  darkan `Atmosphere`). Each is a byte * 8/255, so 0..8. They feed the
+   *  FilterBloom `params` uniform: threshold = params.x, strength = params.y,
+   *  whitePoint = params.z. Absent for regions that don't override the
+   *  defaults of 1.0 / 0.25 / 1.0. */
+  hdr?: { whitePoint: number; bloomStrength: number; bloomThreshold: number }
 }
 
 export async function loadRegionEnvironment(
@@ -2407,7 +2486,7 @@ export async function buildLocsMesh(
           // resolve this model's texture blendTypes so addModel can split
           // opaque vs transparent faces synchronously
           await assets.primeBlendTypes(m)
-          acc.addModel(m, matrix, locRefs.length, undefined, (t) => assets.blendTypeOf(t), locTrans)
+          acc.addModel(m, matrix, locRefs.length, undefined, (t) => assets.blendTypeOf(t), (t) => assets.hdrMultiplierOf(t), locTrans)
         }
       }
     }

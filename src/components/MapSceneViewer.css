@@ -542,3 +542,40 @@
   font-family: "Trebuchet MS", Helvetica, Arial, sans-serif;
   font-size: 11px;
 }
+
+/* Client graphics-settings reference panel (map controls) */
+.mapscene-gfx { position: relative; display: inline-block; }
+.mapscene-gfx-btn {
+  background: #1a2030; color: #cfe0ff; border: 1px solid #2c364d; border-radius: 4px;
+  padding: 2px 8px; font-size: 12px; cursor: pointer;
+}
+.mapscene-gfx-btn:hover { background: #222b40; }
+.mapscene-gfx-panel {
+  position: absolute; z-index: 30; top: calc(100% + 4px); left: 0;
+  width: min(760px, 78vw); max-height: 60vh; overflow: auto;
+  background: #11151f; border: 1px solid #2c364d; border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55); padding: 10px;
+}
+.mapscene-gfx-head { color: #8fa3c8; font-size: 11px; margin-bottom: 8px; }
+.mapscene-gfx-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.mapscene-gfx-table th {
+  text-align: left; color: #7f93b8; font-weight: 600;
+  border-bottom: 1px solid #2c364d; padding: 3px 6px;
+}
+.mapscene-gfx-table td { padding: 3px 6px; vertical-align: top; border-bottom: 1px solid #1b2130; }
+.mapscene-gfx-def { color: #9db0d0; white-space: nowrap; }
+.mapscene-gfx-note { color: #8394ae; }
+.mapscene-gfx-badge {
+  display: inline-block; padding: 0 6px; border-radius: 9px;
+  font-size: 10.5px; line-height: 16px; white-space: nowrap;
+}
+.mapscene-gfx-badge.is-applied { background: #14361f; color: #6ee7a0; }
+.mapscene-gfx-badge.is-partial { background: #3a3117; color: #f2c661; }
+.mapscene-gfx-badge.is-no { background: #3a1c1c; color: #f28b8b; }
+.mapscene-gfx-badge.is-na { background: #232a3a; color: #8fa3c8; }
+.mapscene-gfx-live {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 4px 9px; margin-bottom: 8px; border-bottom: 1px solid #2c364d;
+}
+.mapscene-gfx-live .mapscene-gamma { gap: 6px; }
+.mapscene-gfx-live input[type=range] { width: 150px; }
