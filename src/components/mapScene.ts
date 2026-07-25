@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import type { MapTerrain } from '../loaders/maps'
 import { SIZE, tileIndex } from '../loaders/maps'
 import type { ModelData } from '../loaders/models'
-import { hslToRgb, parseModel, applyRecolor, computeModelLitRgb, DEFAULT_MODEL_SUN, type ModelSun, type PointLight } from '../loaders/models'
+import { hslToRgb, parseModel, applyRecolor, computeModelLitRgb, modelUpscale, upscaleModel, DEFAULT_MODEL_SUN, type ModelSun, type PointLight } from '../loaders/models'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { makeUVWriter } from './modelUVs'
 import type { UVWriter } from './modelUVs'
@@ -1897,7 +1897,7 @@ class ModelAccumulator {
     // a unit. Opaque faces always stay merged (order-independent).
     transparentTarget?: BucketSet,
   ) {
-    const upscale = model.version < 13 ? 4 : 1
+    const upscale = modelUpscale(model)
     const v = new THREE.Vector3()
     let uvWriter = this.uvWriters.get(model)
     if (!uvWriter) this.uvWriters.set(model, (uvWriter = makeUVWriter(model)))
@@ -2010,7 +2010,7 @@ export async function buildAnimatedLocMesh(
   owner?: LocRef,
   pointLights?: PointLight[],
 ): Promise<AnimatedLocMesh | null> {
-  const upscale = model.version < 13 ? 4 : 1
+  const upscale = modelUpscale(model)
   const uvWriter = makeUVWriter(model)
   const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
   const lit = computeModelLitRgb(model, normalMat, sun,
@@ -2877,9 +2877,12 @@ export async function buildLocsMesh(
           if (contoured) m = { ...m, vertexY: contoured }
         }
         if (isAnimated) {
-          // keep out of the merged static mesh; the scene poses it per frame
+          // keep out of the merged static mesh; the scene poses it per frame.
+          // The <<2 is baked in FIRST, exactly where the client does it
+          // (RSMesh.upscale before the frame is applied) — otherwise every
+          // frame translation lands 4x too far on a pre-13 mesh.
           animated.push({
-            model: m,
+            model: upscaleModel(m),
             matrix: matrix.clone(),
             animationId: def.animations![0],
             owner: { objectId, shape, rotation, x, y, plane: decodedPlane },

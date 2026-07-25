@@ -352,6 +352,38 @@ export function rgb24ToHsl16(rgb: number): number {
 // Raw 24-bit RGB (as stored in underlay/overlay defs) → CSS colour, through
 // the same lossy HSL16 palette quantisation the client actually renders
 // with — so the preview matches in-game, not just the raw uploaded colour.
+/** The <<2 a pre-13 mesh still needs at render time (1 once `upscaleModel` has
+ *  baked it in). */
+export function modelUpscale(model: ModelData): number {
+  return model.upscaled ? 1 : model.version < 13 ? 4 : 1
+}
+
+/**
+ * A copy of the model with the pre-13 <<2 baked into its vertices — `RSMesh.upscale()`,
+ * which the client runs at mesh-build time, BEFORE anything else touches the mesh.
+ *
+ * That ordering matters for animation: a frame's type-0/1 origins and translations
+ * are authored in the upscaled space, so posing the raw 1× vertices and scaling the
+ * result afterwards blows every translation up 4× (rotations and scales are ratios,
+ * so they survive — which is why a mis-scaled animation looks *nearly* right).
+ */
+export function upscaleModel(model: ModelData): ModelData {
+  const factor = modelUpscale(model)
+  if (factor === 1) return model
+  const scale = (src: Int32Array) => {
+    const out = new Int32Array(src.length)
+    for (let i = 0; i < src.length; i++) out[i] = src[i] * factor
+    return out
+  }
+  return {
+    ...model,
+    vertexX: scale(model.vertexX),
+    vertexY: scale(model.vertexY),
+    vertexZ: scale(model.vertexZ),
+    upscaled: true,
+  }
+}
+
 export function rgbToRenderedHex(rgb: number): string {
   const quantised = hslToRgb(rgb24ToHsl16(rgb))
   return `#${quantised.toString(16).padStart(6, '0')}`
@@ -367,6 +399,9 @@ export type ModelData = {
    *  upscales them <<2 into the version-13+ fixed-point space before
    *  rendering (RSMesh.upscale / darkan Mesh.upscale). */
   version: number
+  /** Set when that <<2 has already been baked into the vertex arrays, so
+   *  `modelUpscale` stops asking for it a second time. See `upscaleModel`. */
+  upscaled?: boolean
   vertexCount: number
   faceCount: number
   vertexX: Int32Array

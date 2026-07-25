@@ -29,9 +29,6 @@ Note for future digging: the flame's **runtime** face colours are not the model'
 baked ones — the object def runs `applyRecolor` (935878's four baked colours become
 two: h0/l51 and h10/l64). Read colours after recolour, not from `model.dat`.
 
-- **Candles (Lumbridge)** — the **candlesticks are missing**: the geometry between
-  the backboard and the candles doesn't render. Still open.
-
 ## Lighting / materials
 - **HDR overbright textures + bloom** — the flame's *glow*, and the bigger half of
   the flame job. `Class66` uploads a texture with `hdr:true` as a **float** texture
@@ -48,7 +45,14 @@ two: h0/l51 and h10/l64). Read colours after recolour, not from `model.dat`.
   `renderMaterial` defaults to `gamma = 0.7` for everything — check the dumped PNGs
   match per-texture; a systematic offset here would read as a lighting bug.
 - **Model lighting** not calibrated against the live client.
-- **Point lights** not implemented (also in the environments TODO item).
+- **Point lights** — implemented 2026-07-25 but **not yet signed off**. Region
+  `lights[]` are baked into loc vertex colours (`buildLightGrid` in mapScene.ts,
+  the point-light term in `computeModelLitRgb`). Locs only, which matches the
+  client: only the Model shader declares `PointLights*`, and `HardwareGround`
+  always passes a light count of 0. Flicker is baked at intensity 1.0 — the
+  client's value with "Flickering effects" off; animating it needs the lights as
+  shader uniforms rather than baked colours. Needs an eyeball against the live
+  client (Lumbridge torches/fireplace are the obvious test).
 
 ## Geometry / placement
 - **Missing objects** — some locs don't render at all.
