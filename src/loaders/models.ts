@@ -1247,19 +1247,33 @@ export function mergeModels(models: ModelData[]): ModelData {
   }
 }
 
+/** Java's `(short)` cast. The client compares recolours in signed 16-bit space:
+ *  `RSMesh.faceColor` and `ObjectDefinition.originalColors` are both `short[]`
+ *  filled with `(short) readUnsignedShort()`. We keep face colours unsigned (a
+ *  `Uint16Array`) while cryogen dumps the def's lists as signed shorts, so
+ *  without this every packed HSL with bit 15 set — hue >= 32, the whole
+ *  cyan/blue/purple half of the wheel — would silently fail to match. */
+const s16 = (v: number): number => (v << 16) >> 16
+
 // Exact-match face recolour/retexture, in place — ports RSMesh.recolour()/
 // retexture() (identikits apply these across the merged body/head mesh).
+// One full-mesh pass per pair, in list order, as the client does: a pair whose
+// destination is a later pair's source recolours twice.
 export function applyRecolor(model: ModelData, recolorFrom: number[], recolorTo: number[], retextureFrom: number[], retextureTo: number[]): void {
-  for (let f = 0; f < model.faceCount; f++) {
-    const hsl = model.faceColor[f]
-    const idx = recolorFrom.indexOf(hsl)
-    if (idx >= 0) model.faceColor[f] = recolorTo[idx]
+  for (let i = 0; i < recolorFrom.length; i++) {
+    const from = s16(recolorFrom[i])
+    const to = recolorTo[i]   // Uint16Array wraps a negative short back to its packed HSL
+    for (let f = 0; f < model.faceCount; f++) {
+      if (s16(model.faceColor[f]) === from) model.faceColor[f] = to
+    }
   }
   if (model.faceTextures) {
-    for (let f = 0; f < model.faceCount; f++) {
-      const tex = model.faceTextures[f]
-      const idx = retextureFrom.indexOf(tex)
-      if (idx >= 0) model.faceTextures[f] = retextureTo[idx]
+    for (let i = 0; i < retextureFrom.length; i++) {
+      const from = s16(retextureFrom[i])
+      const to = s16(retextureTo[i])   // keep -1 ("untextured") signed, not 0xffff
+      for (let f = 0; f < model.faceCount; f++) {
+        if (s16(model.faceTextures[f]) === from) model.faceTextures[f] = to
+      }
     }
   }
 }
