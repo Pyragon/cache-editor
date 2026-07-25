@@ -2212,6 +2212,17 @@ class ModelAccumulator {
         ? (transparentTarget ?? this.buckets).getTransparent(textureId, model.facePriorities?.[f] ?? model.priority)
         : this.buckets.get(textureId)
       bucket.owners.push(owner)
+      // Baked per-face alpha IS the face's opacity — RS stores 0 = opaque up to
+      // 255 = invisible, so GL opacity is the complement. Only transparent
+      // buckets carry it (an opaque bucket is by definition all faceAlpha 0),
+      // which keeps `alphas` all-or-nothing per bucket the way toMesh expects.
+      // Without this every translucent loc face drew fully opaque: the fountain
+      // basin's water sits at faceAlpha 150 (~41%), and at full opacity its
+      // Gouraud shading reads as flat dark navy instead of pale water.
+      if (transparent) {
+        const a = (255 - (model.faceAlpha[f] & 0xff)) / 255
+        bucket.alphas.push(a, a, a)
+      }
       if (textureId >= 0) {
         uvWriter(f, ia, ib, ic, this.uvScratch, 0)
         bucket.uvs.push(...this.uvScratch)
@@ -2351,6 +2362,22 @@ export async function buildAnimatedLocMesh(
   const validFaces = order.reduce((n, t) => n + buckets.get(t)!.length, 0)
   if (validFaces === 0) return null
 
+  // Detail-map normalisation, per texture — the same 255/avgLuma the merged loc
+  // mesh gets via toMesh's `boostDetailMaps`. A `detailsOnly` texture carries no
+  // colour of its own, only luminance detail, so multiplying the lit face colour
+  // by it darkens the result by the map's average brightness; the client layers
+  // detail maps neutrally. This path never did it, so EVERY animated loc came
+  // out too dark. Lumbridge's fountain (object 36781, model 24520) is the
+  // worked example: its basin water is texture 638 at avgLuma 151 (1.68x too
+  // dark), the rim stone texture 176 at 170 (1.50x) and the bowl texture 127 at
+  // 206 (1.24x) — which is why the whole thing read as dark navy stone-grey
+  // against the client's pale blue and tan.
+  const boosts = new Map<number, number>()
+  for (const tex of order) {
+    const meta = tex >= 0 ? await assets.getMaterialMeta(tex) : null
+    boosts.set(tex, meta?.detailsOnly ? 255 / meta.avgLuma : 1)
+  }
+
   const positions = new Float32Array(validFaces * 9)
   // RGBA: the alpha channel carries the type-5 face-alpha animation
   // (1 = opaque; stays 1 until a frame drives it)
@@ -2364,17 +2391,26 @@ export async function buildAnimatedLocMesh(
   // flame texture can blend while the same model's stone stays opaque
   const faceMat = new Int32Array(validFaces)
   const normals = localNormals ? new Float32Array(validFaces * 9) : null
+  // Does this material have any face the MODEL bakes as translucent? Separate
+  // from the type-5 animation — that fades faces over time on top of this.
+  const matBakedAlpha: boolean[] = []
   const scratch = new Float32Array(6)
   const geometry = new THREE.BufferGeometry()
   const materials: THREE.Material[] = []
   let vert = 0
   for (const tex of order) {
     const faces = buckets.get(tex)!
+    const boost = boosts.get(tex) ?? 1
     geometry.addGroup(vert, faces.length * 3, materials.length)
     for (const f of faces) {
       const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
       const corners = [ia, ib, ic]
       if (tex >= 0) { uvWriter(f, ia, ib, ic, scratch, 0); uvs.set(scratch, vert * 2) }
+      // Baked opacity, RS's 0 = opaque … 255 = invisible complemented. The
+      // type-5 animation overwrites this per frame when it drives a face.
+      const baked = model.faceAlpha[f] & 0xff
+      const bakedOpacity = (255 - baked) / 255
+      if (baked !== 0) matBakedAlpha[materials.length] = true
       for (let k = 0; k < 3; k++) {
         const vi = corners[k]
         const p = (vert + k) * 3
@@ -2383,7 +2419,7 @@ export async function buildAnimatedLocMesh(
         positions[p + 2] = -model.vertexZ[vi] * upscale
         const lb = (f * 3 + k) * 3
         const pc = (vert + k) * 4
-        colors[pc] = lit[lb]; colors[pc + 1] = lit[lb + 1]; colors[pc + 2] = lit[lb + 2]; colors[pc + 3] = 1
+        colors[pc] = lit[lb] * boost; colors[pc + 1] = lit[lb + 1] * boost; colors[pc + 2] = lit[lb + 2] * boost; colors[pc + 3] = bakedOpacity
         if (normals && localNormals) {
           normals[p] = localNormals[lb]
           normals[p + 1] = localNormals[lb + 1]
@@ -2400,12 +2436,31 @@ export async function buildAnimatedLocMesh(
       const texture = await assets.getTexture(tex)
       if (texture) {
         material.map = texture
-        // blendType != 0 = the client's transparent test. Blend, but keep
-        // depthWrite ON (the DirectX path never drops z-write per model) with a
-        // small cutoff so fully-clear texels don't write depth.
         const tmeta = await assets.getMaterialMeta(tex)
         const blendType = tmeta?.effectCombiner ?? 0
         material.userData.blendType = blendType
+        // Base state — and exactly what setMatBlended's "off" branch restores.
+        // It has to be applied HERE as well: setMatBlended early-returns when
+        // the requested state already matches its cached flag, and that cache
+        // starts `false`, so the off branch never runs on a material the
+        // animation never fades. 60a4551 moved these two lines into that branch
+        // and they silently stopped being applied at all, leaving every
+        // blendType-2 material opaque — that's half the broken fountain. Its
+        // water is texture 451 (`effectCombiner: 2`, 290 of model 24520's 878
+        // faces), which carries translucency as per-pixel alpha AND a baked
+        // faceAlpha of 150 (~41%); rendered opaque, its Gouraud shading reads
+        // as flat dark navy instead of pale water.
+        material.transparent = blendType === 2 || matBakedAlpha[materials.length] === true
+        // z-write stays ON even when blending — the client's. `method13904`
+        // only toggles D3D states 15 (ALPHATESTENABLE) and 27
+        // (ALPHABLENDENABLE); z-write is state 14, gated by
+        // `aBool8755 && aBool8756`, and the 3D model pass (`method14004`)
+        // enables it via `method13942(true)`. Dropping it stops a translucent
+        // object occluding ITSELF: the fountain's water column (texture 451) is
+        // a closed 290-face tube, and without z-write you see its far wall
+        // straight through its near wall — the "water coming down on the other
+        // side only" that follows the camera round.
+        material.depthWrite = true
         // as in toMesh — a specular material's alpha is not opacity, and this
         // path can blend (a type-5 face-alpha animation flips the material to
         // transparent), so the sampled alpha must not scale the fade.
@@ -2465,12 +2520,16 @@ export async function buildAnimatedLocMesh(
     const mm = materials[mi] as THREE.MeshBasicMaterial
     if (on) {
       mm.transparent = true
-      mm.depthWrite = false
+      // z-write stays on while blending, as above — the client never drops it
+      mm.depthWrite = true
       mm.alphaTest = 0
     } else {
-      mm.transparent = mm.userData.blendType === 2
-      mm.depthWrite = mm.userData.blendType !== 2
-      mm.alphaTest = mm.userData.baseAlphaTest ?? 0
+      // back to the material's own base state — which includes staying
+      // transparent when the MODEL bakes translucent faces into it
+      mm.transparent = mm.userData.blendType === 2 || matBakedAlpha[mi] === true
+      mm.depthWrite = true
+      // never an alpha test — the client's is a no-op (ALPHAREF 0/GREATEREQUAL)
+      mm.alphaTest = 0
     }
     mm.needsUpdate = true
   }
@@ -2498,7 +2557,12 @@ export async function buildAnimatedLocMesh(
         if (a !== 0) matNeedsBlend[faceMat[(i / 3) | 0]] = true
       }
     } else {
-      for (let i = 0; i < cornerFace.length; i++) colors[i * 4 + 3] = 1
+      // no type-5 frame driving alpha — fall back to the model's BAKED face
+      // alpha, not to 1, or a translucent face turns opaque the first time the
+      // loc is posed (this is what flattened the fountain's water)
+      for (let i = 0; i < cornerFace.length; i++) {
+        colors[i * 4 + 3] = (255 - (model.faceAlpha[cornerFace[i]] & 0xff)) / 255
+      }
     }
     for (let mi = 0; mi < materials.length; mi++) setMatBlended(mi, matNeedsBlend[mi])
     colorAttr.needsUpdate = true
