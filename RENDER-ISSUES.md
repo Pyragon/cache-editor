@@ -61,7 +61,6 @@ Compared against the live client, all still open:
 
 ## Geometry / placement
 - **Signposts** render incorrectly — specifically **green blocks** on them.
-- **The bridge** looks off.
 - **The stairs up to Lumbridge castle** are still wrong. Been on the list a
   while and never actually fixed.
 
