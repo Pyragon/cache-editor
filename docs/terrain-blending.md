@@ -263,48 +263,82 @@ plain overlays got retriangulated by this too, not only blending ones.
 
 ---
 
-## Mechanism 3 — per-material alpha over the whole tile (NOT PORTED)
+## Mechanism 3 — per-vertex material and vertex welding (NOT PORTED)
 
-This is the one still missing, and it's the reason a curved intra-tile boundary
-(shape 9/10, e.g. tile 3225,3223 = region 12850 local 25,23, overlay 236 shape
-10 rot 0) still renders as a hard arc no matter how much the other two are
-fixed.
+Still missing, and the reason a curved intra-tile boundary (shape 9/10 — tile
+3225,3223 = region 12850 local 25,23, overlay 236 shape 10 rot 0) renders as a
+hard arc however well mechanisms 1 and 2 are done.
 
-**The client does not assign one material per triangle.** It builds one vertex
-set for the whole tile, then draws that set **once per distinct material the
-tile contains**, with a per-vertex alpha weight per material.
+**Correction, 2026-07-25:** an earlier version of this document claimed the
+client draws each tile once per distinct material over the tile's *whole*
+vertex set. That was wrong — it was inferred from `method12145` writing only
+RGB, before `method12147` and `method12143` had been read. What follows is the
+read version.
 
-`method6707` stores per-vertex texture ids and scales and builds a
-`Node_Sub6[]` — one entry per vertex, each a batch keyed by
-`(texture, scale, water)`. Then in the buffer fill (`HardwareGround:851-1072`):
+### How the client actually splats
 
-```java
-// dedupe the tile's per-vertex batches into arr_11, count i_37
-for (i_38 = 0; i_38 < ints_18.length; i_38++) { ... }
-...
-// EVERY vertex of the tile goes into EVERY material batch the tile uses
-for (i_87 = 0; i_87 < i_37; i_87++)
-    arr_11[i_87].method12145(i_86, i_52, i_84, f_53);
-```
+Three pieces:
 
-and `Node_Sub6.method12145` writes only three bytes, at stride 4:
+**Alpha is a binary per-vertex weight.** `Node_Sub6.method12143`:
 
 ```java
-aStream7513.method2919(i_1 * 4);
-aStream7513.method2920((byte) i_21);          // R
-aStream7513.method2920((byte) (i_21 >> 8));   // G
-aStream7513.method2920((byte) (i_21 >> 16));  // B
+public void method12143(int i_1) {
+    aStream7513.method2919(i_1 * 4 + 3);   // byte 3 of vertex i_1 — the alpha
+    aStream7513.method2920(-1);            // 0xFF
+}
 ```
 
-**The fourth byte — alpha — is deliberately left for something else to write.**
-That is the splat weight.
+Stride 4; `method12145` writes bytes 0-2 (RGB) and this writes byte 3. Alpha
+defaults to 0, so a material is opaque only at the vertices it owns and the GPU
+interpolates the falloff across the triangle.
 
-So the overlay/underlay split is a partition of *weights over a shared mesh*,
-not a partition of triangles. Across shape 10's arc, the path pass and the
-grass pass both cover the same triangles with complementary alpha, producing a
-gradient. We assign one material per triangle, so the arc is a hard cut by
-construction, and no amount of retriangulation fixes it — the boundary just
-gains sides.
+**Each material draws only its own faces.** `method12147` builds the index
+buffer from `anIntArray7515[tile]`, a per-tile bitmask of face indices, set by
+`method12152(x, y, faceIndex)`.
+
+**A vertex has exactly one material; a face is registered with all of them.**
+`HardwareGround:1094-1136`:
+
+```java
+Node_Sub6 a = arr_8[i_74], b = arr_8[i_75], c = arr_8[i_76];
+if (a != null) a.method12152(i_12, i_13, i_15);
+if (b != null) b.method12152(i_12, i_13, i_15);
+if (c != null) c.method12152(i_12, i_13, i_15);
+```
+
+So a face whose corners disagree is emitted once per material present at those
+corners, each pass opaque at its own corners and transparent at the others.
+
+**This is the same shape as what we already do** — our underlay splat, and the
+overlay crossfade added with mechanism 1, are base pass plus one alpha-masked
+pass per distinct neighbouring texture. So mechanism 3 is not a different
+rendering model, and the earlier framing overstated the work.
+
+### The remaining suspect: vertex welding (HYPOTHESIS, NOT TRACED)
+
+What we do differently is that **we generate independent vertices per face**.
+The client welds them. In the buffer fill:
+
+```java
+long_47 = (long) i_45 << 48 | (long) i_44 << 32 | (i_42 << 16) | i_43;
+//        materialColour       mainColour          tileX       tileZ
+if ((i_40 & anInt8529 - 1) == 0 && (i_41 & anInt8529 - 1) == 0) {
+    node_80 = class453_10.get(long_47);
+}
+```
+
+Grid-aligned vertices with matching colour pairs are shared between faces. If
+that sharing spans the overlay/underlay split within a tile — and the key
+contains only colours and position, nothing that distinguishes the two — then a
+vertex on shape 10's arc is one vertex with one alpha per material, and the
+weight interpolates across the boundary. With per-face vertices, nothing can
+interpolate across that seam no matter what alphas are written, which is
+exactly the symptom.
+
+**This is a hypothesis.** What has NOT been read: where `class453_10` entries
+are consumed, whether welding really spans overlay/underlay faces, and what
+`anInt8529` (the grid-alignment mask) is. Read those before writing code — the
+same mistake was already made once in this section.
 
 ### Two colour channels per vertex
 
@@ -337,13 +371,10 @@ unverified.
 
 ### Where to pick this up
 
-**Find the alpha write.** `method12145` demonstrably doesn't write byte 4, and
-the stride-4 layout makes the intent unambiguous, but the weight rule itself is
-currently an *inference*, not something read. The obvious candidate is a
-sibling on `Node_Sub6` — `method12147(int[] ints_1, int i_2)` takes an int
-array, which looks like a per-vertex payload. Read that before writing any
-code; the exact weights are the difference between a correct blend and a
-plausible-looking one.
+**The alpha write is found** (`method12143`, above) and the splatting model
+turned out to match ours. The open question is now vertex welding — read
+`class453_10`, `anInt8529`, and whether sharing spans the overlay/underlay
+split, before writing anything.
 
 **Then the shape of the fix is known.** Our underlay splatting already does
 this in miniature — base pass, then one alpha-masked crossfade pass per
