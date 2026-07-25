@@ -60,7 +60,6 @@ Compared against the live client, all still open:
   Trace the client before building anything. **Wanted editable either way.**
 
 ## Geometry / placement
-- **Signposts** render incorrectly — specifically **green blocks** on them.
 - **The stairs up to Lumbridge castle** are still wrong. Been on the list a
   while and never actually fixed.
 

@@ -3356,6 +3356,13 @@ export async function buildLocsMesh(
     // 670, mid trees 260-280). Giving every one its own mesh cost ~2000 draw
     // calls at 35fps; the clutter is small enough that a shared mesh's single
     // sort position is imperceptible, so it merges.
+    //
+    // The threshold is settled, not provisional: with it in place the scene
+    // sits at ~575 draw calls fully zoomed out (signed off 2026-07-25), so the
+    // per-loc meshes are comfortably affordable and there's no reason to
+    // revisit the split. Note the readout that produced the old 2000/35fps
+    // figure was itself under-reporting at the time — see the info.autoReset
+    // fix in MapSceneViewer — so treat that number as indicative only.
     if (locTrans.faceCount() > TRANSPARENT_OWN_MESH_FACES) {
       const lm = await locTrans.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'transparent', transMaterials, THREE.FrontSide)
       if (lm) {

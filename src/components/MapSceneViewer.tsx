@@ -1569,8 +1569,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         perfLast = now
         if (perfN >= 20) {
           const fps = Math.round(perfSum / perfN)
-          // draw calls: per-loc transparent meshes make this the number that
-          // decides whether the client's one-mesh-per-loc design is affordable
+          // Whole-frame draw calls, so it includes the composer's handful of
+          // post passes. Kept as a general perf readout — the question it was
+          // originally added for (can we afford one mesh per transparent loc?)
+          // is settled: ~575 calls fully zoomed out, signed off 2026-07-25.
           if (fpsRef.current) fpsRef.current.textContent = `${fps} fps · ${renderer.info.render.calls} calls`
           perfSum = 0; perfN = 0
         }
