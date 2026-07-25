@@ -983,6 +983,18 @@ type Bucket = { positions: number[]; colors: number[]; uvs: number[]; owners: nu
 
 // blend buckets (terrain texture splatting) share the map under offset keys
 const BLEND_KEY = 1 << 20
+// Loc faces the client counts as transparent (`faceAlpha != 0 || blendType != 0`).
+// The client's baked sort key is priority → transparent-flag → texture, with
+// opaque ALWAYS before transparent (MeshRasterizer_Sub3's ctor). Buckets are
+// emitted in ascending key order, so this reproduces the opaque-before-
+// transparent half — the part that's meaningful here.
+// `facePriorities` IS in the key: transparent loc faces are accumulated per loc
+// (one mesh per loc, like the client), so priority orders faces within a single
+// model — exactly what the client uses it for.
+const TRANS_KEY = 1 << 22
+const TRANS_PRIORITY_STEP = 1 << 12 // > any texture id (~2600)
+/** Transparent faces a loc needs before it earns its own sortable mesh. */
+const TRANSPARENT_OWN_MESH_FACES = 100
 
 class BucketSet {
   buckets = new Map<number, Bucket>()
@@ -999,6 +1011,37 @@ class BucketSet {
     return this.get(BLEND_KEY + textureId)
   }
 
+  /** A loc face the client treats as transparent — ordered by face priority,
+   *  then texture, after every opaque face. */
+  getTransparent(textureId: number, priority = 0): Bucket {
+    return this.get(TRANS_KEY + (priority & 0xff) * TRANS_PRIORITY_STEP + textureId + 1)
+  }
+
+  hasAny(): boolean {
+    for (const b of this.buckets.values()) if (b.positions.length > 0) return true
+    return false
+  }
+
+  faceCount(): number {
+    let n = 0
+    for (const b of this.buckets.values()) n += b.positions.length / 9
+    return n
+  }
+
+  /** Fold another set's buckets into this one (same keys concatenate). */
+  mergeFrom(other: BucketSet) {
+    for (const [key, src] of other.buckets) {
+      if (src.positions.length === 0) continue
+      const dst = this.get(key)
+      for (const v of src.positions) dst.positions.push(v)
+      for (const v of src.colors) dst.colors.push(v)
+      for (const v of src.uvs) dst.uvs.push(v)
+      for (const v of src.owners) dst.owners.push(v)
+      for (const v of src.alphas) dst.alphas.push(v)
+      for (const v of src.depths) dst.depths.push(v)
+    }
+  }
+
   /** One mesh with a material group per texture (index -1 = plain vertex
    *  colours). Per-triangle owner ids (whatever the producer pushed) end up
    *  in mesh.userData.triangleOwners, aligned with raycast faceIndex.
@@ -1012,9 +1055,22 @@ class BucketSet {
     // terrain path does inline — set true so greyscale detail maps (tree leaves,
     // bark) don't darken the baked colour (255/avgLuma, same as emitTri).
     boostDetailMaps = false,
+    // Which buckets to emit. The client draws opaque objects, then the ground,
+    // then transparent objects (SceneObjectManager.method3441), so locs are
+    // built as two meshes that the scene gives different renderOrders.
+    select: 'all' | 'opaque' | 'transparent' = 'all',
+    // Shared per-texture materials. With one mesh per transparent loc there are
+    // hundreds of meshes drawing the same few leaf textures — reusing the
+    // material keeps GPU state changes (and allocation) down.
+    materialCache?: Map<number, THREE.Material>,
   ): Promise<THREE.Mesh | null> {
-    const entries = [...this.buckets.entries()].filter(([, b]) => b.positions.length > 0)
-      // opaque buckets first, blend passes after (drawn over their base)
+    const entries = [...this.buckets.entries()].filter(([key, b]) => {
+      if (b.positions.length === 0) return false
+      if (select === 'opaque') return key < TRANS_KEY
+      if (select === 'transparent') return key >= TRANS_KEY
+      return true
+    })
+      // ascending key = opaque buckets, then crossfade, then transparent
       .sort(([a], [b]) => a - b)
     if (entries.length === 0) return null
     let total = 0
@@ -1032,8 +1088,11 @@ class BucketSet {
     const materials: THREE.Material[] = []
     let vert = 0
     for (const [key, b] of entries) {
-      const blend = key >= BLEND_KEY
-      const textureId = blend ? key - BLEND_KEY : key
+      const trans = key >= TRANS_KEY
+      const blend = !trans && key >= BLEND_KEY
+      const textureId = trans
+        ? ((key - TRANS_KEY) % TRANS_PRIORITY_STEP) - 1
+        : blend ? key - BLEND_KEY : key
       const count = b.positions.length / 3
       positions.set(b.positions, vert * 3)
       // Fetch material meta up front so the detail-map boost can scale the
@@ -1053,10 +1112,27 @@ class BucketSet {
       uvs.set(b.uvs, vert * 2)
       owners.set(b.owners, vert / 3)
       geometry.addGroup(vert, count, materials.length)
+      const cached = materialCache?.get(key)
+      if (cached) {
+        materials.push(cached)
+        vert += count
+        continue
+      }
       const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
       if (blend) {
-        // crossfade pass: coplanar with its base face (depthFunc LEQUAL),
-        // alpha-faded per vertex, never writes depth
+        // terrain crossfade pass: coplanar with its base face (depthFunc
+        // LEQUAL), alpha-faded per vertex, never writes depth
+        material.transparent = true
+        material.depthWrite = false
+      } else if (trans) {
+        // Client-transparent loc faces: blended, depth-TESTED against the opaque
+        // scene but not depth-WRITING. Writing depth makes leaf faces inside one
+        // merged mesh reject each other — the winner depends on bucket order, so
+        // fronds pop in and out as the camera turns (willow-over-water showed the
+        // water through the canopy). The client can't hit that: its alpha test is
+        // a no-op (ALPHAREF=0/GREATEREQUAL, set once in DirectXRenderer init and
+        // never changed), so it is pure ordered blending. Correct compositing
+        // against the ground comes from pass order (renderOrder), not depth.
         material.transparent = true
         material.depthWrite = false
       }
@@ -1067,9 +1143,13 @@ class BucketSet {
           // don't leak across materials sharing a cached THREE.Texture
           const animated = meta && (meta.speedU !== 0 || meta.speedV !== 0 || isWaterMaterial(meta))
           material.map = animated ? texture.clone() : texture
-          // foliage/fence textures use hard alpha cutouts — but crossfade
-          // passes must keep drawing at low alpha, so no cutoff there
-          material.alphaTest = blend ? 0 : 0.35
+          // Cutouts get a hard 0.35 threshold; the crossfade pass must keep
+          // drawing at any alpha (0). Blended loc faces still need a small
+          // cutoff — with depthWrite on, a fully-clear texel would otherwise
+          // write depth and punch a hole through whatever is behind it.
+          // cutouts keep the hard 0.35 threshold; crossfade and blended loc
+          // faces draw at any alpha (the client's alpha test never rejects)
+          material.alphaTest = blend || trans ? 0 : 0.35
           material.needsUpdate = true
           if (meta && (meta.speedU !== 0 || meta.speedV !== 0)) {
             material.userData.scroll = { u: meta.speedU, v: meta.speedV }
@@ -1078,6 +1158,7 @@ class BucketSet {
           }
         }
       }
+      materialCache?.set(key, material)
       materials.push(material)
       vert += count
     }
@@ -1089,6 +1170,7 @@ class BucketSet {
     mesh.userData.triangleOwners = owners
     return mesh
   }
+
 }
 
 /** Bridge flag: tile columns marked 0x2 on decoded plane 1 shift down one
@@ -1456,12 +1538,18 @@ export type MaterialMeta = {
   effectCombiner: number
 }
 
+/** distinct texture ids per model — a model is reused across many placements */
+const modelTextureIds = new WeakMap<ModelData, number[]>()
+
 export class LocAssets {
   private root: FileSystemDirectoryHandle
   private defs = new Map<number, Promise<ObjectDefJson | null>>()
   private models = new Map<number, Promise<ModelData | null>>()
   private textures = new Map<number, Promise<THREE.Texture | null>>()
   private materialMeta = new Map<number, Promise<MaterialMeta | null>>()
+  /** blendType (= texture-def effectCombiner) per texture, filled as metas
+   *  resolve — lets the synchronous face loop classify transparency. */
+  private blendTypes = new Map<number, number>()
   // single-flight directory resolution: cache the PROMISE, not the result —
   // dozens of parallel first calls must not each re-resolve the folder
   private objectsDirP: Promise<FileSystemDirectoryHandle | null> | undefined
@@ -1493,6 +1581,31 @@ export class LocAssets {
       texture?.dispose()
     }
     this.textures.clear()
+  }
+
+  /** Cached blendType for a texture (0 = opaque, 1 = binary cutout, 2 = smooth
+   *  alpha). Synchronous — `primeBlendTypes` must have run for this id. */
+  blendTypeOf(id: number): number {
+    return this.blendTypes.get(id) ?? 0
+  }
+
+  /** Resolve (and cache) the blendType of every texture a model uses, so the
+   *  synchronous face loop can classify transparency the way the client does. */
+  async primeBlendTypes(model: ModelData): Promise<void> {
+    const tex = model.faceTextures
+    if (!tex) return
+    let ids = modelTextureIds.get(model)
+    if (!ids) {
+      const set = new Set<number>()
+      for (let f = 0; f < model.faceCount; f++) {
+        const t = tex[f]
+        if (t >= 0) set.add(t)
+      }
+      modelTextureIds.set(model, (ids = [...set]))
+    }
+    for (const id of ids) {
+      if (!this.blendTypes.has(id)) await this.getMaterialMeta(id)
+    }
   }
 
   /** textures/<id>/<id>.png as a repeating sRGB THREE texture. */
@@ -1582,6 +1695,7 @@ export class LocAssets {
               avgRgb = (Math.round(sr / n) << 16) | (Math.round(sg / n) << 8) | Math.round(sb / n)
             }
           } catch { /* keep default */ }
+          this.blendTypes.set(id, effectCombiner)
           return { detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl, effectCombiner }
         } catch {
           return null
@@ -1728,7 +1842,17 @@ class ModelAccumulator {
   private uvWriters = new WeakMap<ModelData, UVWriter>()
   private uvScratch = new Float32Array(6)
 
-  addModel(model: ModelData, matrix: THREE.Matrix4, owner = -1, light?: { sun?: ModelSun }) {
+  addModel(
+    model: ModelData,
+    matrix: THREE.Matrix4,
+    owner = -1,
+    light?: { sun?: ModelSun },
+    blendTypeOf?: (texId: number) => number,
+    // Transparent faces go here instead of the shared buckets — the client
+    // renders one mesh per loc so its faces can be ordered and depth-sorted as
+    // a unit. Opaque faces always stay merged (order-independent).
+    transparentTarget?: BucketSet,
+  ) {
     const upscale = model.version < 13 ? 4 : 1
     const v = new THREE.Vector3()
     let uvWriter = this.uvWriters.get(model)
@@ -1743,7 +1867,15 @@ class ModelAccumulator {
       const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
       if (ia >= model.vertexCount || ib >= model.vertexCount || ic >= model.vertexCount) continue
       const textureId = model.faceTextures?.[f] ?? -1
-      const bucket = this.buckets.get(textureId)
+      // Client transparency test (MeshRasterizer_Sub3 ctor):
+      // faceAlpha != 0 || blendType != 0. Transparent faces are ordered after
+      // every opaque one, by face priority — the client's baked draw order.
+      const transparent = blendTypeOf
+        ? model.faceAlpha[f] !== 0 || (textureId >= 0 && blendTypeOf(textureId) !== 0)
+        : false
+      const bucket = transparent
+        ? (transparentTarget ?? this.buckets).getTransparent(textureId, model.facePriorities?.[f] ?? model.priority)
+        : this.buckets.get(textureId)
       bucket.owners.push(owner)
       if (textureId >= 0) {
         uvWriter(f, ia, ib, ic, this.uvScratch, 0)
@@ -1798,6 +1930,7 @@ export async function buildAnimatedLocMesh(
   matrix: THREE.Matrix4,
   assets: LocAssets,
   sun?: ModelSun,
+  owner?: LocRef,
 ): Promise<AnimatedLocMesh | null> {
   const upscale = model.version < 13 ? 4 : 1
   const uvWriter = makeUVWriter(model)
@@ -1849,7 +1982,16 @@ export async function buildAnimatedLocMesh(
     const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
     if (tex >= 0) {
       const texture = await assets.getTexture(tex)
-      if (texture) { material.map = texture; material.alphaTest = 0.35; material.needsUpdate = true }
+      if (texture) {
+        material.map = texture
+        // blendType != 0 = the client's transparent test. Blend, but keep
+        // depthWrite ON (the DirectX path never drops z-write per model) with a
+        // small cutoff so fully-clear texels don't write depth.
+        const blendType = (await assets.getMaterialMeta(tex))?.effectCombiner ?? 0
+        if (blendType === 2) { material.transparent = true; material.depthWrite = false }
+        else material.alphaTest = 0.35
+        material.needsUpdate = true
+      }
     }
     materials.push(material)
   }
@@ -1862,6 +2004,23 @@ export async function buildAnimatedLocMesh(
   geometry.computeBoundingSphere()
   if (geometry.boundingSphere) geometry.boundingSphere.radius *= 1.5
   const mesh = new THREE.Mesh(geometry, materials)
+  // Transparent-sort key: the client sorts an object by the view depth of its
+  // vertical CENTRE (base + half the model height), not its origin — so record
+  // the local centre-Y offset for the renderer's transparent sort to apply.
+  geometry.computeBoundingBox()
+  if (geometry.boundingBox) {
+    mesh.userData.sortCentreY = (geometry.boundingBox.min.y + geometry.boundingBox.max.y) / 2
+  }
+  // Click-picking, same convention as the merged loc mesh: faceIndex indexes
+  // triangleOwners, which indexes locs. Every triangle here belongs to the one
+  // loc, so owners is all-zero and locs holds a single entry — resolveLocAt
+  // needs no special case. animatedLoc marks the geometry as deforming, which
+  // the highlight uses to follow the pose instead of snapshotting it.
+  if (owner) {
+    mesh.userData.locs = [owner]
+    mesh.userData.triangleOwners = new Int32Array(validFaces)
+    mesh.userData.animatedLoc = true
+  }
   const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute
 
   const update = (posed: PosedVertices) => {
@@ -2055,13 +2214,18 @@ export async function buildLocsMesh(
   heightsAll: Int32Array[],
   assets: LocAssets,
   onProgress?: (done: number, total: number) => void,
-): Promise<{ mesh: THREE.Mesh | null; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[] }> {
+): Promise<{ mesh: THREE.Mesh | null; transparentLocs: THREE.Mesh[]; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[] }> {
   const acc = new ModelAccumulator()
   const markers: MarkerInfo[] = []
   const locRefs: LocRef[] = []
   // locs with an idle sequence (waving flags etc.) — collected out of the merged
   // static mesh so the scene can pose them per frame.
   const animated: AnimatedLoc[] = []
+  // one mesh per loc that has transparent faces + the materials they share
+  const transparentLocs: THREE.Mesh[] = []
+  const transMaterials = new Map<number, THREE.Material>()
+  // small transparent locs (ground clutter) share one mesh — see the threshold
+  const sharedTrans = new BucketSet()
   // SceneGraph static shadows: values SUBTRACTED from the vertex lights.
   // Walls darken their edge's two corners by 50; scenery darkens every
   // footprint corner by the model's shadow displacement (size2d/4, clamped
@@ -2136,6 +2300,8 @@ export async function buildLocsMesh(
 
     let markerModels = 0
     let markerIsBarrier = false
+    // this loc's transparent faces — becomes its own mesh, like the client
+    const locTrans = new BucketSet()
     for (const piece of pieces) {
       const matrix = new THREE.Matrix4().makeTranslation(sceneX, -avgHeight, -sceneY)
       if (def.offsetX || def.offsetY || def.offsetZ) {
@@ -2187,9 +2353,41 @@ export async function buildLocsMesh(
             owner: { objectId, shape, rotation, x, y, plane: decodedPlane },
           })
         } else {
-          acc.addModel(m, matrix, locRefs.length)
+          // resolve this model's texture blendTypes so addModel can split
+          // opaque vs transparent faces synchronously
+          await assets.primeBlendTypes(m)
+          acc.addModel(m, matrix, locRefs.length, undefined, (t) => assets.blendTypeOf(t), locTrans)
         }
       }
+    }
+    // One mesh per transparent loc (the client's unit), recentred so its origin
+    // IS the model centre — that makes three.js's frustum cull tight and its
+    // per-object depth key exactly the client's (method3421 projects the centre).
+    //
+    // ...but only for locs big enough for ordering to be visible. Measured on
+    // region 12850 plane 0: of 2073 transparent placements, 1560 sit in the
+    // 21-100 face range (ground clutter — flowers, small bushes) and only ~195
+    // exceed 100 faces, which is where the actual trees live (oak 738, willow
+    // 670, mid trees 260-280). Giving every one its own mesh cost ~2000 draw
+    // calls at 35fps; the clutter is small enough that a shared mesh's single
+    // sort position is imperceptible, so it merges.
+    if (locTrans.faceCount() > TRANSPARENT_OWN_MESH_FACES) {
+      const lm = await locTrans.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'transparent', transMaterials)
+      if (lm) {
+        lm.geometry.computeBoundingBox()
+        const bb = lm.geometry.boundingBox
+        if (bb) {
+          const cx = (bb.min.x + bb.max.x) / 2, cy = (bb.min.y + bb.max.y) / 2, cz = (bb.min.z + bb.max.z) / 2
+          lm.geometry.translate(-cx, -cy, -cz)
+          lm.position.set(cx, cy, cz)
+        }
+        lm.geometry.computeBoundingSphere()
+        lm.userData.locs = locRefs
+        lm.userData.locIndex = locRefs.length
+        transparentLocs.push(lm)
+      }
+    } else if (locTrans.hasAny()) {
+      sharedTrans.mergeFrom(locTrans)
     }
     locRefs.push({ objectId, shape, rotation, x, y, plane: decodedPlane })
 
@@ -2207,7 +2405,16 @@ export async function buildLocsMesh(
       markers.push({ x: sceneX, y: -avgHeight, z: -sceneY, objectId, kind, tileX: x, tileY: y })
     }
   }
-  const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true)
+  // Opaque locs stay merged (order-independent). Transparent ones are the
+  // per-loc meshes collected above, drawn after the ground.
+  const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'opaque')
   if (mesh) mesh.userData.locs = locRefs
-  return { mesh, markers, shadows, animated }
+  if (sharedTrans.hasAny()) {
+    const sm = await sharedTrans.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'transparent', transMaterials)
+    if (sm) {
+      sm.userData.locs = locRefs
+      transparentLocs.push(sm)
+    }
+  }
+  return { mesh, transparentLocs, markers, shadows, animated }
 }

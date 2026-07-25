@@ -22,6 +22,14 @@ import './MapSceneViewer.css'
 // See mapScene.ts for the ported client pipeline.
 
 const REGION_UNITS = SIZE * 512
+// The client draws opaque objects, THEN the ground, THEN transparent objects
+// (SceneObjectManager.method3441). renderOrder is three.js's primary sort key in
+// both passes, so mirroring that order here is what stops water compositing over
+// foliage that stands in front of it.
+const ORDER_RIVERBED = -2
+const ORDER_OPAQUE_LOC = -1
+const ORDER_TERRAIN = 0
+const ORDER_TRANSPARENT_LOC = 1
 
 // BVH-accelerated raycasting: the merged terrain/locs meshes are hundreds of
 // thousands of triangles — brute-force raycasts on every mouse move are the
@@ -508,6 +516,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
   // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
   type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; mesh: THREE.Mesh; sphere: THREE.Sphere }
   const animLocsRef = useRef<AnimLocRecord[]>([])
+  // Meshes carrying `userData.sortCentreY` — their per-frame sort depth is
+  // recomputed from the model's vertical centre (see setTransparentSort above).
+  const sortCentreRef = useRef<THREE.Object3D[]>([])
   const assetsRef = useRef<LocAssets | null>(null)
   // FPS label — updated directly on the DOM node (no React re-render per frame).
   const fpsRef = useRef<HTMLSpanElement>(null)
@@ -526,6 +537,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     renderer.setSize(w, h)
     renderer.setClearColor(0x0b0d12)
     mount.appendChild(renderer.domElement)
+    // Client-exact transparent ordering. darkan's SceneObjectManager.method3421
+    // keys the per-object sort on the view depth of the object's vertical
+    // CENTRE — it projects (x, y + (minY >> 1), z), where minY is the model's
+    // top in RS's negative-up space, i.e. base + half the model height. three.js
+    // instead projects the object's ORIGIN, which for a tree is its base, so a
+    // tall loc sorts as if it were entirely at ground level. Meshes that set
+    // `userData.sortCentreY` get a corrected depth in `userData.sortZ` each
+    // frame, computed with the SAME projection three.js uses for renderItem.z,
+    // so the two can be compared interchangeably here.
+    renderer.setTransparentSort((a, b) => {
+      if (a.groupOrder !== b.groupOrder) return a.groupOrder - b.groupOrder
+      if (a.renderOrder !== b.renderOrder) return a.renderOrder - b.renderOrder
+      const az = (a.object.userData.sortZ as number | undefined) ?? a.z
+      const bz = (b.object.userData.sortZ as number | undefined) ?? b.z
+      if (az !== bz) return bz - az // farthest first — back-to-front
+      return a.id - b.id
+    })
     // Report the actual GPU/driver the browser handed WebGL — a "SwiftShader"/
     // "software" string here means hardware acceleration is OFF (the usual cause
     // of a slideshow-fps, whole-machine-lags-out map). Logged + on window.__gpu.
@@ -667,7 +695,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       scene.remove(highlightGroup)
       highlightGroup.traverse((o) => {
         const m = o as THREE.Mesh
-        if (m.geometry) m.geometry.dispose()
+        // an animated loc's highlight shares the source mesh's geometry so it
+        // follows the pose — disposing it here would destroy the loc itself
+        if (m.geometry && !m.userData.sharedGeometry) m.geometry.dispose()
         if (m.material) for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mat.dispose()
       })
       highlightGroup = null
@@ -677,17 +707,28 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
 
     function highlightLoc(mesh: THREE.Mesh, owner: number) {
       clearLocHighlight()
-      const owners = mesh.userData.triangleOwners as Int32Array
-      const positions = (mesh.geometry.getAttribute('position') as THREE.BufferAttribute).array as Float32Array
-      const tri: number[] = []
-      for (let t = 0; t < owners.length; t++) {
-        if (owners[t] !== owner) continue
-        const base = t * 9
-        for (let k = 0; k < 9; k++) tri.push(positions[base + k])
+      // An animated loc is a mesh of its own and every triangle is its, so the
+      // highlight can share the source geometry outright — it then deforms with
+      // the pose instead of freezing at the frame that was clicked. Its edge
+      // outline is skipped: EdgesGeometry is a one-off snapshot and would drift
+      // off the model as it animates.
+      const animated = mesh.userData.animatedLoc === true
+      let geometry: THREE.BufferGeometry
+      if (animated) {
+        geometry = mesh.geometry
+      } else {
+        const owners = mesh.userData.triangleOwners as Int32Array
+        const positions = (mesh.geometry.getAttribute('position') as THREE.BufferAttribute).array as Float32Array
+        const tri: number[] = []
+        for (let t = 0; t < owners.length; t++) {
+          if (owners[t] !== owner) continue
+          const base = t * 9
+          for (let k = 0; k < 9; k++) tri.push(positions[base + k])
+        }
+        if (tri.length === 0) return
+        geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(tri), 3))
       }
-      if (tri.length === 0) return
-      const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(tri), 3))
       highlightFill = new THREE.MeshBasicMaterial({
         color: 0x2f8fff,
         transparent: true,
@@ -700,14 +741,22 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       })
       const fill = new THREE.Mesh(geometry, highlightFill)
       fill.renderOrder = 900
-      const edges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(geometry, 25),
-        new THREE.LineBasicMaterial({ color: 0xb7e0ff, transparent: true, opacity: 0.95 }),
-      )
-      edges.renderOrder = 901
+      fill.userData.sharedGeometry = animated
       highlightGroup = new THREE.Group()
-      highlightGroup.add(fill, edges)
-      highlightGroup.position.copy(mesh.position)
+      highlightGroup.add(fill)
+      if (!animated) {
+        const edges = new THREE.LineSegments(
+          new THREE.EdgesGeometry(geometry, 25),
+          new THREE.LineBasicMaterial({ color: 0xb7e0ff, transparent: true, opacity: 0.95 }),
+        )
+        edges.renderOrder = 901
+        highlightGroup.add(edges)
+      }
+      // match the source mesh's full world transform — an animated loc bakes
+      // rotation and placement into its matrix, not just a position offset
+      highlightGroup.matrixAutoUpdate = false
+      highlightGroup.matrix.copy(mesh.matrixWorld)
+      highlightGroup.updateMatrixWorld(true)
       // never pickable — clicks must pass through to the loc beneath
       highlightGroup.traverse((o) => { o.raycast = () => {} })
       scene.add(highlightGroup)
@@ -750,7 +799,16 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         const owner = locs.findIndex((l) =>
           l.objectId === objectId && l.shape === type && l.rotation === rotation
           && l.x === x && l.y === y && l.plane === plane)
-        if (owner >= 0) { found = { mesh, owner }; break }
+        if (owner < 0) continue
+        // A merged mesh lists every loc in the region — including animated ones,
+        // whose triangles live in their own mesh. Matching the id there would
+        // "find" a loc with no geometry, so keep looking if it owns no triangles.
+        if (!mesh.userData.animatedLoc) {
+          const owners = mesh.userData.triangleOwners as Int32Array | undefined
+          if (!owners || !owners.includes(owner)) continue
+        }
+        found = { mesh, owner }
+        break
       }
       if (found) highlightLoc(found.mesh, found.owner)
       else clearLocHighlight()
@@ -804,8 +862,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       const owner = owners?.[faceIndex] ?? -1
       const loc = owner >= 0 ? (mesh.userData.locs as LocRef[])[owner] : undefined
       if (!loc) return null
-      const meshRegionX = data.def.regionX + Math.round(mesh.position.x / (64 * TILE))
-      const meshRegionY = data.def.regionY - Math.round(mesh.position.z / (64 * TILE))
+      // Merged loc meshes carry their region as a mesh offset; animated locs
+      // bake the whole placement into mesh.matrix (position stays at origin),
+      // so those record the region in userData instead.
+      const locRegion = mesh.userData.locRegion as { x: number; y: number } | undefined
+      const meshRegionX = locRegion ? locRegion.x : data.def.regionX + Math.round(mesh.position.x / (64 * TILE))
+      const meshRegionY = locRegion ? locRegion.y : data.def.regionY - Math.round(mesh.position.z / (64 * TILE))
       const isCenter = meshRegionX === data.def.regionX && meshRegionY === data.def.regionY
       const centerList = objectsPropRef.current ?? data.def.objects
       const index = isCenter
@@ -1121,6 +1183,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     // (hundreds of them) thrashed the GC. Only what's on screen gets posed.
     const animFrustum = new THREE.Frustum()
     const animProjView = new THREE.Matrix4()
+    const sortProjScreen = new THREE.Matrix4()
+    const sortVec = new THREE.Vector3()
     // whether the last pose tick saw a visible animated loc — lets the idle
     // throttle engage when nothing on screen is animating (hundreds of hidden/
     // off-screen animated locs shouldn't peg full fps forever)
@@ -1169,11 +1233,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       // on screen — culling to the visible handful (from potentially hundreds) is
       // what keeps this cheap. Meshes off-screen are frustum-culled by three.js.
       if (animLocsRef.current.length > 0) {
-        const seconds = (performance.now() % 3600000) / 1000
         camera.updateMatrixWorld()
         camera.matrixWorldInverse.copy(camera.matrixWorld).invert()
         animProjView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
         animFrustum.setFromProjectionMatrix(animProjView)
+        const seconds = (performance.now() % 3600000) / 1000
         animVisible = false
         for (const rec of animLocsRef.current) {
           if (!rec.animator) continue
@@ -1215,6 +1279,21 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           if (placingRef.current) ghostClearRef.current?.()
         }
       }
+      // Refresh the client-style centre depths the transparent sort reads. Same
+      // projection three.js applies to renderItem.z, but from the model's
+      // vertical centre instead of its origin (see setTransparentSort).
+      if (sortCentreRef.current.length > 0) {
+        camera.updateMatrixWorld()
+        camera.matrixWorldInverse.copy(camera.matrixWorld).invert()
+        sortProjScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+        for (const obj of sortCentreRef.current) {
+          if (!obj.visible || obj.parent?.visible === false) continue
+          sortVec.setFromMatrixPosition(obj.matrixWorld)
+          sortVec.y += obj.userData.sortCentreY as number
+          sortVec.applyMatrix4(sortProjScreen)
+          obj.userData.sortZ = sortVec.z
+        }
+      }
       renderer.render(scene, camera)
       // FPS readout — averaged over 20 frames, written straight to the label
       // node. No React state per frame.
@@ -1224,7 +1303,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         perfLast = now
         if (perfN >= 20) {
           const fps = Math.round(perfSum / perfN)
-          if (fpsRef.current) fpsRef.current.textContent = `${fps} fps`
+          // draw calls: per-loc transparent meshes make this the number that
+          // decides whether the client's one-mesh-per-loc design is affordable
+          if (fpsRef.current) fpsRef.current.textContent = `${fps} fps · ${renderer.info.render.calls} calls`
           perfSum = 0; perfN = 0
         }
       }
@@ -1258,6 +1339,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         const assets = new LocAssets(data.rootHandle)
         assetsRef.current = assets
         animLocsRef.current = []
+        sortCentreRef.current = []
         const mapsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('maps'))
 
         for (let plane = 0; plane < 4; plane++) {
@@ -1447,7 +1529,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               if (disposed) return
               if (bed) {
                 bed.position.set(offsetX, 0, offsetZ)
-                bed.renderOrder = -1 // ensure it draws before the water surface
+                bed.renderOrder = ORDER_RIVERBED // under the water surface
                 bed.geometry.computeBoundsTree({ indirect: true })
                 // riverbed is never pickable/water-swapped — add directly
                 planeGroupsRef.current[plane]?.add(bed)
@@ -1464,6 +1546,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             if (disposed) return
             if (terrainMesh) {
               terrainMesh.position.set(offsetX, 0, offsetZ)
+              terrainMesh.renderOrder = ORDER_TERRAIN
               // indirect: the default mode reorders triangles, which would break
               // the material groups and the faceIndex→triangleOwners mapping
               terrainMesh.geometry.computeBoundsTree({ indirect: true })
@@ -1480,23 +1563,39 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             if (!built) continue
             if (built.mesh) {
               built.mesh.position.set(offsetX, 0, offsetZ)
+              built.mesh.renderOrder = ORDER_OPAQUE_LOC
               built.mesh.geometry.computeBoundsTree({ indirect: true })
               track(built.mesh)
               planeGroupsRef.current[plane]?.add(built.mesh)
               taggedRef.current.push({ obj: built.mesh, neighbor: !isCenter, kind: 'loc' })
             }
+            // One mesh per transparent loc — three.js frustum-culls and depth-
+            // sorts them back-to-front, which is the client's object pass.
+            for (const lm of built.transparentLocs) {
+              lm.position.x += offsetX
+              lm.position.z += offsetZ
+              lm.renderOrder = ORDER_TRANSPARENT_LOC
+              track(lm)
+              applyTint(lm)
+              planeGroupsRef.current[plane]?.add(lm)
+              taggedRef.current.push({ obj: lm, neighbor: !isCenter, kind: 'loc' })
+            }
             // Animated locs (waving flags etc.): a separate posable mesh each,
             // placed with the region offset baked into the mesh transform.
             for (const al of built.animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner)
               if (disposed) return
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
               anim.mesh.matrix.copy(new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(al.matrix))
               anim.mesh.updateMatrixWorld(true)
+              // the placement is baked into the matrix, so mesh.position stays
+              // at the origin — record the region for resolveLocAt explicitly
+              anim.mesh.userData.locRegion = { x: def.regionX, y: def.regionY }
               track(anim.mesh)
               planeGroupsRef.current[plane]?.add(anim.mesh)
               taggedRef.current.push({ obj: anim.mesh, neighbor: !isCenter, kind: 'loc' })
+              if (anim.mesh.userData.sortCentreY !== undefined) sortCentreRef.current.push(anim.mesh)
               const sphere = anim.mesh.geometry.boundingSphere
                 ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
                 : new THREE.Sphere(new THREE.Vector3(offsetX, 0, offsetZ), 1e9)
@@ -1773,6 +1872,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           // the centre's animated-loc meshes were just disposed with the loc
           // meshes above — drop their pose records (neighbours survive)
           animLocsRef.current = animLocsRef.current.filter((r) => r.neighbor)
+          // drop sort entries whose mesh was just disposed (parent detached)
+          sortCentreRef.current = sortCentreRef.current.filter((m) => m.parent !== null)
 
           const locBuilds: (Awaited<ReturnType<typeof buildLocsMesh>> | null)[] = [null, null, null, null]
           if (nextObjects.length > 0) {
@@ -1799,7 +1900,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               const bed = await buildTerrainMesh(uwCenter, plane, riverbedCenter, configs, assets)
               if (disposed) return
               if (bed) {
-                bed.renderOrder = -1
+                bed.renderOrder = ORDER_RIVERBED
                 bed.geometry.computeBoundsTree({ indirect: true })
                 applyTint(bed)
                 planeGroupsRef.current[plane]?.add(bed)
@@ -1815,6 +1916,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             }, uwDepthCenter)
             if (disposed) return
             if (terrainMesh) {
+              terrainMesh.renderOrder = ORDER_TERRAIN
               terrainMesh.geometry.computeBoundsTree({ indirect: true })
               track(terrainMesh)
               applyTint(terrainMesh)
@@ -1827,23 +1929,33 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             const built = locBuilds[plane]
             if (!built) continue
             if (built.mesh) {
+              built.mesh.renderOrder = ORDER_OPAQUE_LOC
               built.mesh.geometry.computeBoundsTree({ indirect: true })
               track(built.mesh)
               applyTint(built.mesh)
               planeGroupsRef.current[plane]?.add(built.mesh)
               taggedRef.current.push({ obj: built.mesh, neighbor: false, kind: 'loc' })
             }
+            for (const lm of built.transparentLocs) {
+              lm.renderOrder = ORDER_TRANSPARENT_LOC
+              track(lm)
+              applyTint(lm)
+              planeGroupsRef.current[plane]?.add(lm)
+              taggedRef.current.push({ obj: lm, neighbor: false, kind: 'loc' })
+            }
             for (const al of built.animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner)
               if (disposed) return
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
               anim.mesh.matrix.copy(al.matrix)
               anim.mesh.updateMatrixWorld(true)
+              anim.mesh.userData.locRegion = { x: data.def.regionX, y: data.def.regionY }
               track(anim.mesh)
               applyTint(anim.mesh)
               planeGroupsRef.current[plane]?.add(anim.mesh)
               taggedRef.current.push({ obj: anim.mesh, neighbor: false, kind: 'loc' })
+              if (anim.mesh.userData.sortCentreY !== undefined) sortCentreRef.current.push(anim.mesh)
               const sphere = anim.mesh.geometry.boundingSphere
                 ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
                 : new THREE.Sphere(new THREE.Vector3(), 1e9)
