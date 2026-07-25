@@ -297,6 +297,12 @@ export function computeModelLitRgb(
       let wz = m[2] * lx + m[5] * ly + m[8] * lz
       const wl = Math.hypot(wx, wy, wz) || 1
       wx /= wl; wy /= wl; wz /= wl
+      // NOTE: not the client's formula. `glsl/1_12.vert` is
+      //   AmbientColour + max(0,min(1,N·L))·SunColour + max(0,min(1,-N·L))·AntiSunColour
+      // (AntiSunColour uploaded negated, so the back term darkens). Porting it
+      // verbatim was tried on 2026-07-25 and reverted — see the TODO note; it
+      // needs tone mapping first, because the client's real environment values
+      // run well past 1.0 and we clamp instead of compressing.
       const hl = Math.min(1, Math.max(0, (sdx * wx + sdy * wy + sdz * wz) * 0.5 + 0.5))
       let dr = hl * (sr + ar * 0.5) + ar * 0.5
       let dg = hl * (sg + ag * 0.5) + ag * 0.5
