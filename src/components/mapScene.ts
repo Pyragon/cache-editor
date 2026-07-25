@@ -120,6 +120,151 @@ function binaryAlphaTexture(bitmap: ImageBitmap): THREE.CanvasTexture {
   return new THREE.CanvasTexture(canvas)
 }
 
+/**
+ * Materials drawn with one of the client's two reflective effects — effectId 1
+ * (`Class141_Sub1`, a specular highlight) and 7 (`Class141_Sub7`, a sky env-map
+ * reflection) — whose texture alpha is NOT opacity.
+ *
+ * Both build their fixed-function chain the same way: the last texture unit is
+ * set to `COMBINE_ALPHA = GL_REPLACE` with `SRC0_ALPHA = GL_PRIMARY_COLOR`
+ * (`method13717(_, 7681)` + `method13616(0, 34167)`), and the unbind display
+ * list puts it back to `GL_TEXTURE`. So while such a material is bound, the
+ * fragment's alpha is the vertex alpha and nothing else — the material's own
+ * alpha channel is consumed earlier, as the gloss mask that scales the specular
+ * cubemap into RGB (effect 1) or as the interpolation factor between the base
+ * colour and the sky (effect 7).
+ *
+ * It has to be read off the data as well: these are the ground detail maps,
+ * and they sit at alpha 1-76 (texture 494 is underlays 1/2/3, texture 407 is
+ * 15/58/59/135/157). Treated as opacity, grass would draw at 15% and vanish.
+ */
+function effectIgnoresTextureAlpha(meta: MaterialMeta): boolean {
+  // ...except on a cutout. effectCombiner 1 means `getTexture` SYNTHESISED the
+  // alpha channel (black texels → clear) because our dumped PNGs are opaque —
+  // it's the only thing making that geometry see-through, and it isn't the
+  // alpha the specular chain consumes. 17 materials are both; they keep their
+  // cutout. None of them is a floor, so the ground fix is unaffected.
+  if (meta.effectCombiner === 1) return false
+  return meta.effectId === 1 || meta.effectId === 7
+}
+
+/**
+ * Drop the sampled alpha so only the vertex alpha survives, mirroring that
+ * `COMBINE_ALPHA = REPLACE`. Done in the shader rather than by rewriting the
+ * texture: stripping the alpha channel on a 2D canvas means a round trip
+ * through its premultiplied store, which mangles exactly these materials —
+ * texture 407 comes back off the canvas with per-texel errors up to 30 and
+ * visible hue shifts, because its alpha bottoms out at 1.
+ *
+ * Shared module-level function on purpose. Three's default
+ * `customProgramCacheKey` is `onBeforeCompile.toString()`, so every material
+ * patched here keys to the same string and they all share one compiled program.
+ */
+const dropMapAlpha = (shader: { fragmentShader: string }) => {
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <map_fragment>',
+    '#ifdef USE_MAP\n\tdiffuseColor.rgb *= texture2D( map, vMapUv ).rgb;\n#endif',
+  )
+}
+
+// --- effectId 1: the specular highlight -------------------------------------
+//
+// `Class141_Sub1` bakes three specular cubemaps at construction, each face
+// texel holding `pow(dot(dir, axis), n) * 127` for n = 96, 36 and 12 (0 where
+// the dot is negative), and `method2399` binds
+// `aClass137_Sub2Array9027[effectParam1 - 1]` — so effectParam1 1/2/3 selects
+// the exponent. The 127 is `i_2` in the full-quality path (48 on the reduced
+// one), i.e. the term peaks at 127/255 of a channel.
+const SPECULAR_EXPONENT = [96, 36, 12]
+const SPECULAR_PEAK = 127 / 255
+
+/** The Phong exponent for a material, or 0 if it takes no specular. */
+function specularExponent(meta: MaterialMeta): number {
+  if (meta.effectId !== 1 || meta.effectCombiner === 1) return 0
+  return SPECULAR_EXPONENT[meta.effectParam1 - 1] ?? 0
+}
+
+type ShaderPatch = (shader: { vertexShader: string; fragmentShader: string }) => void
+
+const specularPatches = new Map<string, ShaderPatch>()
+
+/**
+ * `onBeforeCompile` adding the client's specular term on top of the alpha drop.
+ *
+ * The GL fixed-function path fakes this with `GL_REFLECTION_MAP` texgen into
+ * the baked cubemap, but the shader path states it directly — `1_12.vert`'s
+ * `ShaderMode == 1` branch, the same shader our Gouraud lighting is ported
+ * from, emits `SpecularColour.xyz = reflect(-SunDir, N)` and
+ * `ReflectedViewVector = normalize(EyePos - vertex)` (misnomer: it's the plain
+ * view vector). The cubemap lookup those feed is `pow(R·V, n)`, textbook Phong.
+ *
+ * The combine is the traced 3-unit chain: unit 0 gives `texture.rgb ×
+ * primary.rgb`, unit 1 puts `cubemap × texture.alpha` in alpha, and unit 2 does
+ * `COMBINE_RGB = GL_ADD` with `SRC1_RGB = PREVIOUS` operand `GL_SRC_ALPHA` —
+ * folding that alpha back into RGB. So:
+ *
+ *     rgb = texture.rgb * vertexColour + pow(R·V, n) * 127/255 * texture.alpha
+ *
+ * added equally to all three channels (the operand replicates alpha), which is
+ * why the highlight is always white regardless of the material's colour.
+ *
+ * `sunDir` and the exponent are inlined as literals rather than passed as
+ * uniforms: adding uniforms through `onBeforeCompile` on a built-in material
+ * means sharing three's cached uniform group, and the sun is already fixed at
+ * mesh-build time anyway (the Gouraud pass bakes it into vertex colours, so
+ * changing it rebuilds the mesh regardless). Patches are cached by
+ * sun+exponent so the handful of variants share compiled programs.
+ */
+function specularPatch(sun: ModelSun, exponent: number): ShaderPatch {
+  const l = Math.hypot(sun.dir[0], sun.dir[1], sun.dir[2]) || 1
+  const sx = (sun.dir[0] / l).toFixed(6)
+  const sy = (sun.dir[1] / l).toFixed(6)
+  const sz = (sun.dir[2] / l).toFixed(6)
+  const key = `${sx},${sy},${sz}|${exponent}`
+  let patch = specularPatches.get(key)
+  if (patch) return patch
+
+  // The client's fixed-function chain has no notion of sRGB — it adds the
+  // specular in display space. Our vertex colours are linearised
+  // (`computeModelLitRgb` ends in srgbToLinear) and the texture decodes to
+  // linear too, so to land in the same place the add has to happen in display
+  // space and come back. Same convention the point lights already follow, which
+  // sum into the diffuse term before that srgbToLinear.
+  const helpers = `
+vec3 rsToDisplay( vec3 c ) {
+	return mix( pow( c, vec3( 0.41666 ) ) * 1.055 - vec3( 0.055 ), c * 12.92, vec3( lessThanEqual( c, vec3( 0.0031308 ) ) ) );
+}
+vec3 rsToLinear( vec3 c ) {
+	return mix( pow( c * 0.9478672986 + vec3( 0.0521327014 ), vec3( 2.4 ) ), c * 0.0773993808, vec3( lessThanEqual( c, vec3( 0.04045 ) ) ) );
+}`
+
+  patch = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vRsSpecR;\nvarying vec3 vRsSpecV;')
+      // after project_vertex so `transformed` is final (batching/morph applied)
+      .replace('#include <project_vertex>', `#include <project_vertex>
+	vRsSpecR = reflect( -vec3( ${sx}, ${sy}, ${sz} ), normalize( mat3( modelMatrix ) * normal ) );
+	vRsSpecV = cameraPosition - ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;`)
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nvarying vec3 vRsSpecR;\nvarying vec3 vRsSpecV;${helpers}`)
+      // map_fragment runs BEFORE color_fragment, so diffuseColor is still the
+      // flat material colour here — take the texture's rgb (never its alpha)
+      // and hold the gloss mask until the vertex colour has been applied.
+      .replace('#include <map_fragment>', `float rsGloss = 0.0;
+	#ifdef USE_MAP
+		vec4 rsTexel = texture2D( map, vMapUv );
+		diffuseColor.rgb *= rsTexel.rgb;
+		rsGloss = rsTexel.a;
+	#endif`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+	float rsSpec = pow( max( dot( normalize( vRsSpecR ), normalize( vRsSpecV ) ), 0.0 ), ${exponent.toFixed(1)} ) * ${SPECULAR_PEAK.toFixed(6)} * rsGloss;
+	diffuseColor.rgb = rsToLinear( rsToDisplay( diffuseColor.rgb ) + rsSpec );`)
+  }
+  specularPatches.set(key, patch)
+  return patch
+}
+
 /** Final per-vertex ground colour (GroundGL): two stages — (1) scale the tile
  *  colour's HSL lightness by `lightStrength/128` (ambient 74 minus static shadow,
  *  the source of the ground's shading), then (2) multiply the resulting RGB by
@@ -979,7 +1124,7 @@ export function isWaterMaterial(meta: MaterialMeta): boolean {
   return hue >= 34 && hue <= 45
 }
 
-type Bucket = { positions: number[]; colors: number[]; uvs: number[]; owners: number[]; alphas: number[]; depths: number[] }
+type Bucket = { positions: number[]; colors: number[]; uvs: number[]; owners: number[]; alphas: number[]; depths: number[]; normals: number[] }
 
 // blend buckets (terrain texture splatting) share the map under offset keys
 const BLEND_KEY = 1 << 20
@@ -1001,7 +1146,7 @@ class BucketSet {
 
   get(textureId: number): Bucket {
     let b = this.buckets.get(textureId)
-    if (!b) this.buckets.set(textureId, (b = { positions: [], colors: [], uvs: [], owners: [], alphas: [], depths: [] }))
+    if (!b) this.buckets.set(textureId, (b = { positions: [], colors: [], uvs: [], owners: [], alphas: [], depths: [], normals: [] }))
     return b
   }
 
@@ -1039,6 +1184,7 @@ class BucketSet {
       for (const v of src.owners) dst.owners.push(v)
       for (const v of src.alphas) dst.alphas.push(v)
       for (const v of src.depths) dst.depths.push(v)
+      for (const v of src.normals) dst.normals.push(v)
     }
   }
 
@@ -1084,6 +1230,9 @@ class BucketSet {
     // passed a depth grid and the vertex belongs to a water material.
     const waterDepth = new Float32Array(total)
     let anyDepth = false
+    // Vertex normals, only for the specular materials that need them — the face
+    // loops push normals per bucket, so most scenes allocate nothing here.
+    const normals = entries.some(([, b]) => b.normals.length > 0) ? new Float32Array(total * 3) : null
     const geometry = new THREE.BufferGeometry()
     const materials: THREE.Material[] = []
     let vert = 0
@@ -1109,6 +1258,7 @@ class BucketSet {
         waterDepth.set(b.depths, vert)
         anyDepth = true
       }
+      if (normals && b.normals.length > 0) normals.set(b.normals, vert * 3)
       uvs.set(b.uvs, vert * 2)
       owners.set(b.owners, vert / 3)
       geometry.addGroup(vert, count, materials.length)
@@ -1143,13 +1293,36 @@ class BucketSet {
           // don't leak across materials sharing a cached THREE.Texture
           const animated = meta && (meta.speedU !== 0 || meta.speedV !== 0 || isWaterMaterial(meta))
           material.map = animated ? texture.clone() : texture
-          // Cutouts get a hard 0.35 threshold; the crossfade pass must keep
-          // drawing at any alpha (0). Blended loc faces still need a small
-          // cutoff — with depthWrite on, a fully-clear texel would otherwise
-          // write depth and punch a hole through whatever is behind it.
-          // cutouts keep the hard 0.35 threshold; crossfade and blended loc
-          // faces draw at any alpha (the client's alpha test never rejects)
-          material.alphaTest = blend || trans ? 0 : 0.35
+          // NO alpha test, ever — the client's is a no-op (ALPHAREF=0,
+          // GREATEREQUAL, set once in DirectXRenderer init and never changed)
+          // and none of the 18 dumped fragment shaders discards.
+          //
+          // This used to cut opaque faces at 0.35, left over from before the
+          // transparency trace, and it silently deleted every surface textured
+          // with an `effectId: 1` material: that's the client's specular /
+          // env-mapped shader mode (MeshRasterizer_Sub3 switches on effectId,
+          // and 1_12.vert's `ShaderMode == 1` branch builds a reflected view
+          // vector), where the texture's ALPHA IS A GLOSS MASK, not opacity.
+          // Textures 90/91/109/266 sit at alpha 38-70, i.e. 100% below the
+          // threshold, so barrel rings, the Lumbridge sink and cooking range,
+          // and every grey stone trim vanished entirely. Cutout foliage is
+          // unaffected: the leaf texture that actually carries a soft alpha
+          // mask (922) is `effectCombiner: 2`, so it takes the blended path
+          // where the threshold was already 0.
+          material.alphaTest = 0
+          // Reflective materials: the client replaces the sampled alpha with
+          // the vertex alpha, so it must not multiply into opacity here. Matters
+          // for the crossfade and transparent buckets, where it would otherwise
+          // fade a blended ground seam down to its texture's alpha (~15-25%).
+          // effectId 1 additionally gets its specular highlight back — but only
+          // where the bucket carries normals to compute it from.
+          if (meta && effectIgnoresTextureAlpha(meta)) {
+            const exponent = b.normals.length > 0 ? specularExponent(meta) : 0
+            // DEFAULT_MODEL_SUN is the whole scene's sun — the loc Gouraud bake
+            // and computeVertexLightGrid both pin it — and the highlight has to
+            // agree with the diffuse shading it sits on top of.
+            material.onBeforeCompile = exponent > 0 ? specularPatch(DEFAULT_MODEL_SUN, exponent) : dropMapAlpha
+          }
           // HDR overbright: push the material past 1.0 so the bloom pass sees it.
           // Recorded in userData too — the scene's sun tint re-writes material.color
           // and must multiply by this rather than overwrite it.
@@ -1172,6 +1345,7 @@ class BucketSet {
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4))
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
+    if (normals) geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
     if (anyDepth) geometry.setAttribute('waterDepth', new THREE.BufferAttribute(waterDepth, 1))
     const mesh = new THREE.Mesh(geometry, materials)
     mesh.userData.triangleOwners = owners
@@ -1368,12 +1542,23 @@ export async function buildTerrainMesh(
         // client units) so the water shader can fade to transparent at shallow
         // shores. Non-water buckets leave depths empty (default 0 in toMesh).
         const isWater = meta ? isWaterMaterial(meta) : false
+        // Ground materials take a specular too (Node_Sub3 binds the effect for
+        // its chunks just like a model does), so specular buckets get a normal
+        // per vertex — the same height-gradient normal computeVertexLightGrid
+        // derives its half-Lambert from, sampled at the vertex.
+        const specular = meta ? specularExponent(meta) > 0 : false
         for (let vi = 0; vi < 3; vi++) {
           const [px, py] = pts[vi]
           const sceneX = (x << 9) + px
           const sceneY = (y << 9) + py
           const h = averageHeight(heights, sceneX, sceneY)
           bucket.positions.push(sceneX, -h, -sceneY)
+          if (specular) {
+            const dhx = averageHeight(heights, sceneX + 512, sceneY) - averageHeight(heights, sceneX - 512, sceneY)
+            const dhy = averageHeight(heights, sceneX, sceneY + 512) - averageHeight(heights, sceneX, sceneY - 512)
+            const nl = Math.hypot(dhx, 1024, dhy) || 1
+            bucket.normals.push(dhx / nl, 1024 / nl, -dhy / nl)
+          }
           if (isWater) {
             bucket.depths.push(waterDepthAll ? averageHeight(waterDepthAll[plane], sceneX, sceneY) : 0)
           }
@@ -1503,6 +1688,13 @@ export type ObjectDefJson = {
   /** How far a wall pushes the decorations hanging on it (default 64). Read off
    *  the WALL, not the decoration — see buildLocsMesh's wallDisplacement. */
   decorDisplacement?: number
+  /** Morph ("multiloc") targets: the client swaps this def for `transformTo[v]`
+   *  where v is the value of `varpBit`/`varp` (ObjectDefinition.getMultiLoc).
+   *  The last entry is its fallback when the var is out of range. */
+  transformTo?: number[]
+  transforms?: boolean
+  varpBit?: number
+  varp?: number
   originalColors?: number[]
   modifiedColors?: number[]
   // Loc texture-swap fields as named in the dumped object JSON (ObjectViewer /
@@ -1546,6 +1738,13 @@ export type MaterialMeta = {
    *  (black texels → transparent, foliage/fence cutouts), 2 = per-pixel alpha
    *  from an opacity op the dump doesn't bake. */
   effectCombiner: number
+  /** Which of the client's fixed-function "effects" the material is drawn with
+   *  (Class146's effect table). 1 and 7 are the two specular effects — see
+   *  `effectIgnoresTextureAlpha`. */
+  effectId: number
+  /** Effect parameter — for effectId 1 it picks the specular exponent, see
+   *  `SPECULAR_EXPONENT`. */
+  effectParam1: number
   /** Overbright multiplier for `hdr` materials. The client uploads these as FLOAT
    *  textures (`Class66` -> `renderMaterialPixelsF`) and scales colour by
    *  `1 + hdrOp*31/4096` — up to 32x — which is what makes flames glow once bloom
@@ -1568,6 +1767,8 @@ export class LocAssets {
   private blendTypes = new Map<number, number>()
   /** overbright multiplier per texture, filled as metas resolve */
   private hdrMults = new Map<number, number>()
+  /** Phong exponent per texture (0 = no specular), filled as metas resolve */
+  private specExponents = new Map<number, number>()
   // single-flight directory resolution: cache the PROMISE, not the result —
   // dozens of parallel first calls must not each re-resolve the folder
   private objectsDirP: Promise<FileSystemDirectoryHandle | null> | undefined
@@ -1610,6 +1811,13 @@ export class LocAssets {
   /** Cached HDR overbright multiplier (1 = not HDR). Sync — needs primeBlendTypes. */
   hdrMultiplierOf(id: number): number {
     return this.hdrMults.get(id) ?? 1
+  }
+
+  /** Cached specular exponent (0 = the material takes no specular, which is the
+   *  overwhelming majority). Sync — needs primeBlendTypes. Used by the face
+   *  loops to decide whether a bucket has to carry vertex normals. */
+  specularExponentOf(id: number): number {
+    return this.specExponents.get(id) ?? 0
   }
 
   /** Resolve (and cache) the blendType of every texture a model uses, so the
@@ -1687,6 +1895,8 @@ export class LocAssets {
           let speedV = 0
           let colorHsl = -1
           let effectCombiner = 0
+          let effectId = 0
+          let effectParam1 = 0
           let isHdr = false
           let hdrMultiplier = 1
           try {
@@ -1699,6 +1909,8 @@ export class LocAssets {
             speedV = def.textureSpeedV ?? 0
             colorHsl = def.colorHsl ?? -1
             effectCombiner = def.effectCombiner ?? 0
+            effectId = def.effectId ?? 0
+            effectParam1 = def.effectParam1 ?? 0
             isHdr = def.hdr === true
           } catch { /* definition missing — treat as self-coloured */ }
           if (isHdr) {
@@ -1752,9 +1964,14 @@ export class LocAssets {
               avgRgb = (Math.round(sr / n) << 16) | (Math.round(sg / n) << 8) | Math.round(sb / n)
             }
           } catch { /* keep default */ }
+          const meta: MaterialMeta = {
+            detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl,
+            effectCombiner, effectId, effectParam1, hdrMultiplier,
+          }
           this.blendTypes.set(id, effectCombiner)
           this.hdrMults.set(id, hdrMultiplier)
-          return { detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl, effectCombiner, hdrMultiplier }
+          this.specExponents.set(id, specularExponent(meta))
+          return meta
         } catch {
           return null
         }
@@ -1823,6 +2040,48 @@ function isMarkerModel(model: ModelData): boolean {
   return true
 }
 
+/**
+ * Each vertex's local x/z after everything `ObjectDefinition.method7971` bakes
+ * into the mesh before the ground contour runs: mirror (`wa`, negate RS z), the
+ * rotation≥4 extras (45° then the (180, 0, -180) shift), the 90°·rotation steps
+ * (`S`: x' = sin·z + cos·x, z' = cos·z − sin·x), then resize and the def offset.
+ *
+ * Only x/z matter — the contour rewrites y, and a Y-axis rotation leaves y
+ * alone, so the contoured values stay valid once the placement matrix rotates
+ * the mesh. (`scaleY` is the one gap: the client contours post-resize, we do it
+ * pre-resize, so a Y-scaled contoured loc would scale its ground term too. No
+ * loc in the dump is both.)
+ */
+function placedXZ(
+  model: ModelData,
+  piece: { rot: number; mirror: boolean; variant: 'plain' | 'decor' | 'rot45' },
+  def: ObjectDefJson,
+): [Int32Array, Int32Array] {
+  const n = model.vertexCount
+  const outX = new Int32Array(n)
+  const outZ = new Int32Array(n)
+  const scaleX = (def.scaleX ?? 128) / 128
+  const scaleZ = (def.scaleZ ?? 128) / 128
+  const rot = piece.rot & 0x3
+  const C45 = Math.SQRT1_2
+  for (let v = 0; v < n; v++) {
+    let x = model.vertexX[v]
+    let z = piece.mirror ? -model.vertexZ[v] : model.vertexZ[v]
+    if (piece.variant !== 'plain') {
+      const nx = C45 * z + C45 * x
+      z = C45 * z - C45 * x
+      x = nx
+      if (piece.variant === 'decor') { x += 180; z -= 180 }
+    }
+    if (rot === 1) { const t = x; x = z; z = -t }
+    else if (rot === 2) { x = -x; z = -z }
+    else if (rot === 3) { const t = x; x = -z; z = t }
+    outX[v] = Math.round(x * scaleX) + (def.offsetX ?? 0)
+    outZ[v] = Math.round(z * scaleZ) + (def.offsetZ ?? 0)
+  }
+  return [outX, outZ]
+}
+
 // Ground-contour ("hillskew") for locs — port of ModelSM.contourToGround. RS
 // loc models can be deformed so their vertices follow the terrain: paths/floors
 // hug the ground (type 1/2), and — crucially for bridges/raised buildings —
@@ -1845,6 +2104,13 @@ function contourVertexY(
   sceneX: number,
   sceneY: number,
   avgHeight: number,
+  /** Per-vertex PLACED local x/z (rotation, mirror and def scale/offset already
+   *  applied) — the ground is sampled under the vertex's real world position.
+   *  The client contours the mesh in `method7971` AFTER baking those in, so
+   *  sampling with raw model coords rotates the deformation away from the
+   *  terrain: a rotated staircase came out twisted into the hillside. */
+  placedX?: Int32Array,
+  placedZ?: Int32Array,
 ): Int32Array | null {
   if (model.version < 13) return null
   const { vertexCount, vertexX, vertexY, vertexZ } = model
@@ -1862,8 +2128,8 @@ function contourVertexY(
   for (let v = 0; v < vertexCount; v++) { if (vertexY[v] < minY) minY = vertexY[v]; if (vertexY[v] > maxY) maxY = vertexY[v] }
 
   for (let v = 0; v < vertexCount; v++) {
-    const wx = sceneX + vertexX[v]
-    const wz = sceneY + vertexZ[v]
+    const wx = sceneX + (placedX ? placedX[v] : vertexX[v])
+    const wz = sceneY + (placedZ ? placedZ[v] : vertexZ[v])
     let ny = vertexY[v]
     if (contourType === 1) {
       const g = groundAt(heights, wx, wz)
@@ -1911,6 +2177,9 @@ class ModelAccumulator {
     // renders one mesh per loc so its faces can be ordered and depth-sorted as
     // a unit. Opaque faces always stay merged (order-independent).
     transparentTarget?: BucketSet,
+    // Phong exponent per texture (0 = none). Only buckets whose material takes
+    // a specular carry vertex normals, so a scene with none costs nothing.
+    specularOf?: (texId: number) => number,
   ) {
     const upscale = modelUpscale(model)
     const v = new THREE.Vector3()
@@ -1923,7 +2192,10 @@ class ModelAccumulator {
     const points = light?.points?.length
       ? { lights: light.points, matrix: matrix.elements, upscale }
       : undefined
-    const lit = computeModelLitRgb(model, normalMat, light?.sun, points)
+    // Model-local normals, only when some texture on this model is specular.
+    const wantsNormals = specularOf !== undefined && modelHasSpecular(model, specularOf)
+    const localNormals = wantsNormals ? new Float32Array(model.faceCount * 9) : undefined
+    const lit = computeModelLitRgb(model, normalMat, light?.sun, points, localNormals)
     if (hdrOf) unlitHdrFaces(model, lit, hdrOf)
     for (let f = 0; f < model.faceCount; f++) {
       if (model.faceAlpha[f] === -1) continue
@@ -1950,6 +2222,10 @@ class ModelAccumulator {
       // (mostly) greyscale detail maps the client multiplies by face colour. The
       // lit colour is per-vertex so untextured scenery gets smooth Gouraud shading.
       const corners = [ia, ib, ic]
+      // Specular buckets carry a normal per vertex. This mesh bakes every
+      // placement into one buffer, so the normal goes in with the placement's
+      // normal matrix already applied — mesh-local, matching the positions.
+      const emitNormal = localNormals !== undefined && textureId >= 0 && specularOf!(textureId) > 0
       for (let k = 0; k < 3; k++) {
         const base = (f * 3 + k) * 3
         const vi = corners[k]
@@ -1957,9 +2233,29 @@ class ModelAccumulator {
         v.applyMatrix4(matrix)
         bucket.positions.push(v.x, v.y, v.z)
         bucket.colors.push(lit[base], lit[base + 1], lit[base + 2])
+        if (emitNormal) {
+          const lx = localNormals[base], ly = localNormals[base + 1], lz = localNormals[base + 2]
+          const m = normalMat
+          const nx = m[0] * lx + m[3] * ly + m[6] * lz
+          const ny = m[1] * lx + m[4] * ly + m[7] * lz
+          const nz = m[2] * lx + m[5] * ly + m[8] * lz
+          const nl = Math.hypot(nx, ny, nz) || 1
+          bucket.normals.push(nx / nl, ny / nl, nz / nl)
+        }
       }
     }
   }
+}
+
+/** Does any face of this model use a material that takes a specular highlight? */
+function modelHasSpecular(model: ModelData, specularOf: (texId: number) => number): boolean {
+  const tex = model.faceTextures
+  if (!tex) return false
+  for (let f = 0; f < model.faceCount; f++) {
+    const t = tex[f]
+    if (t >= 0 && specularOf(t) > 0) return true
+  }
+  return false
 }
 
 
@@ -2028,9 +2324,16 @@ export async function buildAnimatedLocMesh(
   const upscale = modelUpscale(model)
   const uvWriter = makeUVWriter(model)
   const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
-  const lit = computeModelLitRgb(model, normalMat, sun,
-    pointLights?.length ? { lights: pointLights, matrix: matrix.elements, upscale } : undefined)
+  // primed first so specularExponentOf is answerable while the normals are baked
   await assets.primeBlendTypes(model)
+  const specularOf = (t: number) => assets.specularExponentOf(t)
+  // Model-LOCAL normals here (unlike the merged mesh): this geometry stays in
+  // model space with the placement on mesh.matrix, so the shader's
+  // mat3(modelMatrix) applies the rotation itself.
+  const localNormals = modelHasSpecular(model, specularOf) ? new Float32Array(model.faceCount * 9) : undefined
+  const lit = computeModelLitRgb(model, normalMat, sun,
+    pointLights?.length ? { lights: pointLights, matrix: matrix.elements, upscale } : undefined,
+    localNormals)
   unlitHdrFaces(model, lit, (t) => assets.hdrMultiplierOf(t))
 
   // bucket faces by texture id (skip fully-transparent / degenerate faces)
@@ -2060,6 +2363,7 @@ export async function buildAnimatedLocMesh(
   // material index per rendered face — type-5 alpha is applied PER MATERIAL, so a
   // flame texture can blend while the same model's stone stays opaque
   const faceMat = new Int32Array(validFaces)
+  const normals = localNormals ? new Float32Array(validFaces * 9) : null
   const scratch = new Float32Array(6)
   const geometry = new THREE.BufferGeometry()
   const materials: THREE.Material[] = []
@@ -2080,6 +2384,11 @@ export async function buildAnimatedLocMesh(
         const lb = (f * 3 + k) * 3
         const pc = (vert + k) * 4
         colors[pc] = lit[lb]; colors[pc + 1] = lit[lb + 1]; colors[pc + 2] = lit[lb + 2]; colors[pc + 3] = 1
+        if (normals && localNormals) {
+          normals[p] = localNormals[lb]
+          normals[p + 1] = localNormals[lb + 1]
+          normals[p + 2] = localNormals[lb + 2]
+        }
         cornerVertex[vert + k] = vi
         cornerFace[vert + k] = f
       }
@@ -2097,6 +2406,13 @@ export async function buildAnimatedLocMesh(
         const tmeta = await assets.getMaterialMeta(tex)
         const blendType = tmeta?.effectCombiner ?? 0
         material.userData.blendType = blendType
+        // as in toMesh — a specular material's alpha is not opacity, and this
+        // path can blend (a type-5 face-alpha animation flips the material to
+        // transparent), so the sampled alpha must not scale the fade.
+        if (tmeta && effectIgnoresTextureAlpha(tmeta)) {
+          const exponent = normals ? specularExponent(tmeta) : 0
+          material.onBeforeCompile = exponent > 0 ? specularPatch(sun ?? DEFAULT_MODEL_SUN, exponent) : dropMapAlpha
+        }
         if (tmeta && tmeta.hdrMultiplier > 1) {
           material.userData.hdrMultiplier = tmeta.hdrMultiplier
           material.color.setScalar(tmeta.hdrMultiplier)
@@ -2109,6 +2425,9 @@ export async function buildAnimatedLocMesh(
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4))
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
+  // Rest-pose normals: not re-derived as the mesh deforms, same call the baked
+  // Gouraud colours already make (a waving flag's shading barely shifts).
+  if (normals) geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
   // Rest-pose bounding sphere, padded so gentle animation never exceeds it —
   // lets three.js frustum-cull the DRAW of off-screen animated locs (we don't
   // recompute bounds per frame). frustumCulled stays at its default (true).
@@ -2742,7 +3061,16 @@ export async function buildLocsMesh(
     const heights = heightsAll[decodedPlane]
     done++
     if (onProgress && done % 64 === 0) onProgress(done, planeObjects.length)
-    const def = await assets.getDef(objectId)
+    let def = await assets.getDef(objectId)
+    // Morph ("multiloc") objects carry no models of their own — the client
+    // swaps the whole def for `transformTo[varbit]` (getMultiLoc). There's no
+    // player here to read a varbit from, so take the first real target, which
+    // is what a fresh world shows (an unset varbit is 0). Without this the loc
+    // renders as nothing at all: object 69836 in Lumbridge is one.
+    if (def && (!def.objectModelIds || def.objectModelIds.length === 0) && def.transformTo?.length) {
+      const target = def.transformTo.find((id) => id !== -1 && id !== undefined)
+      if (target !== undefined) def = await assets.getDef(target) ?? def
+    }
     if (!def || !def.objectModelIds || def.objectModelIds.length === 0) continue
     const isAnimated = (def.animations?.length ?? 0) > 0
 
@@ -2888,7 +3216,10 @@ export async function buildLocsMesh(
         // so the contoured vertexY stays tile-relative.
         const contourType = def.groundContourType ?? 0
         if (contourType !== 0) {
-          const contoured = contourVertexY(m, contourType, def.groundContourModifier ?? 0, heights, heightsAll[decodedPlane + 1], sceneX, sceneY, avgHeight)
+          const contoured = contourVertexY(
+            m, contourType, def.groundContourModifier ?? 0,
+            heights, heightsAll[decodedPlane + 1], sceneX + piece.offX, sceneY + piece.offZ, avgHeight,
+            ...placedXZ(m, piece, def))
           if (contoured) m = { ...m, vertexY: contoured }
         }
         if (isAnimated) {
@@ -2907,7 +3238,7 @@ export async function buildLocsMesh(
           // resolve this model's texture blendTypes so addModel can split
           // opaque vs transparent faces synchronously
           await assets.primeBlendTypes(m)
-          acc.addModel(m, matrix, locRefs.length, points ? { points } : undefined, (t) => assets.blendTypeOf(t), (t) => assets.hdrMultiplierOf(t), locTrans)
+          acc.addModel(m, matrix, locRefs.length, points ? { points } : undefined, (t) => assets.blendTypeOf(t), (t) => assets.hdrMultiplierOf(t), locTrans, (t) => assets.specularExponentOf(t))
         }
       }
     }

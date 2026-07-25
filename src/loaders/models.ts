@@ -218,6 +218,13 @@ export function computeModelLitRgb(
   normalMat: ArrayLike<number>,
   sun: ModelSun = DEFAULT_MODEL_SUN,
   points?: PointLightBake,
+  /** Optional `faceCount·9` sink for the smoothed per-face-vertex normal, in
+   *  MODEL-LOCAL GL space (normalised, `normalMat` NOT applied) — the specular
+   *  term needs a real normal per vertex, and this loop already has one. Local
+   *  rather than world so both callers can use it: the merged loc mesh bakes
+   *  placements in and applies `normalMat` itself, while an animated loc keeps
+   *  its placement on the mesh transform and lets the shader do it. */
+  outNormals?: Float32Array,
 ): Float32Array {
   const sl = Math.hypot(sun.dir[0], sun.dir[1], sun.dir[2]) || 1
   const sdx = sun.dir[0] / sl, sdy = sun.dir[1] / sl, sdz = sun.dir[2] / sl
@@ -278,6 +285,11 @@ export function computeModelLitRgb(
       const v = idx[k]
       // RS-local normal → GL-local (negate y,z), then × loc normal matrix → world
       const lx = nsx[v], ly = -nsy[v], lz = -nsz[v]
+      if (outNormals) {
+        const ll = Math.hypot(lx, ly, lz) || 1
+        const nb = (f * 3 + k) * 3
+        outNormals[nb] = lx / ll; outNormals[nb + 1] = ly / ll; outNormals[nb + 2] = lz / ll
+      }
       let wx = m[0] * lx + m[3] * ly + m[6] * lz
       let wy = m[1] * lx + m[4] * ly + m[7] * lz
       let wz = m[2] * lx + m[5] * ly + m[8] * lz
