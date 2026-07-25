@@ -1953,9 +1953,17 @@ export async function buildAnimatedLocMesh(
   if (validFaces === 0) return null
 
   const positions = new Float32Array(validFaces * 9)
-  const colors = new Float32Array(validFaces * 9)
+  // RGBA: the alpha channel carries the type-5 face-alpha animation
+  // (1 = opaque; stays 1 until a frame drives it)
+  const colors = new Float32Array(validFaces * 12)
   const uvs = new Float32Array(validFaces * 6)
   const cornerVertex = new Int32Array(validFaces * 3)
+  // model face each rendered corner came from (faces are reordered by texture
+  // bucket) so the per-frame update can address type-5 face effects
+  const cornerFace = new Int32Array(validFaces * 3)
+  // material index per rendered face — type-5 alpha is applied PER MATERIAL, so a
+  // flame texture can blend while the same model's stone stays opaque
+  const faceMat = new Int32Array(validFaces)
   const scratch = new Float32Array(6)
   const geometry = new THREE.BufferGeometry()
   const materials: THREE.Material[] = []
@@ -1974,9 +1982,12 @@ export async function buildAnimatedLocMesh(
         positions[p + 1] = -model.vertexY[vi] * upscale
         positions[p + 2] = -model.vertexZ[vi] * upscale
         const lb = (f * 3 + k) * 3
-        colors[p] = lit[lb]; colors[p + 1] = lit[lb + 1]; colors[p + 2] = lit[lb + 2]
+        const pc = (vert + k) * 4
+        colors[pc] = lit[lb]; colors[pc + 1] = lit[lb + 1]; colors[pc + 2] = lit[lb + 2]; colors[pc + 3] = 1
         cornerVertex[vert + k] = vi
+        cornerFace[vert + k] = f
       }
+      faceMat[vert / 3] = materials.length
       vert += 3
     }
     const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
@@ -1988,15 +1999,16 @@ export async function buildAnimatedLocMesh(
         // depthWrite ON (the DirectX path never drops z-write per model) with a
         // small cutoff so fully-clear texels don't write depth.
         const blendType = (await assets.getMaterialMeta(tex))?.effectCombiner ?? 0
+        material.userData.blendType = blendType
         if (blendType === 2) { material.transparent = true; material.depthWrite = false }
-        else material.alphaTest = 0.35
+        else { material.alphaTest = 0.35; material.userData.baseAlphaTest = 0.35 }
         material.needsUpdate = true
       }
     }
     materials.push(material)
   }
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4))
   geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
   // Rest-pose bounding sphere, padded so gentle animation never exceeds it —
   // lets three.js frustum-cull the DRAW of off-screen animated locs (we don't
@@ -2022,6 +2034,29 @@ export async function buildAnimatedLocMesh(
     mesh.userData.animatedLoc = true
   }
   const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute
+  const colorAttr = geometry.getAttribute('color') as THREE.BufferAttribute
+  // Which materials are currently blended for a type-5 alpha animation. Applied
+  // PER MATERIAL: flipping the whole mesh made the fireplace's opaque STONE stop
+  // writing depth, so its own back faces painted over its front faces (and over
+  // the logs). Only the material whose faces the animation actually fades — the
+  // flame texture — may blend; everything else keeps depthWrite and stays opaque.
+  const matBlended: boolean[] = materials.map(() => false)
+  const setMatBlended = (mi: number, on: boolean) => {
+    if (matBlended[mi] === on) return
+    matBlended[mi] = on
+    const mm = materials[mi] as THREE.MeshBasicMaterial
+    if (on) {
+      mm.transparent = true
+      mm.depthWrite = false
+      mm.alphaTest = 0
+    } else {
+      mm.transparent = mm.userData.blendType === 2
+      mm.depthWrite = mm.userData.blendType !== 2
+      mm.alphaTest = mm.userData.baseAlphaTest ?? 0
+    }
+    mm.needsUpdate = true
+  }
+  const matNeedsBlend: boolean[] = materials.map(() => false)
 
   const update = (posed: PosedVertices) => {
     if (posed.x.length !== model.vertexCount) return
@@ -2033,6 +2068,22 @@ export async function buildAnimatedLocMesh(
       positions[i * 3 + 2] = -Z[v] * upscale
     }
     positionAttr.needsUpdate = true
+
+    // Type-5 face alpha: RS stores 0 = opaque … 255 = invisible, GL opacity is
+    // the complement. Only materials that actually get a faded face blend.
+    const pa = posed.faceAlpha
+    matNeedsBlend.fill(false)
+    if (pa) {
+      for (let i = 0; i < cornerFace.length; i++) {
+        const a = pa[cornerFace[i]] & 0xff
+        colors[i * 4 + 3] = (255 - a) / 255
+        if (a !== 0) matNeedsBlend[faceMat[(i / 3) | 0]] = true
+      }
+    } else {
+      for (let i = 0; i < cornerFace.length; i++) colors[i * 4 + 3] = 1
+    }
+    for (let mi = 0; mi < materials.length; mi++) setMatBlended(mi, matNeedsBlend[mi])
+    colorAttr.needsUpdate = true
   }
 
   return { mesh, update }
