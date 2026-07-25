@@ -378,6 +378,9 @@ export function modelUpscale(model: ModelData): number {
  * are authored in the upscaled space, so posing the raw 1× vertices and scaling the
  * result afterwards blows every translation up 4× (rotations and scales are ratios,
  * so they survive — which is why a mis-scaled animation looks *nearly* right).
+ *
+ * It matters again for ground contouring: the terrain terms are in fine scene
+ * units, so a mesh still at 1× can't be contoured against them at all.
  */
 export function upscaleModel(model: ModelData): ModelData {
   const factor = modelUpscale(model)
@@ -387,11 +390,26 @@ export function upscaleModel(model: ModelData): ModelData {
     for (let i = 0; i < src.length; i++) out[i] = src[i] * factor
     return out
   }
+  // RSMesh.upscale() also scales the type 1-3 texture projection scales (the
+  // deob's particleDirectionX/Y/Z), since those are lengths in model space —
+  // and skips Z for the cylinder mapping (type 1), which doesn't use it.
+  const types = model.textureRenderTypes
+  const scaleTex = (src: Int32Array | null, skipCylinder: boolean) => {
+    if (!src) return src
+    const out = new Int32Array(src.length)
+    for (let i = 0; i < src.length; i++) {
+      out[i] = skipCylinder && types && (types[i] & 0xff) === 1 ? src[i] : src[i] * factor
+    }
+    return out
+  }
   return {
     ...model,
     vertexX: scale(model.vertexX),
     vertexY: scale(model.vertexY),
     vertexZ: scale(model.vertexZ),
+    textureScaleX: scaleTex(model.textureScaleX, false),
+    textureScaleY: scaleTex(model.textureScaleY, false),
+    textureScaleZ: scaleTex(model.textureScaleZ, true),
     upscaled: true,
   }
 }

@@ -2014,7 +2014,15 @@ export class LocAssets {
           if (!modelsDir) return null
           const sub = await modelsDir.getDirectoryHandle(String(id))
           const file = await (await sub.getFileHandle('model.dat')).getFile()
-          return parseModel(new Uint8Array(await file.arrayBuffer()), id)
+          // Bake the pre-13 <<2 in at decode, which is where the client does it
+          // for locs: ObjectDefinition calls `mesh.upscale()` on a version < 13
+          // mesh right after decodeMesh, BEFORE recolour, rotation, resize,
+          // offset and the ground contour. Everything downstream therefore sees
+          // one coordinate space. `modelUpscale` returns 1 once it's baked, so
+          // ModelAccumulator won't apply it a second time and the geometry is
+          // unchanged — what this buys is a mesh that can actually be contoured
+          // and placed against the terrain, which is in fine scene units.
+          return upscaleModel(parseModel(new Uint8Array(await file.arrayBuffer()), id))
         } catch {
           return null
         }
@@ -2092,9 +2100,10 @@ function placedXZ(
 // −avgHeight translate still applies), or null if the contour can't run.
 //
 // heights/nextHeights are VERTS×VERTS RS height grids (heights[x*VERTS+y]);
-// worldX/Z are fine scene coords (512/tile). Only upscale-1 (v13+) models are
-// contoured — pre-v13 upscaling would need the ground terms upscaled too, and
-// no map loc in the dump uses both.
+// worldX/Z are fine scene coords (512/tile), so the mesh has to be in that same
+// space to be contoured. Pre-13 meshes reach here already upscaled (getModel
+// bakes the <<2 in at decode, as ObjectDefinition does) — the guard below is
+// just a backstop for any caller that hands over a raw 1× mesh.
 function contourVertexY(
   model: ModelData,
   contourType: number,
@@ -2112,7 +2121,7 @@ function contourVertexY(
   placedX?: Int32Array,
   placedZ?: Int32Array,
 ): Int32Array | null {
-  if (model.version < 13) return null
+  if (modelUpscale(model) !== 1) return null
   const { vertexCount, vertexX, vertexY, vertexZ } = model
   // interpolated ground height at a fine world position (MeshRasterizer bilerp)
   const groundAt = (h: Int32Array, wx: number, wz: number): number | null => {
@@ -3288,9 +3297,9 @@ export async function buildLocsMesh(
         }
         if (isAnimated) {
           // keep out of the merged static mesh; the scene poses it per frame.
-          // The <<2 is baked in FIRST, exactly where the client does it
-          // (RSMesh.upscale before the frame is applied) — otherwise every
-          // frame translation lands 4x too far on a pre-13 mesh.
+          // `getModel` has already baked the pre-13 <<2 in, which is what makes
+          // posing correct (frame translations are authored in the upscaled
+          // space); the call here is a no-op backstop for a raw 1x mesh.
           animated.push({
             model: upscaleModel(m),
             matrix: matrix.clone(),
