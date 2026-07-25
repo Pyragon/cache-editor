@@ -353,6 +353,89 @@ const SHAPE_VERTEX_C = [
   [7, 7, 1, 2], [7, 1, 2, 7], [8, 9, 4, 0, 8, 9], [0, 8, 9, 8, 9, 4],
   [11, 0, 10, 11, 4, 2], [6, 6], [7, 7, 1, 2], [7, 7, 1, 2],
 ]
+// The other two tile-shape families, `Class329.method5849`. Three exist:
+//
+//   unblendable  SHAPE_VERTEX_A/B/C above + OVERLAY/UNDERLAY_FACE_COUNT
+//                (client 3824/3860/3815) — a plain overlay with no neighbour
+//                asking anything of it. 15 entries, no edge table.
+//   blending     the overlay sets `blendsWithUnderlay` (client 3775/3821/3836)
+//   non-blending anything else (client 3774/3830/3831)
+//
+// The last two are 13 entries and carry an extra per-EDGE table giving the
+// index of the face lying on that edge, or -1 (client 3833 / 3828). The
+// overlay face counts are identical across all three; what a blending tile
+// buys is a finer UNDERLAY subdivision on the shaped tiles — shape 1 goes 2→4
+// faces, 2 and 3 go 2→3, 7 and 9 go 3→5, 11 goes 4→6 — which is the geometry
+// the path-into-grass gradient runs through on a diagonal border.
+const NB_VERTEX_A = [
+  [0, 2, 4, 6], [6, 0, 2, 4], [6, 0, 2], [2, 6, 0], [0, 2, 6], [6, 0, 2],
+  [5, 6, 0, 1, 2, 4], [7, 2, 4, 4], [2, 4, 4, 7], [6, 6, 4, 0, 2, 2],
+  [0, 2, 2, 6, 6, 4], [0, 2, 2, 4, 6, 6], [0, 2, 4, 6],
+]
+const NB_VERTEX_B = [
+  [2, 4, 6, 0], [0, 2, 4, 6], [0, 2, 4], [4, 0, 2], [2, 4, 0], [0, 2, 4],
+  [6, 0, 1, 2, 4, 5], [0, 4, 7, 6], [4, 7, 6, 0], [0, 8, 6, 2, 9, 4],
+  [2, 9, 4, 0, 8, 6], [2, 11, 4, 6, 10, 0], [2, 4, 6, 0],
+]
+const NB_VERTEX_C = [
+  [12, 12, 12, 12], [12, 12, 12, 12], [5, 5, 5], [5, 5, 5], [5, 5, 5], [5, 5, 5],
+  [12, 12, 12, 12, 12, 12], [1, 1, 1, 7], [1, 1, 7, 1], [8, 9, 9, 8, 8, 9],
+  [8, 8, 9, 8, 9, 9], [10, 10, 11, 11, 11, 10], [12, 12, 12, 12],
+]
+const NB_EDGE_FACE = [
+  [0, 1, 2, 3], [1, 2, 3, 0], [1, 2, -1, 0], [2, 0, -1, 1], [0, 1, -1, 2],
+  [1, 2, -1, 0], [-1, 4, -1, 1], [-1, 1, 3, -1], [-1, 0, 2, -1], [3, 5, 2, 0],
+  [0, 2, 5, 3], [0, 2, 3, 5], [0, 1, 2, 3],
+]
+const NB_OVERLAY_FACES = [4, 2, 1, 1, 2, 2, 3, 1, 3, 3, 3, 2, 0]
+const NB_UNDERLAY_FACES = [0, 2, 2, 2, 1, 1, 3, 3, 1, 3, 3, 4, 4]
+
+const BL_VERTEX_A = [
+  [0, 2, 4, 6], [6, 0, 2, 3, 5, 3], [6, 0, 2, 4], [2, 5, 6, 1], [0, 2, 6], [6, 0, 2],
+  [5, 6, 0, 1, 2, 4], [7, 7, 1, 2, 4, 6], [2, 4, 4, 7], [6, 6, 4, 0, 1, 1, 3, 3],
+  [0, 2, 2, 6, 6, 4], [0, 2, 2, 3, 7, 0, 4, 3], [0, 2, 4, 6],
+]
+const BL_VERTEX_B = [
+  [2, 4, 6, 0], [0, 2, 3, 5, 6, 4], [0, 1, 4, 5], [4, 6, 0, 2], [2, 4, 0], [0, 2, 4],
+  [6, 0, 1, 2, 4, 5], [0, 1, 2, 4, 6, 7], [4, 7, 6, 0], [0, 8, 6, 1, 9, 2, 9, 4],
+  [2, 9, 4, 0, 8, 6], [2, 11, 3, 7, 10, 10, 6, 6], [2, 4, 6, 0],
+]
+const BL_VERTEX_C = [
+  [12, 12, 12, 12], [12, 12, 12, 12, 12, 5], [5, 5, 1, 1], [5, 1, 1, 5], [5, 5, 5], [5, 5, 5],
+  [12, 12, 12, 12, 12, 12], [1, 12, 12, 12, 12, 12], [1, 1, 7, 1], [8, 9, 9, 8, 8, 3, 1, 9],
+  [8, 8, 9, 8, 9, 9], [10, 10, 11, 11, 11, 7, 3, 7], [12, 12, 12, 12],
+]
+const BL_EDGE_FACE = [
+  [0, 1, 2, 3], [1, -1, -1, 0], [-1, 2, -1, 0], [-1, 0, -1, 2], [0, 1, -1, 2],
+  [1, 2, -1, 0], [-1, 4, -1, 1], [-1, 3, 4, -1], [-1, 0, 2, -1], [-1, -1, 2, 0],
+  [0, 2, 5, 3], [0, -1, 6, -1], [0, 1, 2, 3],
+]
+const BL_OVERLAY_FACES = [4, 2, 1, 1, 2, 2, 3, 1, 3, 3, 3, 2, 0]
+const BL_UNDERLAY_FACES = [0, 4, 3, 3, 1, 1, 3, 5, 1, 5, 3, 6, 4]
+
+// Per shape, whether the shape already puts a face on each of its four edges
+// (client aBoolArrayArray3816 non-blending / 3793 blending). A tile only asks a
+// neighbour for an extra edge face where its own shape has none, so the feather
+// is cooperative: a blending shape makes its neighbours subdivide too.
+const NB_EDGE_HAS_FACE: boolean[][] = [
+  [false, false, false, false], [false, false, false, false],
+  [false, false, true, false], [false, false, true, false],
+  [false, false, true, false], [false, false, true, false],
+  [true, false, true, false], [true, false, false, true],
+  [true, false, false, true], [false, false, false, false],
+  [false, false, false, false], [false, false, false, false],
+  [false, false, false, false],
+]
+const BL_EDGE_HAS_FACE: boolean[][] = [
+  [false, false, false, false], [false, true, true, false],
+  [true, false, true, false], [true, false, true, false],
+  [false, false, true, false], [false, false, true, false],
+  [true, false, true, false], [true, false, false, true],
+  [true, false, false, true], [true, true, false, false],
+  [false, false, false, false], [false, true, false, true],
+  [false, false, false, false],
+]
+
 // Vertex index → position within the 512-unit tile (0-7 perimeter ring from
 // the SW corner, 8-11 interior, 12 centre).
 const VERTEX_DELTA_X = [0, 256, 512, 512, 512, 256, 0, 0, 128, 256, 128, 384, 256]
@@ -1015,6 +1098,93 @@ function computeUnderlayCornerIds(terrain: MapTerrain, plane: number): Int32Arra
   return out
 }
 
+/**
+ * Per-tile perimeter overlay winners — a port of `Class329.method5848`
+ * (bot-refactor: `calculateOverlayDisplay`), the machinery that feathers a
+ * `blendsWithUnderlay` overlay into whatever it borders.
+ *
+ * The client keeps five parallel 8-slot arrays per tile — colour, blend
+ * colour, texture, texture scale and slot (`anIntArray3838/3839/3813/3827/
+ * 3842`) — one entry per vertex of the tile's PERIMETER RING (ids 0-7, the
+ * four corners interleaved with the four edge midpoints). Each slot records
+ * the highest-`slot` blendable overlay of the neighbouring tiles that reaches
+ * that vertex. `method5850` then gives any overlay vertex whose winner
+ * outranks the tile's own overlay the winner's colour AND texture AND scale,
+ * so the GPU interpolates one material into the other across the face.
+ *
+ * We only store the winning overlay id here (0/-1 = none); colour, texture and
+ * scale are looked up from its FloType at emit time.
+ *
+ * Two passes, in the client's order:
+ *  - the four DIAGONAL neighbours each claim one corner outright, no slot test
+ *  - the four EDGE neighbours then sweep three consecutive perimeter vertices
+ *    each, taking the slot on `<=` so a tie goes to the later writer
+ *
+ * `q` walks the neighbour's own ring in the opposite direction to `p` — the
+ * two tiles meet mirrored across the shared edge — and is converted into the
+ * neighbour's UNROTATED shape space (`+ 2*rot`) to test its coverage table.
+ *
+ * Returns SIZE*SIZE*8. Single-region: this doesn't reach across the mosaic, so
+ * a blend that should cross a region seam stops at it (the same limitation
+ * `computeOverlayCorners` has against `SceneMosaic.overlayCornerFor`).
+ */
+function computeOverlayPerimeter(terrain: MapTerrain, plane: number, configs: SceneConfigs): Int32Array {
+  const out = new Int32Array(SIZE * SIZE * 8).fill(-1)
+  const slots = new Int32Array(8)
+  const at = (tx: number, ty: number): { id: number; shape: number; rot: number; flo: FloJson } | null => {
+    if (tx < 0 || ty < 0 || tx >= SIZE || ty >= SIZE) return null
+    const idx = tileIndex(plane, tx, ty)
+    const id = terrain.overlayIds[idx] & 0xff
+    if (id === 0) return null
+    const flo = configs.overlays.get(id - 1)
+    if (!flo || !isCornerBlendable(flo)) return null
+    const sr = terrain.overlayShapeRot[idx] & 0xff
+    return { id, shape: sr >> 2, rot: sr & 0x3, flo }
+  }
+  // shape-space coverage test, `aBoolArrayArray3822[shape][q]`
+  const covers = (shape: number, q: number) => OVERLAY_SHAPE_COVERS[shape]?.[q & 0x7] === true
+  // (dx, dy, perimeter vertex it claims, offset into the neighbour's ring)
+  const DIAGONALS: [number, number, number, number][] = [
+    [-1, -1, 0, 4], [+1, -1, 2, 6], [-1, +1, 6, 2], [+1, +1, 4, 0],
+  ]
+  // (dx, dy, first perimeter vertex, its step, first neighbour ring index, its step)
+  const EDGES: [number, number, number, number, number, number][] = [
+    [0, -1, 2, -1, 4, +1], // south
+    [0, +1, 4, +1, 2, -1], // north
+    [-1, 0, 6, +1, 4, -1], // west
+    [+1, 0, 4, -1, 6, +1], // east
+  ]
+  for (let x = 0; x < SIZE; x++) {
+    for (let y = 0; y < SIZE; y++) {
+      const base = (x * SIZE + y) * 8
+      slots.fill(-1)
+      let wrote = false
+      for (const [dx, dy, p, q0] of DIAGONALS) {
+        const n = at(x + dx, y + dy)
+        if (!n || !covers(n.shape, n.rot * 2 + q0)) continue
+        out[base + p] = n.id
+        slots[p] = floSlotKey(n.flo, n.id)
+        wrote = true
+      }
+      for (const [dx, dy, p0, pStep, q0, qStep] of EDGES) {
+        const n = at(x + dx, y + dy)
+        if (!n) continue
+        const key = floSlotKey(n.flo, n.id)
+        for (let k = 0; k < 3; k++) {
+          const p = (p0 + pStep * k) & 0x7
+          const q = (n.rot * 2 + q0 + qStep * k) & 0x7
+          if (!covers(n.shape, q) || slots[p] > key) continue
+          out[base + p] = n.id
+          slots[p] = key
+          wrote = true
+        }
+      }
+      if (!wrote) continue
+    }
+  }
+  return out
+}
+
 /** Single-region fallback of SceneMosaic.overlayCornerFor (edges clamp). */
 function computeOverlayCorners(terrain: MapTerrain, plane: number, configs: SceneConfigs): Int32Array {
   const out = new Int32Array(VERTS * VERTS).fill(-1)
@@ -1398,6 +1568,9 @@ export async function buildTerrainMesh(
     (cornerCache[dp] ??= pre?.overlayCorners?.[dp] ?? computeOverlayCorners(terrain, dp, configs))
   const fluCornersOf = (dp: number) =>
     (fluCornerCache[dp] ??= pre?.underlayCorners?.[dp] ?? computeUnderlayCornerIds(terrain, dp))
+  const perimeterCache: (Int32Array | null)[] = [null, null, null, null]
+  const perimeterOf = (dp: number) =>
+    (perimeterCache[dp] ??= computeOverlayPerimeter(terrain, dp, configs))
   const buckets = new BucketSet()
   // lighting-only tint for self-coloured textures (water etc.): the scene light
   // multiplier as a grey the texture multiplies.
@@ -1438,6 +1611,7 @@ export async function buildTerrainMesh(
       const palette = paletteOf(plane)
       const ocorners = cornersOf(plane)
       const fcorners = fluCornersOf(plane)
+      const operim = perimeterOf(plane)
       const idx = tileIndex(plane, x, y)
       const overlayId = terrain.overlayIds[idx] & 0xff
       const underlayId = terrain.underlayIds[idx] & 0xff
@@ -1455,11 +1629,49 @@ export async function buildTerrainMesh(
       const hasUnderlay = underlayId !== 0 && (underlayHsl !== -1 || underlayTexture !== -1)
       if (!hasOverlay && !hasUnderlay) return
 
-      const overlayFaces = OVERLAY_FACE_COUNT[shape]
-      const underlayFaces = UNDERLAY_FACE_COUNT[shape]
-      const va = SHAPE_VERTEX_A[shape]
-      const vb = SHAPE_VERTEX_B[shape]
-      const vc = SHAPE_VERTEX_C[shape]
+      // `overlaySupportsBlending`: the client only treats an overlay as blending
+      // when the tile actually has an underlay to blend INTO and a real shape
+      // (method5848's `initialOverlay.blendsWithUnderlay` guard).
+      const ownBlends = flo !== undefined && isCornerBlendable(flo) && flu !== undefined && shape !== 0
+
+      // `hasFacesOn[e]` — does the neighbour across edge e want an extra face
+      // from us? Port of the four edge blocks in method5848: an edge only asks
+      // where OUR shape has no face on it already, and what it asks for comes
+      // from the NEIGHBOUR's own table (blending or not). Edges are
+      // 0 = south (y-1), 1 = east (x+1), 2 = north (y+1), 3 = west (x-1); the
+      // neighbour is consulted at its edge (e+2)&3, the one facing us.
+      const ownEdgeTable = ownBlends ? BL_EDGE_HAS_FACE : NB_EDGE_HAS_FACE
+      const ownEdges = ownEdgeTable[shape] ?? NB_EDGE_HAS_FACE[0]
+      const hasFacesOn = [false, false, false, false]
+      {
+        const EDGE_N: [number, number][] = [[0, -1], [1, 0], [0, 1], [-1, 0]]
+        for (let e = 0; e < 4; e++) {
+          if (ownEdges[(rotation + e) & 0x3]) continue
+          const nx = x + EDGE_N[e][0], ny = y + EDGE_N[e][1]
+          if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) continue
+          const nIdx = tileIndex(plane, nx, ny)
+          const nId = terrain.overlayIds[nIdx] & 0xff
+          if (nId === 0) continue
+          const nFlo = configs.overlays.get(nId - 1)
+          if (!nFlo || floTileHsl(nFlo) === -1) continue
+          const nsr = terrain.overlayShapeRot[nIdx] & 0xff
+          const nTable = isCornerBlendable(nFlo) ? BL_EDGE_HAS_FACE : NB_EDGE_HAS_FACE
+          hasFacesOn[e] = nTable[nsr >> 2]?.[((nsr & 0x3) + ((e + 2) & 0x3)) & 0x3] === true
+        }
+      }
+      // method5849's three-way pick. `unblendable` — no blend and nobody asking
+      // — keeps the simple 15-entry family; everything else takes a 13-entry one
+      // plus its edge->face table, which drives the midpoint splits below.
+      const unblendable = !ownBlends && !hasFacesOn[0] && !hasFacesOn[1] && !hasFacesOn[2] && !hasFacesOn[3]
+      const shaped = shape < 13
+      const useBlend = !unblendable && ownBlends && shaped
+      const useNonBlend = !unblendable && !ownBlends && shaped
+      const overlayFaces = useBlend ? BL_OVERLAY_FACES[shape] : useNonBlend ? NB_OVERLAY_FACES[shape] : OVERLAY_FACE_COUNT[shape]
+      const underlayFaces = useBlend ? BL_UNDERLAY_FACES[shape] : useNonBlend ? NB_UNDERLAY_FACES[shape] : UNDERLAY_FACE_COUNT[shape]
+      const va = useBlend ? BL_VERTEX_A[shape] : useNonBlend ? NB_VERTEX_A[shape] : SHAPE_VERTEX_A[shape]
+      const vb = useBlend ? BL_VERTEX_B[shape] : useNonBlend ? NB_VERTEX_B[shape] : SHAPE_VERTEX_B[shape]
+      const vc = useBlend ? BL_VERTEX_C[shape] : useNonBlend ? NB_VERTEX_C[shape] : SHAPE_VERTEX_C[shape]
+      const edgeFace = useBlend ? BL_EDGE_FACE[shape] : useNonBlend ? NB_EDGE_FACE[shape] : null
 
       // vertex position within tile, rotated (addRegularTile sizesX/sizesY)
       const vx = (v: number): number => {
@@ -1505,6 +1717,11 @@ export async function buildTerrainMesh(
       // colour reaches only half a tile — full-quad interpolation would
       // flood whole tiles with road colour)
       const underlayVertexHsl = (px: number, py: number): number => {
+        const win = perimAt(px, py)
+        if (win !== null) {
+          const h = overlayCornerHsl.get(win.id)
+          if (h !== undefined) return h
+        }
         if (px === 0 && py === 0) return cornerBaseHsl(x, y)
         if (px === 0 && py === 512) return cornerBaseHsl(x, y + 1)
         if (px === 512 && py === 512) return cornerBaseHsl(x + 1, y + 1)
@@ -1517,10 +1734,52 @@ export async function buildTerrainMesh(
           fy,
         )
       }
+      // The perimeter winner for one of THIS overlay's shape vertices, or null.
+      // Shape vertex -> world ring index is `id - 2*rotation` (one rotation
+      // step moves two ring positions); the winners are stored in world space.
+      // `method5850` only defers to a winner that strictly outranks the tile's
+      // own overlay, and only for ring vertices (ids 0-7) — interior and centre
+      // vertices always keep the overlay's own material.
+      const ownSlot = flo !== undefined ? floSlotKey(flo, overlayId) : -1
+      const perimRaw = (ring: number): { id: number; flo: FloJson } | null => {
+        if (ring < 0) return null
+        const oid = operim[(x * SIZE + y) * 8 + ring]
+        if (oid <= 0) return null
+        const w = configs.overlays.get(oid - 1)
+        return w ? { id: oid, flo: w } : null
+      }
+      const perimWinner = (id: number | undefined): { id: number; flo: FloJson } | null => {
+        if (id === undefined || id >= 8 || flo === undefined) return null
+        const w = perimRaw((id - 2 * rotation) & 0x7)
+        return w && floSlotKey(w.flo, w.id) > ownSlot ? w : null
+      }
+      // Ring index of a position within the tile, or -1. The perimeter array is
+      // in world space and the ring positions are fixed, so the underlay path —
+      // which works in positions, not shape vertex ids — can look up the same
+      // winners. `method5851` applies them with NO slot test (`>= 0`): an
+      // underlay face has no overlay to outrank, so any winner takes the vertex.
+      // That is the path-into-grass feather: it is the GRASS tile's vertices
+      // that pick up the path's colour, texture and scale.
+      const RING_POS: [number, number][] = [
+        [0, 0], [256, 0], [512, 0], [512, 256], [512, 512], [256, 512], [0, 512], [0, 256],
+      ]
+      const perimAt = (px: number, py: number): { id: number; flo: FloJson } | null => {
+        for (let r = 0; r < 8; r++) if (RING_POS[r][0] === px && RING_POS[r][1] === py) return perimRaw(r)
+        return null
+      }
+
       // Blendable overlay faces keep their own colour except at corners a
       // (possibly different, higher-slot) blendable overlay covers — the
       // cross-overlay gradient between adjacent mud/dirt/path tiles.
-      const overlayVertexHsl = (px: number, py: number, own: number): number => {
+      const overlayVertexHsl = (px: number, py: number, own: number, id?: number): number => {
+        // Ring vertices (0-7) go through the client's perimeter winners, which
+        // cover the edge midpoints as well as the corners — that midpoint is
+        // what carries the gradient half a tile in from the border.
+        const win = perimWinner(id)
+        if (win !== null) {
+          const h = overlayCornerHsl.get(win.id)
+          if (h !== undefined) return h
+        }
         const cx = px === 0 ? x : px === 512 ? x + 1 : -1
         const cy = py === 0 ? y : py === 512 ? y + 1 : -1
         if (cx < 0 || cy < 0) return own
@@ -1536,7 +1795,7 @@ export async function buildTerrainMesh(
       // 2 = blendable overlay (own colour + cross-overlay corner overrides).
       // `alphas` puts the triangle in a transparent crossfade bucket instead
       // (terrain texture splatting between adjacent underlay textures).
-      const emitTri = (pts: [number, number][], hsl: number, textureId: number, texScale: number, mode: number, alphas?: [number, number, number]) => {
+      const emitTri = (pts: [number, number][], hsl: number, textureId: number, texScale: number, mode: number, alphas?: [number, number, number], ids?: [number, number, number]) => {
         const meta = textureId >= 0 ? metas.get(textureId) : null
         const bucket = alphas ? buckets.getBlend(textureId) : buckets.get(textureId)
         bucket.owners.push(x * SIZE + y) // tile index, for terrain picking
@@ -1576,7 +1835,7 @@ export async function buildTerrainMesh(
           const mul = sceneLight * shadowFactor
           const vHsl = hsl === -1 ? hsl
             : mode === 1 ? underlayVertexHsl(px, py)
-            : mode === 2 ? overlayVertexHsl(px, py, hsl)
+            : mode === 2 ? overlayVertexHsl(px, py, hsl, ids?.[vi])
             : hsl
           let rgb: [number, number, number]
           if (useTint && vHsl !== -1) rgb = litColor(vHsl, mul)
@@ -1587,14 +1846,53 @@ export async function buildTerrainMesh(
           bucket.uvs.push(sceneX / texScale, sceneY / texScale)
         }
       }
-      const emitFace = (a: number, b: number, c: number, hsl: number, textureId: number, texScale: number, mode: number) =>
-        emitTri([[vx(a), vy(a)], [vx(b), vy(b)], [vx(c), vy(c)]], hsl, textureId, texScale, mode)
+
 
       let faceIdx = 0
       const overlayMode = flo !== undefined && isCornerBlendable(flo) ? 2 : 0
+      // method5850/5851's edge split: when the neighbour across shape-edge j
+      // has asked for a face and THIS face is the one lying on that edge
+      // (`anIntArray3832[j] == faceIndex`), the triangle is emitted as two —
+      // A-mid-C and mid-B-C — hinged on that edge's midpoint vertex (2j+1).
+      // Shape edge j maps to world edge (j - rotation) & 3.
+      const splitFace = (faceIndex: number, a: number, b: number, c: number): [number, number, number][] => {
+        if (edgeFace !== null) {
+          for (let j = 0; j < 4; j++) {
+            if (edgeFace[j] !== faceIndex) continue
+            if (!hasFacesOn[(j - rotation) & 0x3]) continue
+            const mid = 2 * j + 1
+            return [[a, mid, c], [mid, b, c]]
+          }
+        }
+        return [[a, b, c]]
+      }
+
+      const ownScale = flo?.textureScale || 512
       for (let i = 0; i < overlayFaces; i++, faceIdx++) {
-        if (hasOverlay) {
-          emitFace(va[faceIdx], vb[faceIdx], vc[faceIdx], overlayHsl, overlayTexture, flo?.textureScale || 512, overlayMode)
+        if (!hasOverlay) continue
+        for (const [a, b, c] of splitFace(i, va[faceIdx], vb[faceIdx], vc[faceIdx])) {
+          const ids: [number, number, number] = [a, b, c]
+          const pts: [number, number][] = [[vx(a), vy(a)], [vx(b), vy(b)], [vx(c), vy(c)]]
+          emitTri(pts, overlayHsl, overlayTexture, ownScale, overlayMode, undefined, ids)
+          // `method5850` gives an outranked ring vertex the winner's TEXTURE and
+          // SCALE as well as its colour, so the material itself dissolves across
+          // the face rather than stopping at the tile border. We can't vary the
+          // sampler per vertex in one draw, so do it the way the underlay splat
+          // already does: keep the base pass, then add one crossfade pass per
+          // distinct winning texture, opaque at the vertices that texture won and
+          // transparent at the others.
+          if (overlayMode !== 2) continue
+          const wins = [perimWinner(a), perimWinner(b), perimWinner(c)]
+          const texOf = (w: { flo: FloJson } | null) =>
+            w && w.flo.texture !== undefined && w.flo.texture >= 0 ? w.flo.texture : -1
+          const done = new Set<number>([overlayTexture])
+          for (let k = 0; k < 3; k++) {
+            const t = texOf(wins[k])
+            if (t < 0 || done.has(t)) continue
+            done.add(t)
+            emitTri(pts, overlayHsl, t, wins[k]!.flo.textureScale || 512, overlayMode,
+              [texOf(wins[0]) === t ? 1 : 0, texOf(wins[1]) === t ? 1 : 0, texOf(wins[2]) === t ? 1 : 0], ids)
+          }
         }
       }
       // Underlay faces render per-vertex corner TEXTURES (addUnderlayTiles):
@@ -1621,35 +1919,48 @@ export async function buildTerrainMesh(
         || ocorners[x * VERTS + y + 1] > 0 || ocorners[(x + 1) * VERTS + y + 1] > 0
       for (let i = 0; i < underlayFaces; i++, faceIdx++) {
         if (!hasUnderlay) continue
-        const A = va[faceIdx], B = vb[faceIdx], C = vc[faceIdx]
-        const pa: [number, number] = [vx(A), vy(A)]
-        const pb: [number, number] = [vx(B), vy(B)]
-        const pc: [number, number] = [vx(C), vy(C)]
-        let tris: [number, number][][]
-        if (hasOverride) {
-          const mid = (p: [number, number], q: [number, number]): [number, number] =>
-            [(p[0] + q[0]) >> 1, (p[1] + q[1]) >> 1]
-          const ab = mid(pa, pb), bc = mid(pb, pc), ca = mid(pc, pa)
-          tris = [[pa, ab, ca], [ab, pb, bc], [ca, bc, pc], [ab, bc, ca]]
-        } else {
-          tris = [[pa, pb, pc]]
-        }
-        for (const tri of tris) {
-          const flus = tri.map(([px, py]) => cornerFluAt(px, py))
-          const texes = flus.map(texOfFlu)
-          if (texes[0] === texes[1] && texes[0] === texes[2]) {
-            const f = flus[0] === underlayId ? flu : configs.underlays.get(flus[0] - 1)
-            emitTri(tri, underlayHsl, texes[0], f?.scale || 512, 1)
+        for (const [A, B, C] of splitFace(overlayFaces + i, va[faceIdx], vb[faceIdx], vc[faceIdx])) {
+          const pa: [number, number] = [vx(A), vy(A)]
+          const pb: [number, number] = [vx(B), vy(B)]
+          const pc: [number, number] = [vx(C), vy(C)]
+          let tris: [number, number][][]
+          if (hasOverride) {
+            const mid = (p: [number, number], q: [number, number]): [number, number] =>
+              [(p[0] + q[0]) >> 1, (p[1] + q[1]) >> 1]
+            const ab = mid(pa, pb), bc = mid(pb, pc), ca = mid(pc, pa)
+            tris = [[pa, ab, ca], [ab, pb, bc], [ca, bc, pc], [ab, bc, ca]]
           } else {
-            emitTri(tri, underlayHsl, underlayTexture, flu?.scale || 512, 1)
-            const done = new Set<number>([underlayTexture])
-            for (let vi = 0; vi < 3; vi++) {
-              const t = texes[vi]
-              if (t < 0 || done.has(t)) continue
-              done.add(t)
-              const f = configs.underlays.get(flus[vi] - 1)
-              emitTri(tri, underlayHsl, t, f?.scale || 512, 1,
-                [texes[0] === t ? 1 : 0, texes[1] === t ? 1 : 0, texes[2] === t ? 1 : 0])
+            tris = [[pa, pb, pc]]
+          }
+          for (const tri of tris) {
+            // Per vertex: a blendable overlay reaching this ring position wins
+            // outright (method5851's `anIntArray3842[i_35] >= 0` branch, which
+            // takes its texture and scale, not just its colour); otherwise the
+            // vertex keeps the underlay-corner texture the splat already used.
+            const wins = tri.map(([px, py]) => perimAt(px, py))
+            const flus = tri.map(([px, py]) => cornerFluAt(px, py))
+            const texes = tri.map((_, vi) => {
+              const w = wins[vi]
+              if (w && w.flo.texture !== undefined && w.flo.texture >= 0) return w.flo.texture
+              return texOfFlu(flus[vi])
+            })
+            const scaleAt = (vi: number) => {
+              const w = wins[vi]
+              if (w && w.flo.texture !== undefined && w.flo.texture >= 0) return w.flo.textureScale || 512
+              return (flus[vi] === underlayId ? flu : configs.underlays.get(flus[vi] - 1))?.scale || 512
+            }
+            if (texes[0] === texes[1] && texes[0] === texes[2]) {
+              emitTri(tri, underlayHsl, texes[0], scaleAt(0), 1)
+            } else {
+              emitTri(tri, underlayHsl, underlayTexture, flu?.scale || 512, 1)
+              const done = new Set<number>([underlayTexture])
+              for (let vi = 0; vi < 3; vi++) {
+                const t = texes[vi]
+                if (t < 0 || done.has(t)) continue
+                done.add(t)
+                emitTri(tri, underlayHsl, t, scaleAt(vi), 1,
+                  [texes[0] === t ? 1 : 0, texes[1] === t ? 1 : 0, texes[2] === t ? 1 : 0])
+              }
             }
           }
         }
