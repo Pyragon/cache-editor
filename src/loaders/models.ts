@@ -89,7 +89,7 @@ function adjustLuminance(hsl: number, factor: number): number {
 
 type LitModel = Pick<ModelData,
   'faceCount' | 'vertexCount' | 'vertexX' | 'vertexY' | 'vertexZ' |
-  'triangleX' | 'triangleY' | 'triangleZ' | 'faceColor'>
+  'triangleX' | 'triangleY' | 'triangleZ' | 'faceColor' | 'normalVertexY'>
 
 /**
  * Per-face-vertex LINEAR RGB (Gouraud) for an untextured/colour-tinted model,
@@ -233,14 +233,16 @@ export function computeModelLitRgb(
   const m = normalMat
 
   const { faceCount, vertexCount, vertexX, vertexY, vertexZ, triangleX, triangleY, triangleZ, faceColor } = model
+  // Normals come off the pre-contour mesh when there is one — see normalVertexY.
+  const nvY = model.normalVertexY ?? vertexY
   const nsx = new Float64Array(vertexCount)
   const nsy = new Float64Array(vertexCount)
   const nsz = new Float64Array(vertexCount)
   for (let f = 0; f < faceCount; f++) {
     const a = triangleX[f], b = triangleY[f], c = triangleZ[f]
     if (a < 0 || b < 0 || c < 0 || a >= vertexCount || b >= vertexCount || c >= vertexCount) continue
-    const baX = vertexX[b] - vertexX[a], baY = vertexY[b] - vertexY[a], baZ = vertexZ[b] - vertexZ[a]
-    const caX = vertexX[c] - vertexX[a], caY = vertexY[c] - vertexY[a], caZ = vertexZ[c] - vertexZ[a]
+    const baX = vertexX[b] - vertexX[a], baY = nvY[b] - nvY[a], baZ = vertexZ[b] - vertexZ[a]
+    const caX = vertexX[c] - vertexX[a], caY = nvY[c] - nvY[a], caZ = vertexZ[c] - vertexZ[a]
     let dx = baY * caZ - caY * baZ, dy = baZ * caX - caZ * baX, dz = baX * caY - caX * baY
     const l = Math.hypot(dx, dy, dz) || 1
     dx /= l; dy /= l; dz /= l
@@ -437,6 +439,16 @@ export type ModelData = {
   vertexX: Int32Array
   vertexY: Int32Array
   vertexZ: Int32Array
+  /** Set only on a ground-contoured loc: the `vertexY` the mesh had BEFORE the
+   *  contour, which is what lighting must use. The client computes its vertex
+   *  normals once, in the `MeshRasterizer_Sub3` constructor, off the raw mesh —
+   *  `pa()` (the contour) rewrites vertexY, recomputes the bounding box and
+   *  dirties the vertex buffer, but never touches the normals. So every
+   *  placement of a model shares one set of normals however the terrain shears
+   *  it. Lighting off the sheared mesh instead gives each tile its own shade,
+   *  which reads as mismatched blocks along a slope (the Lumbridge bridge
+   *  rail). Positions — including point-light distances — still use `vertexY`. */
+  normalVertexY?: Int32Array
   triangleX: Int16Array
   triangleY: Int16Array
   triangleZ: Int16Array
