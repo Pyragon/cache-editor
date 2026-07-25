@@ -61,13 +61,26 @@ function jagexNormalSpace(
 
 export type UVWriter = (f: number, ia: number, ib: number, ic: number, out: number[] | Float32Array, base6: number) => void
 
-/** Builds a per-face UV writer for one model. */
+/**
+ * Builds a per-face UV writer for one model.
+ *
+ * Uses `preContourVertexY` when the model carries one, i.e. the vertexY it had
+ * before the ground contour. The client builds its texture coordinates once, in
+ * the `MeshRasterizer_Sub3` constructor, off `mesh.vertexX/vertexY/vertexZ` of
+ * the raw mesh — that mesh is cached in the LRU and shared by every placement,
+ * and `pa()` (the contour) never revisits the UVs, exactly as it never revisits
+ * the normals. Projecting onto a sheared mesh instead re-derives the texture
+ * plane per placement, and because the contour folds otherwise-flat quads the
+ * two triangles of a fold get different projections — a visible texture seam
+ * along the diagonal, on some blocks of a slope and not others.
+ */
 export function makeUVWriter(model: ModelData): UVWriter {
-  const { vertexCount, faceCount, vertexX, vertexY, vertexZ, triangleX, triangleY, triangleZ,
+  const { vertexCount, faceCount, vertexX, vertexZ, triangleX, triangleY, triangleZ,
     texturePos, textureP, textureM, textureN,
     textureRenderTypes, textureNormalX, textureNormalY, textureNormalZ,
     textureScaleX, textureScaleY, textureScaleZ, textureRotation,
     textureDirection, textureSpeed, textureTransU, textureTransV } = model
+  const vertexY = model.preContourVertexY ?? model.vertexY
 
   const mappingCount = textureRenderTypes?.length ?? 0
   type Mapping = { space: number[]; sx: number; sy: number; sz: number }

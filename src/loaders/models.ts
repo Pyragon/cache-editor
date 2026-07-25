@@ -89,7 +89,7 @@ function adjustLuminance(hsl: number, factor: number): number {
 
 type LitModel = Pick<ModelData,
   'faceCount' | 'vertexCount' | 'vertexX' | 'vertexY' | 'vertexZ' |
-  'triangleX' | 'triangleY' | 'triangleZ' | 'faceColor' | 'normalVertexY'>
+  'triangleX' | 'triangleY' | 'triangleZ' | 'faceColor' | 'preContourVertexY'>
 
 /**
  * Per-face-vertex LINEAR RGB (Gouraud) for an untextured/colour-tinted model,
@@ -233,8 +233,8 @@ export function computeModelLitRgb(
   const m = normalMat
 
   const { faceCount, vertexCount, vertexX, vertexY, vertexZ, triangleX, triangleY, triangleZ, faceColor } = model
-  // Normals come off the pre-contour mesh when there is one — see normalVertexY.
-  const nvY = model.normalVertexY ?? vertexY
+  // Normals come off the pre-contour mesh when there is one — see preContourVertexY.
+  const nvY = model.preContourVertexY ?? vertexY
   const nsx = new Float64Array(vertexCount)
   const nsy = new Float64Array(vertexCount)
   const nsz = new Float64Array(vertexCount)
@@ -446,15 +446,24 @@ export type ModelData = {
   vertexY: Int32Array
   vertexZ: Int32Array
   /** Set only on a ground-contoured loc: the `vertexY` the mesh had BEFORE the
-   *  contour, which is what lighting must use. The client computes its vertex
-   *  normals once, in the `MeshRasterizer_Sub3` constructor, off the raw mesh —
-   *  `pa()` (the contour) rewrites vertexY, recomputes the bounding box and
-   *  dirties the vertex buffer, but never touches the normals. So every
-   *  placement of a model shares one set of normals however the terrain shears
-   *  it. Lighting off the sheared mesh instead gives each tile its own shade,
-   *  which reads as mismatched blocks along a slope (the Lumbridge bridge
-   *  rail). Positions — including point-light distances — still use `vertexY`. */
-  normalVertexY?: Int32Array
+   *  contour. Everything the client derives at MESH BUILD time has to be
+   *  computed from this rather than from `vertexY`.
+   *
+   *  The `MeshRasterizer_Sub3` constructor builds both the vertex normals and
+   *  the texture coordinates off the raw `RSMesh`, and that rasterizer is
+   *  cached in the LRU and shared by every placement of the model. `pa()` — the
+   *  ground contour — rewrites vertexY, recomputes the bounding box
+   *  (`method14281`) and dirties the vertex buffer (`method14268`), and touches
+   *  neither. So a run of identical pieces down a slope shares one set of
+   *  normals and one texture projection however differently the terrain shears
+   *  each one. Deriving either from the sheared mesh gives every tile its own
+   *  shading and its own UVs, which is what made the bridge rail read as
+   *  mismatched blocks with texture seams across them.
+   *
+   *  Positions — including point-light distances — still use `vertexY`, which
+   *  is also what the client's shader does: real vertex positions, but baked
+   *  normal and texcoord attributes. */
+  preContourVertexY?: Int32Array
   triangleX: Int16Array
   triangleY: Int16Array
   triangleZ: Int16Array

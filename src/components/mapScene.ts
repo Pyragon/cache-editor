@@ -3293,10 +3293,11 @@ export async function buildLocsMesh(
             m, contourType, def.groundContourModifier ?? 0,
             heights, heightsAll[decodedPlane + 1], sceneX + piece.offX, sceneY + piece.offZ, avgHeight,
             ...placedXZ(m, piece, def))
-          // Keep the pre-contour vertexY for lighting: the client's normals are
-          // built once from the raw mesh and the contour never updates them, so
-          // a run of identical pieces down a slope stays uniformly lit.
-          if (contoured) m = { ...m, vertexY: contoured, normalVertexY: m.vertexY }
+          // Keep the pre-contour vertexY: the client builds normals AND texture
+          // coordinates once from the raw mesh and the contour never updates
+          // either, so a run of identical pieces down a slope stays uniformly
+          // lit and uniformly textured. See ModelData.preContourVertexY.
+          if (contoured) m = { ...m, vertexY: contoured, preContourVertexY: m.vertexY }
         }
         if (isAnimated) {
           // keep out of the merged static mesh; the scene poses it per frame.
