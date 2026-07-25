@@ -63,8 +63,20 @@ Compared against the live client, all still open:
 - **The river still looks off** (separate from the un-signed-off water colour
   already tracked in `TODO.md`).
 - **Willow transparency** — better than it was, but still not matching in-game.
-- **Walkways bleed into the grass.** <https://i.imgur.com/AWCJFyW.png> — and
-  note the diagnosis: in-game the walkway is simply **bigger**, so this is not
-  a crossfade/blend-strength bug to tune. The overlay is covering the wrong
-  tiles or the wrong shape within them. Check the overlay shape/rotation split
-  before touching any blending.
+- **Walkways bleed into the grass** — mostly fixed, one mechanism still open.
+  The original note here guessed the walkway was simply *bigger* in-game; that
+  was wrong, it's a blend. Full trace in **`docs/terrain-blending.md`** — three
+  independent mechanisms, two now ported (commit `2562f34`): the perimeter
+  blend, where a tile's 8 ring vertices take a neighbouring blendable overlay's
+  colour AND texture AND scale, and the two missing tile-shape families that
+  subdivide the underlay side of shaped tiles. Straight borders and most
+  diagonals now match.
+  **Still open — mechanism 3:** the client draws a tile once per distinct
+  material it contains, each pass covering the tile's *whole* vertex set with a
+  per-vertex alpha weight, so the overlay/underlay split is a partition of
+  weights over a shared mesh rather than of triangles. We assign one material
+  per triangle, so a curved intra-tile boundary (shape 9/10 — tile 3225,3223 is
+  the worked example) stays a hard arc and retriangulation can't fix it. Next
+  step is finding where the alpha byte gets written: `Node_Sub6.method12145`
+  writes only RGB at stride 4, and `method12147` is the likely candidate. Read
+  it before coding — the weight rule is currently inferred, not read.
