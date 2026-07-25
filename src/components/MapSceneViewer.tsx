@@ -2569,53 +2569,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     return () => { cancelled = true }
   }, [listEntries, status])
 
-  // world-map static elements: icons Jagex pinned at coordinates in the
-  // MAP_AREAS index (see docs/worldmap.md) — world-map-only, overlaid here
-  // as an editor aid so they're visible in context
-  const [showWmIcons, setShowWmIcons] = useState(true)
-  const [staticElements, setStaticElements] = useState<{ x: number; y: number; plane: number; areaId: number }[]>([])
-  const [staticBitmaps, setStaticBitmaps] = useState<Map<number, ImageBitmap | null>>(new Map())
-  useEffect(() => {
-    const root = data.rootHandle
-    if (!root) return
-    let cancelled = false
-    void (async () => {
-      try {
-        const dir = await (await root.getDirectoryHandle('map_areas')).getDirectoryHandle('static_elements')
-        const all: { x: number; y: number; plane: number; areaId: number }[] = []
-        for await (const handle of dir.values()) {
-          if (handle.kind !== 'file' || !handle.name.endsWith('.json')) continue
-          try {
-            const entries = JSON.parse(await (await (handle as FileSystemFileHandle).getFile()).text()) as
-              { x: number; y: number; plane: number; areaId: number }[]
-            // keep only elements inside the centre region
-            for (const e of entries) {
-              if (e.x >> 6 === data.def.regionX && e.y >> 6 === data.def.regionY) all.push(e)
-            }
-          } catch { /* skip unreadable file */ }
-        }
-        if (!cancelled) setStaticElements(all)
-      } catch {
-        if (!cancelled) setStaticElements([]) // static_elements not dumped
-      }
-    })()
-    return () => { cancelled = true }
-  }, [data])
-  useEffect(() => {
-    const ids = [...new Set(staticElements.map((e) => e.areaId))]
-    if (ids.length === 0) { setStaticBitmaps(new Map()); return }
-    let cancelled = false
-    void (async () => {
-      const out = new Map<number, ImageBitmap | null>()
-      await Promise.all(ids.map(async (areaId) => {
-        const info = await loadAreaInfoRef.current(areaId)
-        out.set(areaId, info?.bitmap ?? null)
-      }))
-      if (!cancelled) setStaticBitmaps(out)
-    })()
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [staticElements])
+  // MAP_AREAS static elements (world-map-only pins, scanned out of
+  // map_areas/static_elements and resolved to area icons) used to be overlaid
+  // on this minimap behind a "World-map icons" toggle. Both the loader and the
+  // draw were removed 2026-07-25 — see the Map Areas note in TODO.md for why,
+  // and for what to rebuild when they get a proper home on the world map.
 
   // mapscene sprites for the minimap: mapSpriteId → sprite bitmap (the tree/
   // rock symbols the client stamps at placements)
@@ -2767,29 +2725,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       }
     }
 
-    // world-map static elements (dimmed + violet corner dot): these icons
-    // exist only on the world map — shown here as an editor aid
-    if (showWmIcons) {
-      for (const e of staticElements) {
-        if (e.plane !== 0) continue
-        const lx = e.x & 63
-        const ly = e.y & 63
-        const cx = lx * P + P / 2
-        const cy = (SIZE - 1 - ly) * P + P / 2
-        const bmp = staticBitmaps.get(e.areaId)
-        if (bmp) {
-          ctx.globalAlpha = 0.75
-          ctx.drawImage(bmp, cx - bmp.width / 2, cy - bmp.height / 2)
-          ctx.globalAlpha = 1
-          ctx.fillStyle = '#b47aff'
-          ctx.fillRect(Math.round(cx + bmp.width / 2 - 2), Math.round(cy - bmp.height / 2), 2, 2)
-        } else {
-          ctx.fillStyle = '#b47aff'
-          ctx.fillRect(cx - 2, cy - 2, 4, 4)
-        }
-      }
-    }
-  }, [data, terrain, listEntries, objCats, areaBitmaps, objSprites, spriteBitmaps, objInteractive, staticElements, staticBitmaps, showWmIcons, minimapVersion, sideTab, terrainBrush, mmGammaLut])
+  }, [data, terrain, listEntries, objCats, areaBitmaps, objSprites, spriteBitmaps, objInteractive, minimapVersion, sideTab, terrainBrush, mmGammaLut])
 
   useEffect(() => {
     if (skyMeshRef.current) skyMeshRef.current.visible = showSky
@@ -2927,10 +2863,6 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           <span className="mapscene-marker-key">
             Point lights{lightList.length > 0 ? ` (${lightList.length})` : ''}
           </span>
-        </label>
-        <label className="mapscene-toggle" title="Icons pinned in the world map's own index (static elements) — they never appear on the real minimap; shown dimmed with a violet dot as an editor aid">
-          <input type="checkbox" checked={showWmIcons} onChange={(e) => setShowWmIcons(e.target.checked)} />
-          World-map icons
         </label>
         <label className="mapscene-toggle mapscene-gamma" title="Minimap palette gamma — the client's Brightness setting (higher = darker). Client defaults sit around 0.8–0.9.">
           Map brightness
