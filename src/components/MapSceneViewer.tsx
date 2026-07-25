@@ -11,11 +11,11 @@ import type { LocEntry, MapData, MapRegionDef, MapTerrain } from '../loaders/map
 import { SIZE, decodeTerrain, decodeUnderwaterTerrain, tileIndex, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS, LOC_TYPE_LABELS } from '../loaders/maps'
 import { rgbToRenderedHex, DEFAULT_MODEL_SUN } from '../loaders/models'
 import { NumberInput } from './defFields'
-import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildRegionOutline, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh } from './mapScene'
+import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildRegionOutline, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh } from './mapScene'
 import { LocAnimator } from './locAnimator'
 import type { AnimationDef } from '../loaders/animations'
 import type { ModelData } from '../loaders/models'
-import type { SceneConfigs, LocRef, MarkerInfo, SunConfig } from './mapScene'
+import type { SceneConfigs, LocRef, MarkerInfo, RegionLight, SunConfig } from './mapScene'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import './MapSceneViewer.css'
 
@@ -195,9 +195,23 @@ type AreaInfo = {
   minimap: boolean
 }
 
-type Selection = LocSelection | MarkerSelection
+/** A picked region point light — index into the region's `lights[]`. */
+type LightSelection = {
+  kind: 'light'
+  index: number
+  light: RegionLight
+}
+
+type Selection = LocSelection | MarkerSelection | LightSelection
 
 type PlaceDraft = { objectId: number; type: number; rotation: number; plane: number }
+
+/** What the Place tab is currently placing. */
+type PlaceKind = 'object' | 'light' | 'sound'
+
+/** Defaults a click-placed point light starts from (the rest of the record is
+ *  derived: footprint from the size, x/z from the clicked tile). */
+type LightDraft = { plane: number; size2d: number; y: number; colorHsl: number; type: number }
 
 const BRUSH_SIZES = [1, 2, 3, 5, 7]
 
@@ -217,7 +231,7 @@ type TerrainBrush = {
 
 /** One edit against the parent's drafts; coalesce folds it into the previous
  *  undo step (used for drag-stroke continuations). */
-type EditPatch = { terrain?: MapTerrain; objects?: LocEntry[]; coalesce?: boolean }
+type EditPatch = { terrain?: MapTerrain; objects?: LocEntry[]; lights?: RegionLight[]; coalesce?: boolean }
 
 /** Copied area: per-plane tile channels + contained placements (relative). */
 type StampClipboard = {
@@ -232,7 +246,7 @@ type StampClipboard = {
   objects: LocEntry[]
 }
 
-export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }: {
+export default function MapSceneViewer({ data, focus, objects, terrain, lights, onEdit }: {
   data: MapData
   focus?: { x: number; y: number; plane: number } | null
   /** draft of the centre region's placements (edits not yet saved) — kept
@@ -241,6 +255,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
   /** draft of the centre region's terrain — same decoupling as `objects`, so
    *  a height-brush stroke rebuilds only the centre terrain/locs */
   terrain?: MapTerrain
+  /** draft of the region's point lights (map_environments `lights[]`). Absent
+   *  until the parent has read the environment file; a light edit re-bakes the
+   *  centre locs, since point lights are baked into their vertex colours. */
+  lights?: RegionLight[]
   /** commit any edit — the parent owns the drafts, undo history, and save */
   onEdit?: (patch: EditPatch) => void
 }) {
@@ -271,11 +289,21 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
   const objectsPropRef = useRef<LocEntry[] | null>(null)
   objectsPropRef.current = objects ?? null
   const lastBuiltObjectsRef = useRef<LocEntry[] | null>(null)
+  const lightsPropRef = useRef<RegionLight[] | null>(null)
+  lightsPropRef.current = lights ?? null
+  const lastBuiltLightsRef = useRef<RegionLight[] | null>(null)
   // unified centre rebuild (terrain + locs + shadows + minimap) — assigned by
   // the scene build once its closure state (mosaic grid, assets) exists
-  const rebuildCenterRef = useRef<((t: MapTerrain, objs: LocEntry[]) => Promise<void>) | null>(null)
+  const rebuildCenterRef = useRef<((t: MapTerrain, objs: LocEntry[], lights?: RegionLight[]) => Promise<void>) | null>(null)
   // list-row click → select + highlight + fly the camera over the loc
   const selectFromListRef = useRef<((entry: LocEntry, index: number) => void) | null>(null)
+  // light-list row click → select the light + fly the camera to it
+  const selectLightFromListRef = useRef<((index: number) => void) | null>(null)
+  /** show an uncommitted light record in the scene (null = back to committed) */
+  const previewLightRef = useRef<((index: number, light: RegionLight | null) => void) | null>(null)
+  /** the lights the scene actually built with — used when the parent hasn't
+   *  loaded the environment (read-only view) so the list still shows them */
+  const [sceneLights, setSceneLights] = useState<RegionLight[]>([])
   const [locNames, setLocNames] = useState<Map<number, string>>(new Map())
 
   // map-sprite previews: config/map_sprites/<id>.json → sprites/<sid>/<sid>_0.png,
@@ -500,6 +528,21 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     onEditRef.current?.({ objects: [...base.map((o) => [...o] as LocEntry), entry] })
     if (!placeMultipleRef.current) setPlacing(false)
   }
+  // What the Place tab places: a loc, a point light, or a sound emitter (which
+  // IS a loc — an invisible utility object — so it reuses the loc ghost path).
+  const [placeKind, setPlaceKind] = useState<PlaceKind>('object')
+  // "Add light" mode: the next scene click drops a new point light on the tile
+  // it hits (placing one by clicking is much easier than typing coordinates,
+  // and it's how the gizmo becomes reachable in the first place).
+  const [addingLight, setAddingLight] = useState(false)
+  const addingLightRef = useRef(false)
+  addingLightRef.current = addingLight
+  const onAddLightRef = useRef<(tx: number, ty: number) => void>(() => {})
+  // defaults for a newly placed light — colour/type are a real dumped torch
+  const [lightDraft, setLightDraft] = useState<LightDraft>({
+    plane: 0, size2d: 1, y: 400, colorHsl: 5953, type: 15,
+  })
+
   // Place-tab eyedropper (Alt+click a loc): load it into the place form
   const samplePlaceRef = useRef<(loc: LocRef) => void>(() => {})
   samplePlaceRef.current = (loc) => {
@@ -527,9 +570,16 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
   const refreshTintRef = useRef<(() => void) | null>(null)
   const [showOutlines, setShowOutlines] = useState(false)
   const [showMarkers, setShowMarkers] = useState(true)
+  // point-light gizmos. On by default and drawn x-ray (see buildLightsMesh) —
+  // lights live inside the locs they light, so depth-tested gizmos would be
+  // unreachable. Off hides them AND stops them being picked.
+  const [showLights, setShowLights] = useState(true)
+  const showLightsRef = useRef(true)
+  showLightsRef.current = showLights
   const [showSky, setShowSky] = useState(true)
   const skyMeshRef = useRef<THREE.Mesh | null>(null)
   const highlightClearRef = useRef<(() => void) | null>(null)
+  const lightHighlightClearRef = useRef<(() => void) | null>(null)
   const [status, setStatus] = useState('building terrain…')
   const [hoverText, setHoverText] = useState('')
   // Loading bar = the actual fraction of the build's passes completed (the build
@@ -554,7 +604,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
   const selectionRef = useRef<Selection | null>(null)
   selectionRef.current = selection
   const planeGroupsRef = useRef<(THREE.Group | null)[]>([null, null, null, null])
-  type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'riverbed' | 'loc' | 'marker' | 'outline' }
+  type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'riverbed' | 'loc' | 'marker' | 'light' | 'outline' }
   const taggedRef = useRef<Tagged[]>([])
   // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
   type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; mesh: THREE.Mesh; sphere: THREE.Sphere }
@@ -706,6 +756,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       return obj
     }
 
+    /** Free an object's own geometry/materials (and the per-material texture
+     *  clones only it owns). Shared with the teardown below, so it lives out
+     *  here rather than inside the build. */
+    const disposeDeep = (obj: THREE.Object3D) => {
+      obj.traverse((o) => {
+        const m = o as THREE.Mesh
+        if (m.geometry) m.geometry.dispose()
+        if (m.material) {
+          for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
+            const basic = mat as THREE.MeshBasicMaterial
+            if (basic.map && (mat.userData.scroll || mat.userData.water)) basic.map.dispose()
+            mat.dispose()
+          }
+        }
+      })
+    }
+
     // --- picking: hover tile highlight + click-to-select -----------------
     const raycaster = new THREE.Raycaster()
     raycaster.firstHitOnly = true // BVH: stop at the closest hit per mesh
@@ -739,6 +806,61 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     brushRing.visible = false
     brushRing.raycast = () => {}
     scene.add(brushRing)
+
+    // Centre-region heights + the light records the scene was built from,
+    // held where the pointer handlers can see them (the build and every
+    // rebuild below reassign both).
+    let lightHeights: Int32Array[] = []
+    let currentLights: RegionLight[] = []
+
+    // selected point light: a bright ring at its radius plus a vertical stalk,
+    // both x-ray (the light is usually buried inside the loc it lights)
+    const lightSelRing = (() => {
+      const pts: number[] = []
+      for (let i = 0; i < 64; i++) {
+        const a = (i / 64) * Math.PI * 2
+        pts.push(Math.cos(a), 0, Math.sin(a))
+      }
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
+      const line = new THREE.LineLoop(g, new THREE.LineBasicMaterial({
+        color: 0xffffff, depthTest: false, depthWrite: false, fog: false,
+      }))
+      line.renderOrder = 4100
+      line.visible = false
+      line.raycast = () => {}
+      scene.add(line)
+      return line
+    })()
+    const lightSelStalk = (() => {
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0, 0, 0, 1, 0]), 3))
+      const line = new THREE.Line(g, new THREE.LineBasicMaterial({
+        color: 0xffffff, depthTest: false, depthWrite: false, fog: false,
+      }))
+      line.renderOrder = 4100
+      line.visible = false
+      line.raycast = () => {}
+      scene.add(line)
+      return line
+    })()
+    function clearLightHighlight() {
+      lightSelRing.visible = false
+      lightSelStalk.visible = false
+    }
+    lightHighlightClearRef.current = clearLightHighlight
+    /** Put the highlight on a light record (centre region, current heights). */
+    function highlightLight(rec: RegionLight) {
+      const p = lightScenePos(rec, lightHeights)
+      const radius = Math.max(lightRadius(rec), 64)
+      lightSelRing.position.set(p.x, p.y, p.z)
+      lightSelRing.scale.set(radius, 1, radius)
+      lightSelRing.visible = true
+      // stalk from the ground up through the light, so its height reads
+      lightSelStalk.position.set(p.x, p.ground, p.z)
+      lightSelStalk.scale.set(1, Math.max(p.y - p.ground, 1), 1)
+      lightSelStalk.visible = true
+    }
     // assigned once the mosaic exists (needs current heights to derive values)
     let applyBrush: ((tx: number, ty: number, opts?: { coalesce?: boolean; first?: boolean }) => void) | null = null
     let marqueeSelect: ((x0: number, y0: number, x1: number, y1: number) => void) | null = null
@@ -870,6 +992,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       if (found) highlightLoc(found.mesh, found.owner)
       else clearLocHighlight()
       selectOutline.visible = false
+      clearLightHighlight()
       const cx = (x + 0.5) * TILE
       const cz = -(y + 0.5) * TILE
       controls.target.set(cx, 0, cz)
@@ -887,11 +1010,62 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     function pick(): THREE.Intersection | null {
       raycaster.setFromCamera(pointer, camera)
       // only visible meshes — raycasting hidden planes/neighbours (and then
-      // discarding the hits) was pure waste
+      // discarding the hits) was pure waste. Light gizmos are skipped: they
+      // float x-ray over the scene, so leaving them in would let a gizmo eat
+      // the terrain brush's or the eyedropper's hit (see pickLight).
       const targets: THREE.Object3D[] = []
-      scene.traverseVisible((o) => { if ((o as THREE.Mesh).isMesh) targets.push(o) })
+      scene.traverseVisible((o) => {
+        if ((o as THREE.Mesh).isMesh && !(o as THREE.Mesh).userData.lightIndices) targets.push(o)
+      })
       const hits = raycaster.intersectObjects(targets, false)
       return hits[0] ?? null
+    }
+
+    /**
+     * Point-light gizmos are raycast on their OWN, ahead of everything else:
+     * a light sits inside the loc it lights, so the generic `pick()` (nearest
+     * hit across the whole scene) would always hand back the surrounding wall
+     * or lantern instead. This raycast ignores what's in front of the gizmo, so
+     * a light buried in a lantern stays clickable even though it's hidden.
+     */
+    function pickLight(): { index: number; light: RegionLight } | null {
+      if (!showLightsRef.current) return null
+      const targets: THREE.Object3D[] = []
+      scene.traverseVisible((o) => {
+        if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).userData.lightIndices) targets.push(o)
+      })
+      if (targets.length === 0) return null
+      raycaster.setFromCamera(pointer, camera)
+      for (const hit of raycaster.intersectObjects(targets, false)) {
+        const mesh = hit.object as THREE.Mesh
+        const indices = mesh.userData.lightIndices as number[]
+        const list = mesh.userData.lights as RegionLight[]
+        // 8 triangles per diamond, in `indices` order
+        const index = indices[(hit.faceIndex ?? -1) >> 3]
+        const light = index === undefined ? undefined : list[index]
+        if (light) return { index, light }
+      }
+      return null
+    }
+
+    /** Select a light: panel + highlight, clearing any loc/marker selection. */
+    function selectLight(index: number, light: RegionLight) {
+      setSideTab('view') // the selection panel lives in the View tab
+      setSelection({ kind: 'light', index, light })
+      selectOutline.visible = false
+      clearLocHighlight()
+      highlightLight(light)
+    }
+
+    // light-list row click: select it and fly the camera over its tile
+    selectLightFromListRef.current = (index) => {
+      const rec = currentLights[index]
+      if (!rec) return
+      const p = lightScenePos(rec, lightHeights)
+      controls.target.set(p.x, p.y, p.z)
+      camera.position.set(p.x, p.y + 3000, p.z + 3600)
+      controls.update()
+      selectLight(index, rec)
     }
 
     function worldTileOf(point: THREE.Vector3): { wx: number; wy: number; tx: number; ty: number } {
@@ -1129,14 +1303,32 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         return
       }
 
+      // armed "Add light": a click drops a new light on the tile under it
+      if (addingLightRef.current) {
+        const lightHitPoint = pick()
+        if (!lightHitPoint) return
+        const t = worldTileOf(lightHitPoint.point)
+        if (t.tx < 0 || t.tx > 63 || t.ty < 0 || t.ty > 63) return // centre region only
+        onAddLightRef.current(t.tx, t.ty)
+        return
+      }
+
       // terrain-tab clicks are consumed by the brush (or paste) — no selection
       if (sideTabRef.current === 'terrain') return
+
+      // point lights win over whatever geometry surrounds them (see pickLight)
+      const lightHit = pickLight()
+      if (lightHit) {
+        selectLight(lightHit.index, lightHit.light)
+        return
+      }
 
       const hit = pick()
       if (!hit) {
         setSelection(null)
         selectOutline.visible = false
         clearLocHighlight()
+        clearLightHighlight()
         return
       }
       const mesh = hit.object as THREE.Mesh
@@ -1162,6 +1354,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           selectOutline.position.set(gp.x + marker.tileX * TILE, gp.y + marker.y + 8, gp.z - marker.tileY * TILE)
           selectOutline.visible = true
           clearLocHighlight()
+          clearLightHighlight()
           void (async () => {
             const def = await assetsRef.current?.getDef(marker.objectId)
             if (!def) return
@@ -1213,6 +1406,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             mapCategoryId: -1,
           })
           selectOutline.visible = false
+          clearLightHighlight()
           highlightLoc(res.mesh, res.owner)
           fillLocDef(loc.objectId)
           return
@@ -1224,8 +1418,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       setSelection(null)
       selectOutline.visible = false
       clearLocHighlight()
+      clearLightHighlight()
     }
 
+    // Orbiting is on the middle button, which is also the browser's autoscroll
+    // gesture — without this, dragging the camera also starts that "scroll the
+    // page by moving the mouse" mode. Chromium only arms it on the mousedown
+    // default action, so cancelling that (not pointerdown) is what stops it.
+    function onMiddleMouseDown(e: MouseEvent) {
+      if (e.button === 1) e.preventDefault()
+    }
+    renderer.domElement.addEventListener('mousedown', onMiddleMouseDown)
     renderer.domElement.addEventListener('pointermove', onPointerMove)
     renderer.domElement.addEventListener('pointerleave', onPointerLeave)
     renderer.domElement.addEventListener('pointerdown', onPointerDown)
@@ -1464,6 +1667,58 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         const mosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun)
         if (disposed) return
 
+        // region point lights (map-environment `lights[]`), baked per placement.
+        // Needs the centre region's heights: a light's stored y is an offset
+        // above its tile's terrain, not a render coordinate. The parent's draft
+        // wins when it has one (a light edit made before the scene finished).
+        lightHeights = mosaic.slicesFor(0, 0).heights
+        currentLights = lightsPropRef.current ?? env?.lights ?? []
+        // record what we actually built with, so the parent handing down the
+        // very same array (its draft is seeded from this file) doesn't look
+        // like an edit and trigger a second full rebuild
+        lastBuiltLightsRef.current = currentLights
+        setSceneLights(currentLights)
+        let lightGrid = buildLightGrid(currentLights, lightHeights)
+
+        // Editor gizmos for the lights, one group per plane so the plane
+        // toggles hide them with everything else on that level. Rebuilt whole
+        // (they're a few hundred vertices) — cheap enough to redo on every
+        // slider tick while a light is being edited, which is what makes the
+        // panel feel live without touching the baked loc lighting.
+        const setLightGizmos = (list: RegionLight[]) => {
+          const stale = taggedRef.current.filter((t) => t.kind === 'light')
+          taggedRef.current = taggedRef.current.filter((t) => t.kind !== 'light')
+          for (const { obj } of stale) {
+            obj.parent?.remove(obj)
+            disposeDeep(obj)
+          }
+          for (let plane = 0; plane < 4; plane++) {
+            const indices: number[] = []
+            for (let i = 0; i < list.length; i++) {
+              if (list[i].plane === plane) indices.push(i)
+            }
+            const group = buildLightsMesh(list, lightHeights, indices)
+            if (!group) continue
+            group.visible = showLightsRef.current
+            planeGroupsRef.current[plane]?.add(group)
+            taggedRef.current.push({ obj: group, neighbor: false, kind: 'light' })
+          }
+        }
+
+        // Live preview of the light being edited: the gizmo (position, height,
+        // colour, reach ring) follows the panel's draft immediately. The LIGHTING
+        // itself still waits for Apply — it's baked into every loc around it.
+        previewLightRef.current = (index, rec) => {
+          if (!rec) {
+            setLightGizmos(currentLights)
+            const sel = selectionRef.current
+            if (sel?.kind === 'light' && currentLights[sel.index]) highlightLight(currentLights[sel.index])
+            return
+          }
+          setLightGizmos(currentLights.map((l, i) => (i === index ? rec : l)))
+          highlightLight(rec)
+        }
+
         // sun colour tint (fixed-function diffuse) relative to the default
         // 0xDDCCBB — applied to terrain/loc materials, including rebuilt ones
         let sunTint: [number, number, number] | null = null
@@ -1498,7 +1753,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         }
 
         refreshTintRef.current = () => {
-          for (const t of taggedRef.current) applyTint(t.obj)
+          // light gizmos are editor overlays showing each light's own colour —
+          // the sun tint / HDR multiplier must not touch them
+          for (const t of taggedRef.current) if (t.kind !== 'light') applyTint(t.obj)
         }
 
         // the centre region renders the parent's draft placements, so an
@@ -1589,6 +1846,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
                   setStatus(`objects (${label}, plane ${plane}): ${done}/${total}`)
                   reportProgress(total > 0 ? done / total : 1)
                 },
+                isCenter ? lightGrid : undefined,
               )
               if (disposed) return
             }
@@ -1666,7 +1924,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             // Animated locs (waving flags etc.): a separate posable mesh each,
             // placed with the region offset baked into the mesh transform.
             for (const al of built.animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points)
               if (disposed) return
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
@@ -1703,6 +1961,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           taggedRef.current.push({ obj: outline, neighbor: !isCenter, kind: 'outline' })
         }
 
+        setLightGizmos(currentLights)
+
         // Resolve each distinct loc idle sequence once, preload its frames, and
         // hand the animator to every placement that uses it (the RAF loop poses).
         if (animLocsRef.current.length > 0 && data.rootHandle) {
@@ -1733,19 +1993,6 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         // --- Place-mode ghost: a translucent single-loc mesh under the cursor
         let ghost: { obj: THREE.Object3D; key: string } | null = null
         let ghostToken = 0
-        const disposeDeep = (obj: THREE.Object3D) => {
-          obj.traverse((o) => {
-            const m = o as THREE.Mesh
-            if (m.geometry) m.geometry.dispose()
-            if (m.material) {
-              for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
-                const basic = mat as THREE.MeshBasicMaterial
-                if (basic.map && (mat.userData.scroll || mat.userData.water)) basic.map.dispose()
-                mat.dispose()
-              }
-            }
-          })
-        }
         const clearGhost = () => {
           if (!ghost) return
           scene.remove(ghost.obj)
@@ -1931,9 +2178,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         // the terrain lighting), minimap, terrain and outline. Neighbour
         // meshes keep their old boundary values; only visible when brushing
         // the outermost tiles.
-        rebuildCenterRef.current = async (nextTerrain, nextObjects) => {
+        rebuildCenterRef.current = async (nextTerrain, nextObjects, nextLights) => {
           if (disposed) return
           currentTerrain = nextTerrain
+          if (nextLights) {
+            currentLights = nextLights
+            setSceneLights(nextLights)
+          }
           clearLocHighlight()
           setStatus('recomputing…')
           await new Promise((resolve) => setTimeout(resolve, 0)) // let the status paint
@@ -1942,10 +2193,18 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           if (disposed) return
           const slices = nextMosaic.slicesFor(0, 0)
           centerHeights = slices.heights
+          // heights moved (a height brush) or the lights themselves changed —
+          // either way the grid and the gizmos have to be rebuilt, since a
+          // light's y is relative to its tile's ground
+          lightHeights = centerHeights
+          lightGrid = buildLightGrid(currentLights, lightHeights)
           const palettes = [0, 1, 2, 3].map((pl) => nextMosaic.paletteFor(0, 0, pl))
           const overlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.overlayCornerFor(0, 0, pl))
           const underlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.underlayCornerFor(0, 0, pl))
 
+          // light gizmos are deliberately NOT dropped here: setLightGizmos owns
+          // them and swaps them at the end, so they stay on screen (and pickable)
+          // through the rebuild instead of blinking out for a few seconds
           const stale = taggedRef.current.filter((t) => !t.neighbor
             && (t.kind === 'terrain' || t.kind === 'riverbed' || t.kind === 'outline' || t.kind === 'loc' || t.kind === 'marker'))
           taggedRef.current = taggedRef.current.filter((t) => !stale.includes(t))
@@ -1965,6 +2224,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               locBuilds[plane] = await buildLocsMesh(
                 nextTerrain, nextObjects, plane, centerHeights, assets,
                 (done, total) => setStatus(`updating objects (plane ${plane}): ${done}/${total}`),
+                lightGrid,
               )
               if (disposed) return
             }
@@ -2028,7 +2288,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               taggedRef.current.push({ obj: lm, neighbor: false, kind: 'loc' })
             }
             for (const al of built.animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points)
               if (disposed) return
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
@@ -2076,6 +2336,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           track(outline)
           outlines.add(outline)
           taggedRef.current.push({ obj: outline, neighbor: false, kind: 'outline' })
+          setLightGizmos(currentLights)
+          // keep the selected light's ring on it (its record — and the ground
+          // under it — may have just moved)
+          const selLight = selectionRef.current
+          if (selLight?.kind === 'light') {
+            const rec = currentLights[selLight.index]
+            if (rec) highlightLight(rec)
+            else clearLightHighlight()
+          }
           setStatus('')
         }
         setStatus('')
@@ -2088,6 +2357,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       disposed = true
       cancelAnimationFrame(raf)
       resizeObserver.disconnect()
+      renderer.domElement.removeEventListener('mousedown', onMiddleMouseDown)
       renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerleave', onPointerLeave)
       renderer.domElement.removeEventListener('pointerdown', onPointerDown)
@@ -2104,8 +2374,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       clearLocHighlight()
       ghostClearRef.current?.()
       highlightClearRef.current = null
+      lightHighlightClearRef.current = null
       rebuildCenterRef.current = null
       selectFromListRef.current = null
+      selectLightFromListRef.current = null
+      previewLightRef.current = null
+      // light gizmos are rebuilt in place rather than tracked, so they aren't in
+      // `disposables` — free them here
+      for (const t of taggedRef.current) if (t.kind === 'light') disposeDeep(t.obj)
       ghostUpdateRef.current = null
       ghostClearRef.current = null
       planeGroupsRef.current = [null, null, null, null]
@@ -2140,6 +2416,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [terrain, status])
 
+  // point-light draft changed: same unified rebuild, because the lights are
+  // baked into the locs' vertex colours (and the terrain's, via the mosaic)
+  useEffect(() => {
+    if (!lights || lights === lastBuiltLightsRef.current) return
+    const rebuild = rebuildCenterRef.current
+    if (!rebuild) return
+    lastBuiltLightsRef.current = lights
+    lastBuiltObjectsRef.current = objectsPropRef.current
+    lastBuiltTerrainRef.current = terrainPropRef.current
+    void rebuild(
+      terrainPropRef.current ?? data.terrain,
+      objectsPropRef.current ?? data.def.objects,
+      lights,
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lights, status])
+
   // coordinate-search teleport: fly the camera to the focused tile. Runs
   // after the scene effect (declared below it), so on a cross-region jump the
   // fresh camera/controls are already in the refs.
@@ -2157,9 +2450,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     // camera to the current position instead of the far default overview
   }, [focus, data])
 
-  // close-button / cleared selection also drops the loc highlight
+  // close-button / cleared selection also drops the loc + light highlights
   useEffect(() => {
-    if (!selection) highlightClearRef.current?.()
+    if (!selection) {
+      highlightClearRef.current?.()
+      lightHighlightClearRef.current?.()
+    }
   }, [selection])
 
   // leaving Place mode (cancel, Esc, or a committed placement) drops the ghost
@@ -2172,6 +2468,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
       if (e.key === 'Escape') {
         setPlacing(false)
         setPasteArmed(false)
+        setAddingLight(false)
         setMultiSel([])
       }
     }
@@ -2184,6 +2481,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     setPlacing(false)
     setMultiSel([])
     setPasteArmed(false)
+    setAddingLight(false)
   }, [data])
 
   // the multi-selection indexes the objects draft — any edit invalidates it
@@ -2506,15 +2804,50 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     refreshTintRef.current?.()
   }, [bloomOn, status])
 
+  // --- point lights ----------------------------------------------------
+  // The parent owns the draft (map_environments `lights[]`) exactly like the
+  // terrain/placement drafts. Without it the lights are still listed, gizmo'd
+  // and selectable — just read-only.
+  const lightList = lights ?? sceneLights
+  const canEditLights = !!onEdit && !!lights
+  const commitLights = (next: RegionLight[]) => onEdit?.({ lights: next })
+  onAddLightRef.current = (tx, ty) => {
+    // Everything else is derived: the tile centre, and a footprint matching the
+    // chosen size. The new light is selected straight away, so the full panel
+    // is there for anything the Place tab's few fields don't cover.
+    const rec: RegionLight = {
+      plane: lightDraft.plane,
+      growsUpwards: false,
+      growsDownwards: false,
+      x: tx * 512 + 256,
+      z: ty * 512 + 256,
+      y: lightDraft.y,
+      size2d: lightDraft.size2d,
+      ranges: lightRangesFor(lightDraft.size2d),
+      colorHsl: lightDraft.colorHsl,
+      type: lightDraft.type,
+      rotationOffset: 0,
+    }
+    const next = [...lightList, rec]
+    setSelection({ kind: 'light', index: next.length - 1, light: rec })
+    setAddingLight(false)
+    commitLights(next)
+  }
+
   // visibility = plane toggle (via group) AND per-kind toggle
   useEffect(() => {
     planeGroupsRef.current.forEach((group, plane) => {
       if (group) group.visible = visiblePlanes[plane]
     })
     for (const { obj, kind } of taggedRef.current) {
-      obj.visible = kind === 'loc' ? showLocs : kind === 'marker' ? showMarkers : kind === 'outline' ? showOutlines : true
+      obj.visible = kind === 'loc' ? showLocs
+        : kind === 'marker' ? showMarkers
+        : kind === 'light' ? showLights
+        : kind === 'outline' ? showOutlines
+        : true
     }
-  }, [visiblePlanes, showLocs, showMarkers, showOutlines, status])
+    if (!showLights) lightHighlightClearRef.current?.()
+  }, [visiblePlanes, showLocs, showMarkers, showLights, showOutlines, status])
 
   return (
     <div className="mapscene">
@@ -2586,6 +2919,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             Markers (<span style={{ color: '#ff9d3a' }}>sound</span>/<span style={{ color: '#b47aff' }}>map icon</span>/<span style={{ color: '#3ad0c8' }}>map sprite</span>/<span style={{ color: '#ff5a5a' }}>barrier</span>)
           </span>
         </label>
+        <label
+          className="mapscene-toggle"
+          title="Region point lights (map_environments lights[]) — diamond + radius ring in the light's own colour. A light hidden inside the loc it lights is still clickable (picking ignores what's in front of it); the selected one's ring shows through geometry."
+        >
+          <input type="checkbox" checked={showLights} onChange={(e) => setShowLights(e.target.checked)} />
+          <span className="mapscene-marker-key">
+            Point lights{lightList.length > 0 ? ` (${lightList.length})` : ''}
+          </span>
+        </label>
         <label className="mapscene-toggle" title="Icons pinned in the world map's own index (static elements) — they never appear on the real minimap; shown dimmed with a violet dot as an editor aid">
           <input type="checkbox" checked={showWmIcons} onChange={(e) => setShowWmIcons(e.target.checked)} />
           World-map icons
@@ -2635,7 +2977,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             <button
               type="button"
               className={sideTab === 'view' ? 'selected' : ''}
-              onClick={() => { setSideTab('view'); setPlacing(false) }}
+              onClick={() => { setSideTab('view'); setPlacing(false); setAddingLight(false) }}
             >
               View
             </button>
@@ -2649,7 +2991,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             <button
               type="button"
               className={sideTab === 'terrain' ? 'selected' : ''}
-              onClick={() => { setSideTab('terrain'); setPlacing(false) }}
+              onClick={() => { setSideTab('terrain'); setPlacing(false); setAddingLight(false) }}
             >
               Terrain
             </button>
@@ -2669,6 +3011,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
           )}
           {sideTab === 'place' && (
             <PlacePanel
+              kind={placeKind}
+              onKind={(next) => { setPlaceKind(next); setPlacing(false); setAddingLight(false) }}
               draft={placeDraft}
               onDraft={setPlaceDraft}
               placing={placing}
@@ -2677,9 +3021,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               onToggle={() => setPlacing((v) => !v)}
               placeMultiple={placeMultiple}
               onPlaceMultiple={setPlaceMultiple}
-              markerPicks={markerPicks}
+              soundPicks={markerPicks.filter((m) => m.kind === 'sound')}
               names={locNames}
               entries={listEntries}
+              lightDraft={lightDraft}
+              onLightDraft={setLightDraft}
+              addingLight={addingLight}
+              onAddLightToggle={() => setAddingLight((v) => !v)}
+              canPlaceLight={canEditLights && status === ''}
             />
           )}
           {sideTab === 'view' && <>
@@ -2750,6 +3099,29 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
               </div>
             </>
           )}
+          {selection?.kind === 'light' && (
+            <LightPanel
+              key={`light-${selection.index}`}
+              index={selection.index}
+              light={selection.light}
+              regionX={data.def.regionX}
+              regionY={data.def.regionY}
+              canEdit={canEditLights}
+              onPreview={(next) => previewLightRef.current?.(selection.index, next)}
+              onClose={() => setSelection(null)}
+              onApply={(next) => {
+                const list = lightList.map((l) => ({ ...l }))
+                list[selection.index] = next
+                setSelection({ kind: 'light', index: selection.index, light: next })
+                commitLights(list)
+              }}
+              onDelete={() => {
+                const list = lightList.filter((_, i) => i !== selection.index).map((l) => ({ ...l }))
+                setSelection(null)
+                commitLights(list)
+              }}
+            />
+          )}
           {selection?.kind === 'loc' && (
             <LocPanel
               key={`${selection.regionX},${selection.regionY},${selection.index},${selection.objectId},${selection.x},${selection.y}`}
@@ -2780,6 +3152,31 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
             selectedIndex={selection?.kind === 'loc' && selection.inCenter ? selection.index : -1}
             onPick={(entry, index) => selectFromListRef.current?.(entry, index)}
           />
+          <LightList
+            lights={lightList}
+            regionX={data.def.regionX}
+            regionY={data.def.regionY}
+            selectedIndex={selection?.kind === 'light' ? selection.index : -1}
+            onPick={(index) => selectLightFromListRef.current?.(index)}
+          />
+          {markerPicks.length > 0 && (
+            <div className="mapscene-markerbox">
+              <span className="item-field-label">Markers in this region</span>
+              <div className="mapscene-marker-chips">
+                {markerPicks.map((m) => (
+                  <span
+                    key={m.objectId}
+                    className="mapscene-marker-chip is-static"
+                    title={`object ${m.objectId}, placement type ${m.type} — click its diamond in the scene to inspect it`}
+                    style={{ borderColor: `#${MARKER_COLORS[m.kind].toString(16).padStart(6, '0')}` }}
+                  >
+                    <span className="mapscene-info-dot" style={{ background: `#${MARKER_COLORS[m.kind].toString(16).padStart(6, '0')}` }} />
+                    {m.kind} {m.objectId}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           </>}
         </aside>
       </div>
@@ -3028,9 +3425,22 @@ function TerrainPanel({ brush, onBrush, canEdit, underlayColors, overlayColors, 
   )
 }
 
-// Place mode: configure the object to add, arm placement, then click a tile
-// in the scene — a translucent ghost follows the cursor until then.
-function PlacePanel({ draft, onDraft, placing, canPlace, name, onToggle, placeMultiple, onPlaceMultiple, markerPicks, names, entries }: {
+const PLACE_KINDS: { kind: PlaceKind; label: string; title: string }[] = [
+  { kind: 'object', label: 'Object', title: 'A normal placed loc — scenery, walls, doors' },
+  { kind: 'light', label: 'Light', title: 'A region point light (the map environment’s lights[])' },
+  { kind: 'sound', label: 'Sound', title: 'An ambient-sound emitter: an invisible loc, shown here as an orange marker' },
+]
+
+// Place mode: pick WHAT to add (loc / point light / sound emitter), set it up,
+// arm placement, then click a tile in the scene. Locs and sound emitters share
+// the ghost path — a sound emitter is just a loc whose models are the invisible
+// marker quads — while a light is written into the region's environment record.
+function PlacePanel({
+  kind, onKind, draft, onDraft, placing, canPlace, name, onToggle, placeMultiple, onPlaceMultiple,
+  soundPicks, names, entries, lightDraft, onLightDraft, addingLight, onAddLightToggle, canPlaceLight,
+}: {
+  kind: PlaceKind
+  onKind: (next: PlaceKind) => void
   draft: PlaceDraft
   onDraft: (next: PlaceDraft) => void
   placing: boolean
@@ -3039,9 +3449,14 @@ function PlacePanel({ draft, onDraft, placing, canPlace, name, onToggle, placeMu
   onToggle: () => void
   placeMultiple: boolean
   onPlaceMultiple: (v: boolean) => void
-  markerPicks: { objectId: number; kind: MarkerInfo['kind']; type: number }[]
+  soundPicks: { objectId: number; kind: MarkerInfo['kind']; type: number }[]
   names: Map<number, string>
   entries: LocEntry[]
+  lightDraft: LightDraft
+  onLightDraft: (next: LightDraft) => void
+  addingLight: boolean
+  onAddLightToggle: () => void
+  canPlaceLight: boolean
 }) {
   const slot = OBJECT_SLOTS[draft.type] ?? 2
   const [query, setQuery] = useState('')
@@ -3058,14 +3473,162 @@ function PlacePanel({ draft, onDraft, placing, canPlace, name, onToggle, placeMu
     }
     return out
   }, [query, names, entries])
+  const hue = (lightDraft.colorHsl >> 10) & 0x3f
+  const sat = (lightDraft.colorHsl >> 7) & 0x7
+  const val = lightDraft.colorHsl & 0x7f
+  const setLightHsv = (h: number, s: number, v: number) =>
+    onLightDraft({ ...lightDraft, colorHsl: ((h & 0x3f) << 10) | ((s & 0x7) << 7) | (v & 0x7f) })
+
   return (
     <>
       <div className="mapscene-side-head">
         <span className="enum-title mapscene-side-title">
-          Place object
-          {name && <span className="mapscene-side-id">— {name}</span>}
+          Place
+          {kind === 'object' && name && <span className="mapscene-side-id">— {name}</span>}
         </span>
       </div>
+      <div className="item-field">
+        <span className="item-field-label">What to place</span>
+        <div className="mapscene-btn-row">
+          {PLACE_KINDS.map((k) => (
+            <button
+              key={k.kind}
+              type="button"
+              className={`zoom-btn${kind === k.kind ? ' active' : ''}`}
+              title={k.title}
+              onClick={() => onKind(k.kind)}
+            >
+              {k.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {kind === 'light' && <>
+        <p className="mapscene-side-hint">
+          Hit Place light, then click a tile — the light lands at the tile centre
+          at the height below, and is selected so the full editor is right there.
+          It goes into the region's environment record, not its objects, and the
+          objects around it are re-lit on the spot. Esc backs out.
+        </p>
+        <div className="mapscene-side-grid">
+          <div className="item-field">
+            <span className="item-field-label">Colour</span>
+            <div className="mapscene-light-colour">
+              <span className="mapscene-light-swatch" style={{ background: lightSwatch(lightDraft.colorHsl) }} />
+              <span className="mapscene-field-value">HSV {hue}/{sat}/{val}</span>
+            </div>
+          </div>
+          <label className="item-field">
+            <span className="item-field-label">Hue</span>
+            <span className="mapscene-light-slider">
+              <input type="range" min={0} max={63} value={hue} onChange={(e) => setLightHsv(Number(e.target.value), sat, val)} />
+              <NumberInput value={hue} onChange={(v) => setLightHsv(v, sat, val)} min={0} max={63} />
+            </span>
+          </label>
+          <label className="item-field">
+            <span className="item-field-label">Saturation</span>
+            <span className="mapscene-light-slider">
+              <input type="range" min={0} max={7} value={sat} onChange={(e) => setLightHsv(hue, Number(e.target.value), val)} />
+              <NumberInput value={sat} onChange={(v) => setLightHsv(hue, v, val)} min={0} max={7} />
+            </span>
+          </label>
+          <label className="item-field">
+            <span className="item-field-label">Value</span>
+            <span className="mapscene-light-slider">
+              <input type="range" min={0} max={127} value={val} onChange={(e) => setLightHsv(hue, sat, Number(e.target.value))} />
+              <NumberInput value={val} onChange={(v) => setLightHsv(hue, sat, v)} min={0} max={127} />
+            </span>
+          </label>
+          <label className="item-field">
+            <span className="item-field-label">
+              Size (radius)<span className="mapscene-gfx-def"> reach = size × 512 + 256 units</span>
+            </span>
+            <NumberInput value={lightDraft.size2d} onChange={(v) => onLightDraft({ ...lightDraft, size2d: v })} min={0} max={63} />
+          </label>
+          <label className="item-field">
+            <span className="item-field-label">Height above ground</span>
+            <NumberInput
+              value={lightDraft.y}
+              onChange={(v) => onLightDraft({ ...lightDraft, y: Math.round(v / 4) * 4 })}
+              min={0}
+              max={262140}
+            />
+          </label>
+          <div className="item-field">
+            <span className="item-field-label">Plane</span>
+            <div className="mapscene-btn-row">
+              {[0, 1, 2, 3].map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  className={`zoom-btn${lightDraft.plane === p ? ' active' : ''}`}
+                  onClick={() => onLightDraft({ ...lightDraft, plane: p })}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label className="item-field">
+            <span className="item-field-label">
+              Flicker type<span className="mapscene-gfx-def"> 0–30 presets, 31 = light_intensities id</span>
+            </span>
+            <NumberInput value={lightDraft.type} onChange={(v) => onLightDraft({ ...lightDraft, type: v })} min={0} max={31} />
+          </label>
+        </div>
+        <div className="mapscene-side-actions">
+          <button
+            type="button"
+            className={addingLight ? 'save-bar-discard' : 'save-bar-save'}
+            disabled={!canPlaceLight}
+            onClick={onAddLightToggle}
+          >
+            {addingLight ? 'Cancel (Esc)' : 'Place light'}
+          </button>
+        </div>
+        {!canPlaceLight && (
+          <p className="mapscene-side-hint">
+            This region's environment file couldn't be loaded, so lights are read-only here.
+          </p>
+        )}
+      </>}
+
+      {kind === 'sound' && <>
+        <p className="mapscene-side-hint">
+          Ambient-sound emitters are ordinary placements of invisible utility
+          objects — the sound lives on the object's own definition
+          (<code>ambientSoundId</code>), so placing one means placing that object.
+          Pick one already used nearby, or type its id if you know it.
+        </p>
+        {soundPicks.length > 0 ? (
+          <div className="item-field mapscene-place-search">
+            <span className="item-field-label">Emitters used in this region — click to load</span>
+            <div className="mapscene-marker-chips">
+              {soundPicks.map((m) => (
+                <button
+                  key={m.objectId}
+                  type="button"
+                  className={`mapscene-marker-chip${draft.objectId === m.objectId ? ' active' : ''}`}
+                  title={`object ${m.objectId}, placement type ${m.type}`}
+                  style={{ borderColor: `#${MARKER_COLORS.sound.toString(16).padStart(6, '0')}` }}
+                  onClick={() => onDraft({ ...draft, objectId: m.objectId, type: m.type })}
+                >
+                  <span className="mapscene-info-dot" style={{ background: `#${MARKER_COLORS.sound.toString(16).padStart(6, '0')}` }} />
+                  sound {m.objectId}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <p className="mapscene-side-hint">
+            No emitter is placed in this region to copy — enter an object id below.
+            Neighbouring regions often reuse the same few ids.
+          </p>
+        )}
+      </>}
+
+      {kind === 'object' && <>
       <p className="mapscene-side-hint">
         Set the object up, hit Place, then move over the scene — a translucent
         preview follows the cursor and a click drops it (centre region only).
@@ -3095,26 +3658,11 @@ function PlacePanel({ draft, onDraft, placing, canPlace, name, onToggle, placeMu
           </div>
         )}
       </div>
-      {markerPicks.length > 0 && (
-        <div className="item-field mapscene-place-search">
-          <span className="item-field-label">Markers seen in this region</span>
-          <div className="mapscene-marker-chips">
-            {markerPicks.map((m) => (
-              <button
-                key={m.objectId}
-                type="button"
-                className="mapscene-marker-chip"
-                title={`object ${m.objectId}`}
-                style={{ borderColor: `#${MARKER_COLORS[m.kind].toString(16).padStart(6, '0')}` }}
-                onClick={() => onDraft({ ...draft, objectId: m.objectId, type: m.type })}
-              >
-                <span className="mapscene-info-dot" style={{ background: `#${MARKER_COLORS[m.kind].toString(16).padStart(6, '0')}` }} />
-                {m.kind} {m.objectId}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      </>}
+
+      {/* the loc fields: shared by objects and sound emitters, since an emitter
+          is a placement like any other — only the object it points at differs */}
+      {(kind === 'object' || kind === 'sound') && <>
       <div className="mapscene-side-grid">
         <label className="item-field">
           <span className="item-field-label">Object ID</span>
@@ -3171,13 +3719,14 @@ function PlacePanel({ draft, onDraft, placing, canPlace, name, onToggle, placeMu
           disabled={!canPlace}
           onClick={onToggle}
         >
-          {placing ? 'Cancel (Esc)' : 'Place'}
+          {placing ? 'Cancel (Esc)' : kind === 'sound' ? 'Place emitter' : 'Place'}
         </button>
       </div>
       <label className="mapscene-toggle mapscene-place-multi">
         <input type="checkbox" checked={placeMultiple} onChange={(e) => onPlaceMultiple(e.target.checked)} />
         Place multiple (stay armed after each drop)
       </label>
+      </>}
     </>
   )
 }
@@ -3259,6 +3808,280 @@ function LocList({ entries, names, regionX, regionY, selectedIndex, onPick }: {
         </div>
       </div>
     </div>
+  )
+}
+
+/** CSS colour for a light's packed HSV, through the client's palette. */
+const lightSwatch = (colorHsl: number) => `#${lightRgb(colorHsl).toString(16).padStart(6, '0')}`
+
+/** Region point lights, with click-to-select — the reliable way in, since a
+ *  light buried inside a lantern is a small gizmo to hit. Adding one lives in
+ *  the Place tab, with the rest of the placement tools. */
+function LightList({ lights, regionX, regionY, selectedIndex, onPick }: {
+  lights: RegionLight[]
+  regionX: number
+  regionY: number
+  selectedIndex: number
+  onPick: (index: number) => void
+}) {
+  const [filter, setFilter] = useState('')
+  const rows = useMemo(() => {
+    const all = lights.map((l, i) => ({ l, i }))
+    const q = filter.trim().toLowerCase()
+    if (!q) return all
+    return all.filter(({ l, i }) =>
+      String(i).includes(q)
+      || `${regionX * 64 + (l.x >> 9)},${regionY * 64 + (l.z >> 9)}`.includes(q)
+      || `plane ${l.plane}`.includes(q))
+  }, [lights, filter, regionX, regionY])
+
+  return (
+    <div className="mapscene-loclist mapscene-lightlist">
+      <div className="mapscene-loclist-head">
+        <span className="item-field-label">
+          Point lights — {rows.length}{filter ? ` of ${lights.length}` : ''}
+        </span>
+        {lights.length > 8 && (
+          <input
+            className="mapscene-loclist-filter"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="filter by index, world x,y or plane"
+          />
+        )}
+      </div>
+      <div className="mapscene-loclist-scroll mapscene-lightlist-scroll">
+        {rows.map(({ l, i }) => (
+          <button
+            key={i}
+            type="button"
+            className={`mapscene-loclist-row${i === selectedIndex ? ' active' : ''}`}
+            onClick={() => onPick(i)}
+            title={`radius ${l.size2d + 0.5} tiles, flicker type ${l.type}, height ${l.y}`}
+          >
+            <span className="mapscene-loclist-dot" style={{ background: lightSwatch(l.colorHsl) }} />
+            <span className="mapscene-loclist-name">Light {i} · r{l.size2d}</span>
+            <span className="mapscene-loclist-pos">
+              {regionX * 64 + (l.x >> 9)}, {regionY * 64 + (l.z >> 9)}, {l.plane}
+            </span>
+          </button>
+        ))}
+        {lights.length === 0 && (
+          <p className="mapscene-side-hint">This region's environment has no point lights.</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Flicker phase offset is a 3-bit field stored as `(packed & 0xe0) << 3`, so it
+// only ever takes these eight values.
+const LIGHT_PHASES = [0, 256, 512, 768, 1024, 1280, 1536, 1792]
+
+/** Editable details for a picked point light. Same convention as LocPanel:
+ *  local draft, Apply hands the updated record to the parent. */
+function LightPanel({ index, light, regionX, regionY, canEdit, onPreview, onClose, onApply, onDelete }: {
+  index: number
+  light: RegionLight
+  regionX: number
+  regionY: number
+  canEdit: boolean
+  /** live-preview the draft in the scene (gizmo only — the lighting is baked) */
+  onPreview: (light: RegionLight | null) => void
+  onClose: () => void
+  onApply: (next: RegionLight) => void
+  onDelete: () => void
+}) {
+  const [draft, setDraft] = useState<RegionLight>({ ...light, ranges: [...light.ranges] })
+  const changed = JSON.stringify(draft) !== JSON.stringify(light)
+
+  // Push every keystroke/drag to the scene so the diamond, its reach ring and
+  // its height follow along; dropping the panel puts the committed record back.
+  const previewRef = useRef(onPreview)
+  previewRef.current = onPreview
+  useEffect(() => {
+    previewRef.current(draft)
+  }, [draft])
+  useEffect(() => () => previewRef.current(null), [])
+  const set = <K extends keyof RegionLight>(key: K, value: RegionLight[K]) =>
+    setDraft((d) => ({ ...d, [key]: value }))
+
+  const hue = (draft.colorHsl >> 10) & 0x3f
+  const sat = (draft.colorHsl >> 7) & 0x7
+  const val = draft.colorHsl & 0x7f
+  const setHsv = (h: number, s: number, v: number) =>
+    set('colorHsl', ((h & 0x3f) << 10) | ((s & 0x7) << 7) | (v & 0x7f))
+
+  // stored x/z are region-local world units (the file keeps them as u16 << 2),
+  // so they split cleanly into a tile and a sub-tile offset
+  const tileX = draft.x >> 9
+  const tileZ = draft.z >> 9
+  const offX = draft.x & 511
+  const offZ = draft.z & 511
+
+  // Labels stay short enough to fit a half-width cell — `.item-field-label`
+  // ellipsises anything longer — so every explanation lives in the tooltip.
+  const slider = (label: string, title: string, value: number, max: number, onChange: (v: number) => void) => (
+    <label className="item-field is-wide" title={title}>
+      <span className="item-field-label">{label}</span>
+      {canEdit ? (
+        <span className="mapscene-light-slider">
+          <input type="range" min={0} max={max} step={1} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+          <NumberInput value={value} onChange={onChange} min={0} max={max} />
+        </span>
+      ) : <span className="mapscene-field-value">{value}</span>}
+    </label>
+  )
+  const number = (label: string, title: string, value: number, max: number, onChange: (v: number) => void, step = 1) => (
+    <label className="item-field" title={title}>
+      <span className="item-field-label">{label}</span>
+      {canEdit
+        ? <NumberInput value={value} onChange={(v) => onChange(Math.round(v / step) * step)} min={0} max={max} />
+        : <span className="mapscene-field-value">{value}</span>}
+    </label>
+  )
+
+  return (
+    <>
+      <div className="mapscene-side-head">
+        <span className="enum-title mapscene-side-title">
+          <span className="mapscene-info-dot" style={{ background: lightSwatch(draft.colorHsl) }} />
+          Point light <span className="mapscene-side-id">#{index}</span>
+        </span>
+        <div className="item-badges">
+          <span className="item-id-badge">world {regionX * 64 + tileX}, {regionY * 64 + tileZ}</span>
+          <span className="item-id-badge">plane {draft.plane}</span>
+          <span className="item-id-badge">reach {(draft.size2d + 0.5).toFixed(1)} tiles</span>
+          <span className="item-id-badge">raw {draft.x}, {draft.z}, {draft.y}</span>
+        </div>
+      </div>
+      <p className="mapscene-side-hint">
+        Edits move the gizmo live. The light itself is baked into every object
+        around it, so the scene only re-lights on Apply{changed ? ' — pending now' : ''}.
+        {!canEdit && ' This region\'s environment file could not be loaded, so the light is read-only.'}
+      </p>
+
+      <div className="mapscene-side-grid is-compact">
+        <div className="item-field is-wide" title={`packed HSV ${draft.colorHsl}`}>
+          <span className="item-field-label">Colour — HSV {hue}/{sat}/{val}</span>
+          <div className="mapscene-light-colour">
+            <span className="mapscene-light-swatch" style={{ background: lightSwatch(draft.colorHsl) }} />
+            <span className="mapscene-field-value">{lightSwatch(draft.colorHsl)}</span>
+          </div>
+        </div>
+        {slider('Hue', 'Palette hue, 0–63', hue, 63, (v) => setHsv(v, sat, val))}
+        {slider('Sat', 'Saturation, 0–7 (3 bits in the packed colour)', sat, 7, (v) => setHsv(hue, v, val))}
+        {slider('Value', 'Brightness, 0–127', val, 127, (v) => setHsv(hue, sat, v))}
+        <div className="item-field" title="The plane this light belongs to">
+          <span className="item-field-label">Plane</span>
+          {canEdit ? (
+            <div className="mapscene-btn-row">
+              {[0, 1, 2, 3].map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  className={`zoom-btn${draft.plane === p ? ' active' : ''}`}
+                  onClick={() => set('plane', p)}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          ) : <span className="mapscene-field-value">{draft.plane}</span>}
+        </div>
+        <div className="item-field" title="Extra planes this light also registers on (its grow flags)">
+          <span className="item-field-label">Grows</span>
+          {canEdit ? (
+            <div className="mapscene-light-flags">
+              <label className="mapscene-toggle" title="Also light the planes above">
+                <input type="checkbox" checked={draft.growsUpwards} onChange={(e) => set('growsUpwards', e.target.checked)} />
+                up
+              </label>
+              <label className="mapscene-toggle" title="Also light the planes below">
+                <input type="checkbox" checked={draft.growsDownwards} onChange={(e) => set('growsDownwards', e.target.checked)} />
+                down
+              </label>
+            </div>
+          ) : (
+            <span className="mapscene-field-value">
+              {draft.growsUpwards || draft.growsDownwards
+                ? [draft.growsUpwards && 'up', draft.growsDownwards && 'down'].filter(Boolean).join(' + ')
+                : 'none'}
+            </span>
+          )}
+        </div>
+        {number('Tile X', 'Region-local tile, 0–63', tileX, 63, (v) => set('x', (Math.min(v, 63) << 9) | offX))}
+        {number('Tile Y', 'Region-local tile, 0–63', tileZ, 63, (v) => set('z', (Math.min(v, 63) << 9) | offZ))}
+        {number('Offset X', 'Position within the tile, 0–508 in steps of 4 (the file stores x/z as u16 << 2)', offX, 508, (v) => set('x', (tileX << 9) | (v & ~3)), 4)}
+        {number('Offset Y', 'Position within the tile, 0–508 in steps of 4', offZ, 508, (v) => set('z', (tileZ << 9) | (v & ~3)), 4)}
+        {number('Height', "Height above this tile's ground in world units, steps of 4", draft.y, 262140, (v) => set('y', v), 4)}
+        <label className="item-field" title="Radius basis — reach = size × 512 + 256 world units. Changing it rewrites the footprint rows.">
+          <span className="item-field-label">Size</span>
+          {canEdit ? (
+            <NumberInput
+              value={draft.size2d}
+              min={0}
+              max={63}
+              onChange={(v) => setDraft((d) => ({ ...d, size2d: v, ranges: lightRangesFor(v) }))}
+            />
+          ) : <span className="mapscene-field-value">{draft.size2d}</span>}
+        </label>
+        <div
+          className="item-field"
+          title="0–30 built-in presets, 31 = a config/light_intensities id. Data only here: our bake uses full intensity, like the client with flickering off."
+        >
+          <span className="item-field-label">Flicker</span>
+          {canEdit ? (
+            <NumberInput value={draft.type} min={0} max={31} onChange={(v) => set('type', v)} />
+          ) : <span className="mapscene-field-value">{draft.type}</span>}
+        </div>
+        <div className="item-field" title="Flicker phase offset — a 3-bit field stored as (packed & 0xe0) << 3">
+          <span className="item-field-label">Phase</span>
+          {canEdit ? (
+            <select
+              className="item-stackable-select"
+              value={draft.rotationOffset}
+              onChange={(e) => set('rotationOffset', Number(e.target.value))}
+            >
+              {LIGHT_PHASES.map((p, i) => <option key={p} value={p}>{i} — {p}</option>)}
+            </select>
+          ) : <span className="mapscene-field-value">{draft.rotationOffset}</span>}
+        </div>
+        {draft.type === 31 && (
+          <div className="item-field" title="config/light_intensities record driving this light's flicker">
+            <span className="item-field-label">Intensity id</span>
+            {canEdit ? (
+              <NumberInput value={draft.lightTypeId ?? 0} min={0} max={65535} onChange={(v) => set('lightTypeId', v)} />
+            ) : <span className="mapscene-field-value">{draft.lightTypeId ?? '—'}</span>}
+          </div>
+        )}
+        <div className="item-field is-wide" title="Per-tile-row spans as offset+length — rewritten when the size changes">
+          <span className="item-field-label">Footprint</span>
+          <span className="mapscene-field-value mapscene-light-ranges">
+            {draft.ranges.map((s) => `${s >>> 8}+${s & 0xff}`).join(' ')}
+          </span>
+        </div>
+      </div>
+
+      <div className="mapscene-side-actions">
+        {canEdit && (
+          <button
+            type="button"
+            className="save-bar-save"
+            disabled={!changed}
+            onClick={() => onApply({ ...draft, ranges: [...draft.ranges] })}
+          >
+            Apply
+          </button>
+        )}
+        {canEdit && (
+          <button type="button" className="save-bar-discard mapscene-delete-btn" onClick={onDelete}>
+            Delete light
+          </button>
+        )}
+        <button type="button" className="save-bar-discard" onClick={onClose}>Close</button>
+      </div>
+    </>
   )
 }
 

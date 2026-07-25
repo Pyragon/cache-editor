@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import type { MapTerrain } from '../loaders/maps'
 import { SIZE, tileIndex } from '../loaders/maps'
 import type { ModelData } from '../loaders/models'
-import { hslToRgb, parseModel, applyRecolor, computeModelLitRgb, DEFAULT_MODEL_SUN, type ModelSun } from '../loaders/models'
+import { hslToRgb, parseModel, applyRecolor, computeModelLitRgb, DEFAULT_MODEL_SUN, type ModelSun, type PointLight } from '../loaders/models'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { makeUVWriter } from './modelUVs'
 import type { UVWriter } from './modelUVs'
@@ -1886,7 +1886,7 @@ class ModelAccumulator {
     model: ModelData,
     matrix: THREE.Matrix4,
     owner = -1,
-    light?: { sun?: ModelSun },
+    light?: { sun?: ModelSun; points?: PointLight[] },
     blendTypeOf?: (texId: number) => number,
     hdrOf?: (texId: number) => number,
     // Transparent faces go here instead of the shared buckets — the client
@@ -1902,7 +1902,10 @@ class ModelAccumulator {
     // WORLD space, so lighting depends on the loc's rotation — computed per
     // placement (the world normal matrix isn't shared across placements).
     const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
-    const lit = computeModelLitRgb(model, normalMat, light?.sun)
+    const points = light?.points?.length
+      ? { lights: light.points, matrix: matrix.elements, upscale }
+      : undefined
+    const lit = computeModelLitRgb(model, normalMat, light?.sun, points)
     if (hdrOf) unlitHdrFaces(model, lit, hdrOf)
     for (let f = 0; f < model.faceCount; f++) {
       if (model.faceAlpha[f] === -1) continue
@@ -1977,6 +1980,8 @@ export type AnimatedLoc = {
   matrix: THREE.Matrix4
   animationId: number
   owner: LocRef
+  /** the region point lights this placement is lit by (already picked, ≤4) */
+  points?: PointLight[]
 }
 
 /** A built animatable loc: its three.js mesh (geometry in model-local space —
@@ -2000,11 +2005,13 @@ export async function buildAnimatedLocMesh(
   assets: LocAssets,
   sun?: ModelSun,
   owner?: LocRef,
+  pointLights?: PointLight[],
 ): Promise<AnimatedLocMesh | null> {
   const upscale = model.version < 13 ? 4 : 1
   const uvWriter = makeUVWriter(model)
   const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
-  const lit = computeModelLitRgb(model, normalMat, sun)
+  const lit = computeModelLitRgb(model, normalMat, sun,
+    pointLights?.length ? { lights: pointLights, matrix: matrix.elements, upscale } : undefined)
   await assets.primeBlendTypes(model)
   unlitHdrFaces(model, lit, (t) => assets.hdrMultiplierOf(t))
 
@@ -2242,6 +2249,292 @@ export function buildMarkersMesh(markers: MarkerInfo[]): THREE.Group | null {
   return group
 }
 
+/** One `lights[]` record — the client's `Class287` constructor, field for field. */
+export type RegionLight = {
+  /** the light's own plane; `grows*` extend the range it registers on */
+  plane: number
+  growsUpwards: boolean
+  growsDownwards: boolean
+  /** region-local world units (the record stores `u16 << 2`) */
+  x: number
+  z: number
+  /** height, world units */
+  y: number
+  size2d: number
+  /** Per-tile-row spans of the light's footprint: `s >>> 8` is the row's x
+   *  offset, `s & 0xff` its length. `size2d*2+1` entries. NOT a radius — the
+   *  client only uses these to register the light into its per-tile grid. */
+  ranges: number[]
+  /** packed HSV (not HSL) — see `lightHsvToHsl16` */
+  colorHsl: number
+  /** flicker preset 0-30, or 31 = "use `lightTypeId`" (config/light_intensities) */
+  type: number
+  /** flicker phase offset, `(packed & 0xe0) << 3` */
+  rotationOffset: number
+  lightTypeId?: number
+}
+
+// SceneObjectManager.anInt2592 / anInt2594 — the scene's tile shift and half-tile.
+const LIGHT_TILE_SHIFT = 9
+const LIGHT_HALF_TILE = (1 << LIGHT_TILE_SHIFT) >> 1
+
+/**
+ * `VarDefinitions.method6362` — a light's stored colour is packed HSV, and the
+ * client converts it to the standard HSL16 palette index before the lookup in
+ * `Class335.HSL_TO_RGB`. Straight `hslToRgb(colorHsl)` gives the wrong colour.
+ */
+export function lightHsvToHsl16(hsv: number): number {
+  const hue = (hsv >> 10) & 0x3f
+  const value = hsv & 0x7f
+  let sat = (hsv >> 3) & 0x70
+  sat = value <= 64 ? (value * sat) >> 7 : (sat * (127 - value)) >> 7
+  const sum = sat + value
+  const s = sum !== 0 ? ((sat << 8) / sum) | 0 : sat << 1
+  return ((hue << 10) | ((s >> 4) << 7) | sum) & 0xffff
+}
+
+/** A light's reach in world units — `Class287` line 52. */
+export function lightRadius(rec: RegionLight): number {
+  return (rec.size2d << LIGHT_TILE_SHIFT) + LIGHT_HALF_TILE
+}
+
+/** A light's rendered colour from its stored `colorHsl` (packed HSV -> HSL16
+ *  -> palette RGB). */
+export function lightRgb(colorHsl: number): number {
+  return hslToRgb(lightHsvToHsl16(colorHsl))
+}
+
+/**
+ * Where a light record sits in scene space. Its stored `y` is a height ABOVE
+ * its tile, not a render coordinate: Class329_Sub1 repositions the light to
+ * `tileHeights[plane][tx][tz] - y`. Terrain heights are negative-up, so
+ * scene y = -(ground - y) = -ground + y.
+ */
+export function lightScenePos(rec: RegionLight, heightsAll: Int32Array[]): { x: number; y: number; z: number; ground: number } {
+  const tx = Math.min(Math.max(rec.x >> LIGHT_TILE_SHIFT, 0), VERTS - 1)
+  const tz = Math.min(Math.max(rec.z >> LIGHT_TILE_SHIFT, 0), VERTS - 1)
+  const ground = heightsAll[Math.min(Math.max(rec.plane, 0), heightsAll.length - 1)]?.[tx * VERTS + tz] ?? 0
+  // world -> scene, the same flip loc placements use
+  return { x: rec.x, y: -ground + rec.y, z: -rec.z, ground: -ground }
+}
+
+/**
+ * Footprint spans for a light of the given `size2d`, as the editor writes them
+ * when a light is created or resized: one row per tile of the bounding box,
+ * each covering the full width (`offset 0, length size2d*2+1`).
+ *
+ * The real records carry hand-authored shapes — some are full squares like
+ * this, others carve out a rough circle (e.g. size2d 3 dumps as
+ * `[0, 261 x5, 0]` = a 5-wide band inside a 7x7 box). The client only uses
+ * them to decide which tiles the light registers on, so a full box is the
+ * safe, maximal choice; existing records keep whatever they already had.
+ */
+export function lightRangesFor(size2d: number): number[] {
+  const rows = size2d * 2 + 1
+  return new Array(rows).fill(rows)
+}
+
+/** Per-tile point lights for a region, mirroring the client's tile grid. */
+export type LightGrid = {
+  /** The ≤4 lights the client would bind for an object covering these tiles. */
+  at(plane: number, x0: number, y0: number, x1: number, y1: number): PointLight[]
+  /** how many light records went in (0 = nothing to bake) */
+  count: number
+}
+
+const NO_LIGHTS: PointLight[] = []
+
+/**
+ * Build the region's point-light lookup, following `Class287` +
+ * `SceneObjectManager.method3441`:
+ *
+ *  - radius  = `(size2d << 9) + 256` world units (`Class287` line 52)
+ *  - colour  = HSV -> HSL16 -> palette
+ *  - footprint = one tile row per `ranges[]` entry, registered on every plane
+ *    from the light's own up/down to the ones its grow flags reach
+ *
+ * The client caps each tile at 4 lights (its grid packs four 16-bit ids into a
+ * long), and an object takes the first 4 distinct lights across its footprint.
+ *
+ * Intensity is baked at 1.0, which is what the client uses with "Flickering
+ * effects" off — every built-in preset has `ticker + surrounding == 2048`, so
+ * the unflickered value is exactly 1.0. Animating it would need the lights as
+ * shader uniforms rather than baked vertex colours.
+ */
+export function buildLightGrid(
+  regionLights: RegionLight[] | undefined,
+  heightsAll: Int32Array[],
+  planeCount = 4,
+): LightGrid {
+  if (!regionLights?.length) return { at: () => NO_LIGHTS, count: 0 }
+  const cells: (PointLight[] | undefined)[] = new Array(planeCount * SIZE * SIZE)
+  let count = 0
+
+  for (const rec of regionLights) {
+    if (!rec.ranges?.length) continue
+    const radius = lightRadius(rec)
+    const rgb = lightRgb(rec.colorHsl)
+    const pos = lightScenePos(rec, heightsAll)
+    const light: PointLight = {
+      x: pos.x,
+      y: pos.y,
+      z: pos.z,
+      radiusSq: radius * radius,
+      r: ((rgb >> 16) & 0xff) / 255,
+      g: ((rgb >> 8) & 0xff) / 255,
+      b: (rgb & 0xff) / 255,
+    }
+    count++
+
+    const p0 = rec.growsDownwards ? 0 : rec.plane
+    const p1 = rec.growsUpwards ? planeCount - 1 : rec.plane
+    const rowBase = (rec.z - radius + LIGHT_HALF_TILE) >> LIGHT_TILE_SHIFT
+    const colBase = (rec.x - radius + LIGHT_HALF_TILE) >> LIGHT_TILE_SHIFT
+    for (let p = Math.max(p0, 0); p <= Math.min(p1, planeCount - 1); p++) {
+      for (let row = 0; row < rec.ranges.length; row++) {
+        const ty = rowBase + row
+        if (ty < 0 || ty >= SIZE) continue
+        // Class287 clamps each span into the footprint as it decodes; cryogen
+        // dumps the raw shorts, so apply it here.
+        const span = rec.ranges[row]
+        const rows = rec.ranges.length
+        const offset = Math.min(span >>> 8, rows - 1)
+        const length = Math.min(span & 0xff, rows - offset)
+        const from = Math.max(colBase + offset, 0)
+        const to = Math.min(colBase + offset + length - 1, SIZE - 1)
+        for (let tx = from; tx <= to; tx++) {
+          const key = (p * SIZE + tx) * SIZE + ty
+          const list = cells[key] ?? (cells[key] = [])
+          if (list.length < 4) list.push(light)
+        }
+      }
+    }
+  }
+
+  return {
+    count,
+    at(plane, x0, y0, x1, y1) {
+      if (plane < 0 || plane >= planeCount) return NO_LIGHTS
+      let out: PointLight[] | null = null
+      for (let tx = Math.max(x0, 0); tx <= Math.min(x1, SIZE - 1); tx++) {
+        for (let ty = Math.max(y0, 0); ty <= Math.min(y1, SIZE - 1); ty++) {
+          const list = cells[(plane * SIZE + tx) * SIZE + ty]
+          if (!list) continue
+          for (const l of list) {
+            if (!out) out = []
+            else if (out.includes(l)) continue
+            out.push(l)
+            if (out.length === 4) return out
+          }
+        }
+      }
+      return out ?? NO_LIGHTS
+    },
+  }
+}
+
+/**
+ * Editor gizmos for a region's point lights: a floating diamond in the light's
+ * own colour, a stem down to the ground, and a ring at its radius.
+ *
+ * These DO depth-test (they just don't write depth). An earlier version drew
+ * them x-ray so a light buried inside the loc it lights stayed reachable — but
+ * picking raycasts geometry, not the depth buffer, so `pickLight` finds an
+ * occluded light either way, and a solid flame-orange octahedron shining
+ * through the floor reads as stray scene geometry. Only the SELECTED light's
+ * ring and stalk stay x-ray, so you can always see what you have in hand.
+ *
+ * `indices` are positions in the region's `lights[]` array; the diamonds mesh
+ * carries them so a raycast (8 triangles per diamond -> `faceIndex >> 3`)
+ * resolves back to the record being edited.
+ */
+export function buildLightsMesh(
+  lights: RegionLight[],
+  heightsAll: Int32Array[],
+  indices: number[],
+): THREE.Group | null {
+  if (indices.length === 0) return null
+  const SIZE_U = 44
+  const ORDER = 4000
+  const group = new THREE.Group()
+  const o = [
+    [SIZE_U, 0, 0], [-SIZE_U, 0, 0], [0, SIZE_U, 0], [0, -SIZE_U, 0], [0, 0, SIZE_U], [0, 0, -SIZE_U],
+  ]
+  const faces = [
+    [2, 0, 4], [2, 4, 1], [2, 1, 5], [2, 5, 0],
+    [3, 4, 0], [3, 1, 4], [3, 5, 1], [3, 0, 5],
+  ]
+  const positions: number[] = []
+  const colors: number[] = []
+  const stems: number[] = []
+  const stemColors: number[] = []
+  const rings: number[] = []
+  const ringColors: number[] = []
+  const RING_SEGMENTS = 24
+
+  for (const index of indices) {
+    const rec = lights[index]
+    if (!rec) continue
+    const p = lightScenePos(rec, heightsAll)
+    const rgb = lightRgb(rec.colorHsl)
+    // gizmos are tint-only overlays, so keep them readable even for a very
+    // dark light colour: lift the floor without washing out the hue
+    const r = Math.max(((rgb >> 16) & 0xff) / 255, 0.15)
+    const g = Math.max(((rgb >> 8) & 0xff) / 255, 0.15)
+    const b = Math.max((rgb & 0xff) / 255, 0.15)
+    for (const [a, b2, c] of faces) {
+      for (const vi of [a, b2, c]) {
+        positions.push(p.x + o[vi][0], p.y + o[vi][1], p.z + o[vi][2])
+        colors.push(r, g, b)
+      }
+    }
+    stems.push(p.x, p.y, p.z, p.x, p.ground, p.z)
+    for (let i = 0; i < 2; i++) stemColors.push(r, g, b)
+    // radius ring at the light's own height — how far it actually reaches
+    const radius = lightRadius(rec)
+    for (let s = 0; s < RING_SEGMENTS; s++) {
+      const a0 = (s / RING_SEGMENTS) * Math.PI * 2
+      const a1 = ((s + 1) / RING_SEGMENTS) * Math.PI * 2
+      rings.push(
+        p.x + Math.cos(a0) * radius, p.y, p.z + Math.sin(a0) * radius,
+        p.x + Math.cos(a1) * radius, p.y, p.z + Math.sin(a1) * radius,
+      )
+      for (let i = 0; i < 2; i++) ringColors.push(r, g, b)
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+  geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3))
+  const diamonds = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+    vertexColors: true, depthWrite: false, fog: false,
+  }))
+  diamonds.renderOrder = ORDER
+  diamonds.userData.lights = lights
+  diamonds.userData.lightIndices = indices
+  group.add(diamonds)
+
+  const stemGeometry = new THREE.BufferGeometry()
+  stemGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(stems), 3))
+  stemGeometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(stemColors), 3))
+  const stemLines = new THREE.LineSegments(stemGeometry, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, fog: false,
+  }))
+  stemLines.renderOrder = ORDER
+  group.add(stemLines)
+
+  const ringGeometry = new THREE.BufferGeometry()
+  ringGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(rings), 3))
+  ringGeometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(ringColors), 3))
+  const ringLines = new THREE.LineSegments(ringGeometry, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.3, depthWrite: false, fog: false,
+  }))
+  ringLines.renderOrder = ORDER
+  group.add(ringLines)
+
+  return group
+}
+
 /** Region environment JSON (map_environments/<regionId>.json — the terrain
  *  archive's environment tail, dumped by cryogen MapEnvironmentDumper). */
 export type RegionEnvironment = {
@@ -2257,13 +2550,26 @@ export type RegionEnvironment = {
     cubeTexture?: number[]
   }
   skybox?: { id: number; x: number; y: number; z: number; rotation: number }
-  lights?: unknown[]
+  lights?: RegionLight[]
   /** Bloom filter parameters for this region (map-environment opcode 2 ->
    *  darkan `Atmosphere`). Each is a byte * 8/255, so 0..8. They feed the
    *  FilterBloom `params` uniform: threshold = params.x, strength = params.y,
    *  whitePoint = params.z. Absent for regions that don't override the
    *  defaults of 1.0 / 0.25 / 1.0. */
   hdr?: { whitePoint: number; bloomStrength: number; bloomThreshold: number }
+  /** Static lighting grid (opcode 129), carried verbatim as base64 by the
+   *  dumper — we don't render it, and must not lose it on save. */
+  lightingGrid?: string
+  /** The order this region's tail listed its opcodes in. The cache isn't
+   *  consistently ascending, and cryogen re-emits in this order so an unedited
+   *  region repacks to identical bytes. Opaque here — pass it through. */
+  opcodeOrder?: number[]
+  /** Legacy marker from the first environment dump (grid present but its bytes
+   *  not recorded). cryogen refuses to pack such a file; kept on the type so a
+   *  save round-trips it instead of quietly dropping the warning flag. */
+  hasLightingGrid?: boolean
+  regionX?: number
+  regionY?: number
 }
 
 export async function loadRegionEnvironment(
@@ -2277,6 +2583,27 @@ export async function loadRegionEnvironment(
   } catch {
     return null
   }
+}
+
+/**
+ * Write a region's environment JSON back, creating the folder/file if the dump
+ * doesn't have one yet (a region can have lights added where it had no
+ * environment tail at all).
+ *
+ * NOTE: cryogen dumps map_environments as read-only editor data — its map
+ * repacker re-encodes only the tile section, so edits here reach the dump but
+ * not the packed cache until the dumper learns to round-trip the tail.
+ */
+export async function saveRegionEnvironment(
+  rootHandle: FileSystemDirectoryHandle,
+  regionId: number,
+  env: RegionEnvironment,
+): Promise<void> {
+  const dir = await rootHandle.getDirectoryHandle('map_environments', { create: true })
+  const fileHandle = await dir.getFileHandle(`${regionId}.json`, { create: true })
+  const writable = await fileHandle.createWritable()
+  await writable.write(JSON.stringify(env))
+  await writable.close()
 }
 
 /** The region's sky dome (config/skyboxes → archiveId model, textured with
@@ -2344,6 +2671,7 @@ export async function buildLocsMesh(
   heightsAll: Int32Array[],
   assets: LocAssets,
   onProgress?: (done: number, total: number) => void,
+  lightGrid?: LightGrid,
 ): Promise<{ mesh: THREE.Mesh | null; transparentLocs: THREE.Mesh[]; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[] }> {
   const acc = new ModelAccumulator()
   const markers: MarkerInfo[] = []
@@ -2418,6 +2746,12 @@ export async function buildLocsMesh(
     const avgHeight = (hAt(xA, yA) + hAt(xB, yA) + hAt(xA, yB) + hAt(xB, yB)) >> 2
     const sceneX = (x << 9) + (sizeX << 8)
     const sceneY = (y << 9) + (sizeY << 8)
+    // the ≤4 region lights this placement is bound to, picked over its footprint
+    // exactly as GraphNode_Sub1_Sub1.method13036 does
+    const points = lightGrid?.count
+      ? lightGrid.at(decodedPlane, x, y, x + sizeX - 1, y + sizeY - 1)
+      : undefined
+
 
     // ObjectType.getStationaryModel applies, in model space and this order:
     // mirror (negate RS z) → rotate 90°·r (RS x'=x·cos+z·sin ⇒ three −θ) →
@@ -2481,12 +2815,13 @@ export async function buildLocsMesh(
             matrix: matrix.clone(),
             animationId: def.animations![0],
             owner: { objectId, shape, rotation, x, y, plane: decodedPlane },
+            points,
           })
         } else {
           // resolve this model's texture blendTypes so addModel can split
           // opaque vs transparent faces synchronously
           await assets.primeBlendTypes(m)
-          acc.addModel(m, matrix, locRefs.length, undefined, (t) => assets.blendTypeOf(t), (t) => assets.hdrMultiplierOf(t), locTrans)
+          acc.addModel(m, matrix, locRefs.length, points ? { points } : undefined, (t) => assets.blendTypeOf(t), (t) => assets.hdrMultiplierOf(t), locTrans)
         }
       }
     }

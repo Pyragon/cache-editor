@@ -183,6 +183,32 @@ export const DEFAULT_MODEL_SUN: ModelSun = {
 }
 
 /**
+ * A region point light, in SCENE space and ready for the shader's diffuse term.
+ * Built from a map-environment light record — see `buildLightGrid` in mapScene.
+ */
+export type PointLight = {
+  x: number
+  y: number
+  z: number
+  /** radius², scene units² — the shader's `PointLightsPosAndRadiusSq.w` */
+  radiusSq: number
+  /** diffuse colour already scaled by the light's flicker intensity, 0..1 */
+  r: number
+  g: number
+  b: number
+}
+
+/** Everything `computeModelLitRgb` needs to bake point lights for a placement. */
+export type PointLightBake = {
+  /** the ≤4 lights the client would bind for this object */
+  lights: PointLight[]
+  /** the placement's world matrix, a THREE.Matrix4 `.elements` (column-major 16) */
+  matrix: ArrayLike<number>
+  /** vertex upscale applied before the matrix (models below v13 use 4) */
+  upscale: number
+}
+
+/**
  * Per-face-vertex LINEAR RGB (Gouraud) for a placed loc, matching the client's
  * "Model" shader. `normalMat` is the loc's world normal matrix as a THREE.Matrix3
  * `.elements` array (column-major 9). Returns `faceCount·9` linear RGB.
@@ -191,6 +217,7 @@ export function computeModelLitRgb(
   model: LitModel,
   normalMat: ArrayLike<number>,
   sun: ModelSun = DEFAULT_MODEL_SUN,
+  points?: PointLightBake,
 ): Float32Array {
   const sl = Math.hypot(sun.dir[0], sun.dir[1], sun.dir[2]) || 1
   const sdx = sun.dir[0] / sl, sdy = sun.dir[1] / sl, sdz = sun.dir[2] / sl
@@ -215,6 +242,30 @@ export function computeModelLitRgb(
     nsx[c] += dx; nsy[c] += dy; nsz[c] += dz
   }
 
+  // Point lights are evaluated against the vertex's SCENE position. The client
+  // instead pulls each light back into model space with the inverse world
+  // matrix (MeshRasterizer_Sub3 line 3057) — same result, and doing it this way
+  // costs one transform per vertex instead of an inverse per placement.
+  const lights = points?.lights
+  const nLights = lights ? Math.min(lights.length, 4) : 0
+  let psx: Float64Array | null = null
+  let psy: Float64Array | null = null
+  let psz: Float64Array | null = null
+  if (nLights > 0 && points) {
+    const m4 = points.matrix
+    const up = points.upscale
+    psx = new Float64Array(vertexCount)
+    psy = new Float64Array(vertexCount)
+    psz = new Float64Array(vertexCount)
+    for (let v = 0; v < vertexCount; v++) {
+      // same RS→scene flip the accumulator applies before the matrix
+      const lx = vertexX[v] * up, ly = -vertexY[v] * up, lz = -vertexZ[v] * up
+      psx[v] = m4[0] * lx + m4[4] * ly + m4[8] * lz + m4[12]
+      psy[v] = m4[1] * lx + m4[5] * ly + m4[9] * lz + m4[13]
+      psz[v] = m4[2] * lx + m4[6] * ly + m4[10] * lz + m4[14]
+    }
+  }
+
   const out = new Float32Array(faceCount * 9)
   const idx = [0, 0, 0]
   for (let f = 0; f < faceCount; f++) {
@@ -233,10 +284,31 @@ export function computeModelLitRgb(
       const wl = Math.hypot(wx, wy, wz) || 1
       wx /= wl; wy /= wl; wz /= wl
       const hl = Math.min(1, Math.max(0, (sdx * wx + sdy * wy + sdz * wz) * 0.5 + 0.5))
+      let dr = hl * (sr + ar * 0.5) + ar * 0.5
+      let dg = hl * (sg + ag * 0.5) + ag * 0.5
+      let db = hl * (sb + ab * 0.5) + ab * 0.5
+      // glsl/1_12.vert: attenuation is radius²/dist² gated by N·L, summed into
+      // the SAME diffuse term as the sun before the base colour multiplies it.
+      if (nLights > 0 && psx && psy && psz) {
+        const px = psx[v], py = psy[v], pz = psz[v]
+        for (let li = 0; li < nLights; li++) {
+          const L = lights![li]
+          const vx2 = L.x - px, vy2 = L.y - py, vz2 = L.z - pz
+          const d2 = vx2 * vx2 + vy2 * vy2 + vz2 * vz2
+          if (d2 <= 0) continue
+          const inv = 1 / Math.sqrt(d2)
+          const ndotl = Math.min(1, Math.max(0, (wx * vx2 + wy * vy2 + wz * vz2) * inv))
+          if (ndotl <= 0) continue
+          const it = (L.radiusSq / d2) * ndotl
+          dr += L.r * it
+          dg += L.g * it
+          db += L.b * it
+        }
+      }
       const base = (f * 3 + k) * 3
-      out[base] = srgbToLinear(Math.min(1, baseR * (hl * (sr + ar * 0.5) + ar * 0.5)))
-      out[base + 1] = srgbToLinear(Math.min(1, baseG * (hl * (sg + ag * 0.5) + ag * 0.5)))
-      out[base + 2] = srgbToLinear(Math.min(1, baseB * (hl * (sb + ab * 0.5) + ab * 0.5)))
+      out[base] = srgbToLinear(Math.min(1, baseR * dr))
+      out[base + 1] = srgbToLinear(Math.min(1, baseG * dg))
+      out[base + 2] = srgbToLinear(Math.min(1, baseB * db))
     }
   }
   return out

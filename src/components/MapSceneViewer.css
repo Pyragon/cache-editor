@@ -73,7 +73,56 @@
 
 .mapscene-gamma input[type='range'] {
   width: 90px;
-  accent-color: var(--electric-blue-bright, #2f8fff);
+}
+
+/* Sliders: a thin track with a round thumb. The platform default renders as a
+   white box with a square thumb here, which reads like a text input. */
+.mapscene input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.mapscene input[type='range']::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.mapscene input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px; /* centres the thumb on the 3px track */
+  border: none;
+  border-radius: 50%;
+  background: var(--electric-blue-bright, #2f8fff);
+}
+
+.mapscene input[type='range']:hover::-webkit-slider-thumb,
+.mapscene input[type='range']:focus-visible::-webkit-slider-thumb {
+  background: #6bb2ff;
+}
+
+.mapscene input[type='range']::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.mapscene input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  background: var(--electric-blue-bright, #2f8fff);
+}
+
+.mapscene input[type='range']:focus {
+  outline: none;
 }
 
 .mapscene-gamma-value {
@@ -153,10 +202,17 @@
   padding: 6px;
 }
 
-/* selection side panel — inspect/edit the picked object */
+/* selection side panel — inspect/edit the picked object.
+   Width: the old fixed 300px plus a tenth of the view, i.e. the canvas gives up
+   10% of its width — the panel's field rows were being cut off.
+   Height is capped to the canvas (.mapscene-mount's min-height) so a long panel
+   (the point-light editor) scrolls inside itself instead of stretching the whole
+   content tab and putting a scrollbar on the page. */
 .mapscene-side {
   position: relative;
-  width: 300px;
+  width: calc(300px + 10%);
+  max-width: 560px;
+  max-height: 980px;
   flex-shrink: 0;
   margin-left: 8px;
   padding: 12px 14px;
@@ -165,6 +221,7 @@
   background: rgba(10, 12, 18, 0.6);
   font-size: 12px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .mapscene-side-hint {
@@ -216,6 +273,32 @@
 .mapscene-side-grid .item-field-input {
   width: 100%;
   box-sizing: border-box;
+}
+
+/* Two columns of short fields (the point-light editor): its values are all
+   small numbers, and one field per row made the panel far longer than the
+   canvas. `.item-field-label` clips with an ellipsis, so labels here stay
+   short and the explanations live in each cell's tooltip. */
+.mapscene-side-grid.is-compact {
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.mapscene-side-grid.is-compact .item-field {
+  padding: 6px 9px;
+  min-width: 0; /* let the label ellipsis instead of widening the column */
+}
+
+.mapscene-side-grid.is-compact .item-field.is-wide {
+  grid-column: 1 / -1;
+}
+
+.mapscene-side-grid.is-compact .item-field-input {
+  font-size: 13px;
+}
+
+.mapscene-side-grid.is-compact .mapscene-light-slider .num-input {
+  width: 48px;
 }
 
 .mapscene-field-value {
@@ -325,6 +408,21 @@
 .mapscene-marker-chip:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.07);
+}
+
+/* the View tab's chips just report what's in the region — nothing to click */
+.mapscene-marker-chip.is-static {
+  cursor: default;
+}
+
+.mapscene-marker-chip.is-static:hover {
+  color: var(--text-dim, #8a90a0);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.mapscene-marker-chip.active {
+  color: var(--text);
+  background: rgba(47, 143, 255, 0.14);
 }
 
 .mapscene-place-multi {
@@ -444,6 +542,78 @@
   height: 7px;
   border-radius: 2px;
   flex-shrink: 0;
+}
+
+/* Point-light list: the object list's row styling, but auto-height and not
+   virtualised — a region carries a few dozen lights at most. */
+.mapscene-lightlist {
+  margin-top: 16px;
+}
+
+.mapscene-lightlist-scroll {
+  height: auto;
+  max-height: 200px;
+  padding: 3px 0;
+}
+
+.mapscene-lightlist-scroll .mapscene-loclist-row {
+  width: 100%;
+  height: 24px;
+}
+
+.mapscene-lightlist-scroll .mapscene-side-hint {
+  margin: 8px;
+}
+
+/* View tab's "markers in this region" summary */
+.mapscene-markerbox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+/* Point-light panel fields */
+.mapscene-light-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mapscene-light-slider input[type='range'] {
+  flex: 1;
+  min-width: 0;
+}
+
+.mapscene-light-slider .num-input {
+  width: 66px;
+  flex-shrink: 0;
+}
+
+.mapscene-light-colour {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mapscene-light-swatch {
+  width: 26px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.mapscene-light-flags {
+  display: flex;
+  gap: 12px;
+}
+
+.mapscene-light-ranges {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  line-height: 1.5;
+  word-break: break-all;
 }
 
 .mapscene-loclist-name {
