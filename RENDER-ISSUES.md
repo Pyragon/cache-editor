@@ -59,10 +59,6 @@ Compared against the live client, all still open:
   haven't implemented the setting, or does the field mean something else?
   Trace the client before building anything. **Wanted editable either way.**
 
-## Geometry / placement
-- **The stairs up to Lumbridge castle** are still wrong. Been on the list a
-  while and never actually fixed.
-
 ## Terrain / water
 - **The river still looks off** (separate from the un-signed-off water colour
   already tracked in `TODO.md`).
