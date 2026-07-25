@@ -624,6 +624,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     const w = mount.clientWidth || 900
     const h = mount.clientHeight || 600
     const renderer = new THREE.WebGLRenderer({ antialias: true })
+    // three resets renderer.info at the top of every renderer.render(), and the
+    // EffectComposer runs several of those per frame — so reading the counters
+    // after composer.render() reports only its final fullscreen output pass
+    // (1 draw call), not the scene. Take over the reset and do it once a frame.
+    renderer.info.autoReset = false
     // full native DPI on a 4K screen quadruples the pixels pushed per frame —
     // cap it; at these fill rates it's the difference between smooth and choppy
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
@@ -1554,6 +1559,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           obj.userData.sortZ = sortVec.z
         }
       }
+      renderer.info.reset()
       composer.render()
       // FPS readout — averaged over 20 frames, written straight to the label
       // node. No React state per frame.
