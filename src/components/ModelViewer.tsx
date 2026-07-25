@@ -883,7 +883,11 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
           if (speed) pushScroll(mat, cached.texture, speed.u, speed.v)
           assignMap(mat, cached.texture, cached.detailBoost)
         } else {
-          createImageBitmap(blob).then((bitmap) => {
+          // 'none': Chromium premultiplies by default and three uploads an
+          // ImageBitmap verbatim, so a material with a sub-255 alpha would
+          // sample as rgb·a and render near-black (the effectId 1/7 specular
+          // detail maps sit at alpha 40-70).
+          createImageBitmap(blob, { premultiplyAlpha: 'none' }).then((bitmap) => {
             if (disposed) { bitmap.close(); return }
             const { boost, cutout } = analyzeTexture(bitmap)
             // Foliage cutouts get binary alpha; the lit shader discards the clear

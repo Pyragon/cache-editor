@@ -92,7 +92,10 @@ export async function buildTexturedModelMesh(model: ModelData): Promise<Textured
     materials[i] = mat
     if (g.tex >= 0) {
       try {
-        const bitmap = await createImageBitmap(textures.get(g.tex)!)
+        // 'none': Chromium premultiplies by default and three uploads an
+        // ImageBitmap verbatim, so a material with a sub-255 alpha would sample
+        // as rgb·a — the specular detail maps render near-black without this.
+        const bitmap = await createImageBitmap(textures.get(g.tex)!, { premultiplyAlpha: 'none' })
         const texture = new THREE.Texture(bitmap)
         texture.wrapS = THREE.RepeatWrapping
         texture.wrapT = THREE.RepeatWrapping

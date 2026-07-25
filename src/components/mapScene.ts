@@ -1641,7 +1641,17 @@ export class LocAssets {
           if (!texturesDir) return null
           const dir = await texturesDir.getDirectoryHandle(String(id))
           const file = await (await dir.getFileHandle(`${id}.png`)).getFile()
-          const bitmap = await createImageBitmap(file)
+          // premultiplyAlpha MUST be 'none'. Chromium's default for
+          // createImageBitmap is to premultiply, and three uploads an
+          // ImageBitmap as-is (UNPACK_PREMULTIPLY_ALPHA_WEBGL doesn't apply to
+          // bitmap sources), so the shader then samples rgb·a and reads it as
+          // straight colour. Every material whose PNG carries a sub-255 alpha —
+          // ~1200 of the 2591 dumped, all 380 of the effectId 1/7 specular
+          // detail maps among them — arrived darkened by its own alpha. Texture
+          // 90 uploads as rgb 46 instead of 197, which is why the Lumbridge
+          // kitchen's grey stone (range, sink, rock pile, dresser) rendered
+          // black once the alpha test stopped deleting it outright.
+          const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'none' })
           // effectCombiner 1 materials (leaf/foliage/fence cutouts) carry their
           // shape as black texels the client turns transparent (binary alpha).
           // Our dumped PNGs are opaque, so derive that alpha here, else the
@@ -1714,7 +1724,12 @@ export class LocAssets {
             if (!texturesDir) throw new Error('no textures')
             const dir = await texturesDir.getDirectoryHandle(String(id))
             const file = await (await dir.getFileHandle(`${id}.png`)).getFile()
-            const bitmap = await createImageBitmap(file)
+            // 'none' for the same reason getTexture needs it — a premultiplied
+            // bitmap only round-trips back to straight rgb here through the
+            // canvas's own premultiplied store, which quantises hard at low
+            // alpha and skews avgLuma/avgRgb for exactly the detail maps that
+            // depend on them.
+            const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'none' })
             const size = 16
             const canvas = document.createElement('canvas')
             canvas.width = size
