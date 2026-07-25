@@ -477,11 +477,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
   const [multiSel, setMultiSel] = useState<number[]>([])
   const setMultiSelRef = useRef(setMultiSel)
   setMultiSelRef.current = setMultiSel
-  // Defaults tuned for perf/clarity: only plane 0, no neighbour regions, no
-  // region outlines (all still toggleable in the controls).
+  // Defaults tuned for perf/clarity: only plane 0, no region outlines (all
+  // still toggleable in the controls).
   const [visiblePlanes, setVisiblePlanes] = useState([true, false, false, false])
   const [showLocs, setShowLocs] = useState(true)
-  const [showNeighbors, setShowNeighbors] = useState(false)
   const [showOutlines, setShowOutlines] = useState(false)
   const [showMarkers, setShowMarkers] = useState(true)
   const [showSky, setShowSky] = useState(true)
@@ -1474,12 +1473,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
 
         // Real progress: 8 passes per cell (4 loc planes + 4 terrain planes);
         // the loc passes report a done/total we use for sub-pass fraction.
-        const totalUnits = Math.max(1, cells.length * 8)
+        // Only the centre region is BUILT. The 8 neighbours are still decoded
+        // above because the mosaic needs their heights/underlays for seam-free
+        // lighting at the borders, but building their meshes cost ~9x the load
+        // time and draw calls for geometry that was never meant to be shown.
+        const buildCells = cells.filter((c) => c.dx === 0 && c.dy === 0)
+        const totalUnits = Math.max(1, buildCells.length * 8)
         let doneUnits = 0
         const reportProgress = (frac = 0) =>
           setLoadProgress(Math.min(99, ((doneUnits + frac) / totalUnits) * 100))
 
-        for (const { dx, dy, def, terrain, underwater } of cells) {
+        for (const { dx, dy, def, terrain, underwater } of buildCells) {
           const isCenter = dx === 0 && dy === 0
           if (disposed) return
 
@@ -2412,16 +2416,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
     if (skyMeshRef.current) skyMeshRef.current.visible = showSky
   }, [showSky, status])
 
-  // visibility = plane toggle (via group) AND per-kind toggle AND neighbour toggle
+  // visibility = plane toggle (via group) AND per-kind toggle
   useEffect(() => {
     planeGroupsRef.current.forEach((group, plane) => {
       if (group) group.visible = visiblePlanes[plane]
     })
-    for (const { obj, neighbor, kind } of taggedRef.current) {
-      const kindOn = kind === 'loc' ? showLocs : kind === 'marker' ? showMarkers : kind === 'outline' ? showOutlines : true
-      obj.visible = kindOn && (!neighbor || showNeighbors)
+    for (const { obj, kind } of taggedRef.current) {
+      obj.visible = kind === 'loc' ? showLocs : kind === 'marker' ? showMarkers : kind === 'outline' ? showOutlines : true
     }
-  }, [visiblePlanes, showLocs, showMarkers, showOutlines, showNeighbors, status])
+  }, [visiblePlanes, showLocs, showMarkers, showOutlines, status])
 
   return (
     <div className="mapscene">
@@ -2439,10 +2442,6 @@ export default function MapSceneViewer({ data, focus, objects, terrain, onEdit }
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showLocs} onChange={(e) => setShowLocs(e.target.checked)} />
           Objects
-        </label>
-        <label className="mapscene-toggle">
-          <input type="checkbox" checked={showNeighbors} onChange={(e) => setShowNeighbors(e.target.checked)} />
-          Adjacent regions
         </label>
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showOutlines} onChange={(e) => setShowOutlines(e.target.checked)} />
