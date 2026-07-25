@@ -1209,6 +1209,12 @@ class BucketSet {
     // hundreds of meshes drawing the same few leaf textures — reusing the
     // material keeps GPU state changes (and allocation) down.
     materialCache?: Map<number, THREE.Material>,
+    /** Face culling. The client culls back faces and never turns it off —
+     *  `DirectXRenderer` sets `D3DRS_CULLMODE = D3DCULL_CW` once at init and
+     *  `OpenGLRenderer` does `glEnable(GL_CULL_FACE); glCullFace(GL_BACK)`.
+     *  Loc meshes pass FrontSide to match; terrain and the skybox still default
+     *  to DoubleSide because they haven't been checked for winding yet. */
+    side: THREE.Side = THREE.DoubleSide,
   ): Promise<THREE.Mesh | null> {
     const entries = [...this.buckets.entries()].filter(([key, b]) => {
       if (b.positions.length === 0) return false
@@ -1268,7 +1274,7 @@ class BucketSet {
         vert += count
         continue
       }
-      const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
+      const material = new THREE.MeshBasicMaterial({ vertexColors: true, side })
       if (blend) {
         // terrain crossfade pass: coplanar with its base face (depthFunc
         // LEQUAL), alpha-faded per vertex, never writes depth
@@ -2169,6 +2175,9 @@ function contourVertexY(
   return out
 }
 
+const WINDING_NORMAL = [0, 1, 2] as const
+const WINDING_FLIPPED = [0, 2, 1] as const
+
 /** Accumulates transformed model triangles into texture buckets. */
 class ModelAccumulator {
   buckets = new BucketSet()
@@ -2191,6 +2200,13 @@ class ModelAccumulator {
     specularOf?: (texId: number) => number,
   ) {
     const upscale = modelUpscale(model)
+    // A mirrored placement reflects the mesh, which flips its triangle winding
+    // and would render every mirrored loc inside-out once we cull. The client
+    // has the same problem and solves it in the mesh: `wa()` negates vertexZ
+    // AND swaps two of the three triangle index arrays. We mirror with a
+    // scale(1, 1, -1) on the placement matrix instead, so compensate here.
+    // ~9% of placements in region 12850 are mirrored, so this is not an edge case.
+    const flipWinding = matrix.determinant() < 0
     const v = new THREE.Vector3()
     let uvWriter = this.uvWriters.get(model)
     if (!uvWriter) this.uvWriters.set(model, (uvWriter = makeUVWriter(model)))
@@ -2234,6 +2250,11 @@ class ModelAccumulator {
       }
       if (textureId >= 0) {
         uvWriter(f, ia, ib, ic, this.uvScratch, 0)
+        if (flipWinding) {
+          const u = this.uvScratch[2], vv = this.uvScratch[3]
+          this.uvScratch[2] = this.uvScratch[4]; this.uvScratch[3] = this.uvScratch[5]
+          this.uvScratch[4] = u; this.uvScratch[5] = vv
+        }
         bucket.uvs.push(...this.uvScratch)
       } else {
         bucket.uvs.push(0, 0, 0, 0, 0, 0)
@@ -2242,13 +2263,18 @@ class ModelAccumulator {
       // (mostly) greyscale detail maps the client multiplies by face colour. The
       // lit colour is per-vertex so untextured scenery gets smooth Gouraud shading.
       const corners = [ia, ib, ic]
+      // `order` reverses the two trailing corners for a mirrored placement —
+      // see flipWinding. Everything indexed per-corner (lit colour, normals,
+      // and the UVs above) has to follow the same permutation.
+      const order = flipWinding ? WINDING_FLIPPED : WINDING_NORMAL
       // Specular buckets carry a normal per vertex. This mesh bakes every
       // placement into one buffer, so the normal goes in with the placement's
       // normal matrix already applied — mesh-local, matching the positions.
       const emitNormal = localNormals !== undefined && textureId >= 0 && specularOf!(textureId) > 0
       for (let k = 0; k < 3; k++) {
-        const base = (f * 3 + k) * 3
-        const vi = corners[k]
+        const src = order[k]
+        const base = (f * 3 + src) * 3
+        const vi = corners[src]
         v.set(model.vertexX[vi] * upscale, -model.vertexY[vi] * upscale, -model.vertexZ[vi] * upscale)
         v.applyMatrix4(matrix)
         bucket.positions.push(v.x, v.y, v.z)
@@ -3331,7 +3357,7 @@ export async function buildLocsMesh(
     // calls at 35fps; the clutter is small enough that a shared mesh's single
     // sort position is imperceptible, so it merges.
     if (locTrans.faceCount() > TRANSPARENT_OWN_MESH_FACES) {
-      const lm = await locTrans.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'transparent', transMaterials)
+      const lm = await locTrans.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'transparent', transMaterials, THREE.FrontSide)
       if (lm) {
         lm.geometry.computeBoundingBox()
         const bb = lm.geometry.boundingBox
@@ -3366,10 +3392,10 @@ export async function buildLocsMesh(
   }
   // Opaque locs stay merged (order-independent). Transparent ones are the
   // per-loc meshes collected above, drawn after the ground.
-  const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'opaque')
+  const mesh = await acc.buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'opaque', undefined, THREE.FrontSide)
   if (mesh) mesh.userData.locs = locRefs
   if (sharedTrans.hasAny()) {
-    const sm = await sharedTrans.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'transparent', transMaterials)
+    const sm = await sharedTrans.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), true, 'transparent', transMaterials, THREE.FrontSide)
     if (sm) {
       sm.userData.locs = locRefs
       transparentLocs.push(sm)
