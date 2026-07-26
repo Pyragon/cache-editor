@@ -2059,8 +2059,19 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
 
         // --- Place-mode ghost: a translucent single-loc mesh under the cursor
         let ghost: { obj: THREE.Object3D; key: string } | null = null
+        // The key of a build that has been STARTED but hasn't landed yet.
+        // Without it, `ghost` stays null for the whole build, so every further
+        // update — even for the same tile — looked like a new target, bumped
+        // the token and restarted the build. A drag fires pointermove faster
+        // than buildLocsMesh resolves, so each build cancelled the last and the
+        // ghost never appeared at all unless the cursor stopped dead.
+        let ghostPendingKey: string | null = null
         let ghostToken = 0
         const clearGhost = () => {
+          // also abandon any in-flight build, or it lands after the drag ends
+          // and leaves a stray ghost in the scene with nothing to clear it
+          ghostToken++
+          ghostPendingKey = null
           if (!ghost) return
           scene.remove(ghost.obj)
           disposeDeep(ghost.obj)
@@ -2089,7 +2100,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         ghostClearRef.current = clearGhost
         ghostUpdateRef.current = (p, tx, ty) => {
           const key = `${p.objectId},${p.type},${p.rotation},${p.plane},${tx},${ty}`
-          if (ghost?.key === key) return
+          if (ghost?.key === key || ghostPendingKey === key) return
+          ghostPendingKey = key
           const token = ++ghostToken
           void (async () => {
             const { mesh, markers } = await buildLocsMesh(
@@ -2100,6 +2112,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               if (mesh) disposeDeep(mesh)
               return
             }
+            // clearGhost bumps the token, so re-read our own key afterwards
             clearGhost()
             // marker objects have no visible model — ghost their diamond
             const obj: THREE.Object3D | null = mesh ?? (markers.length > 0 ? buildMarkersMesh(markers) : null)

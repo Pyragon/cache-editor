@@ -240,6 +240,18 @@ Related trap: `resolveLocAt`'s `isCenter` means "belongs to the centre region"
 object the user clicked, and reading it that way is what made fault 2 look
 guarded when it wasn't.
 
+4. **Async previews must dedupe on the PENDING key, not just the built one.**
+   The ghost's `ghost.key` is set only when its async `buildLocsMesh` lands, so
+   checking that alone meant every update during a build — including ones for
+   the tile already being built — bumped the cancellation token and restarted
+   it. Place mode survived this because it updates from the RAF loop at ~30Hz,
+   slower than a build; a drag fires `pointermove` at 120Hz+, faster than a
+   build, so every attempt cancelled its predecessor and the ghost never
+   appeared at all. `ghostPendingKey` closes it. Same shape as any
+   token-cancelled async preview: dedupe on what's *in flight*, and have the
+   clear path bump the token so a build can't land after the interaction ends
+   and strand an object in the scene.
+
 **Still on the generic `pick()`:** place mode, paste-stamp and the terrain brush
 all target tiles through it, so their cursor feedback drifts onto objects the
 same way. Left alone deliberately — for *placing*, pointing at a wall and
