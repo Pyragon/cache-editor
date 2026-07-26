@@ -186,6 +186,32 @@ colours. Each record carries position (x/z plus a height *above* the tile),
 flags, and a flicker `type` (a built-in preset 2..16, or 31 = a
 `config/light_intensities` id).
 
+**`ranges[]` is the field that decides what actually lights up**, and it is far
+more load-bearing than it looks. `size2d` only sets the falloff (`radiusSq/d²`);
+which *locs* receive the light is decided entirely by the per-tile grid the
+record registers on, and that grid is `ranges[]`. It holds `size2d*2+1` shorts,
+one per tile row of the bounding box, each `offset << 8 | length` over that
+row's tile columns — so a `size2d` 1 light nominally covers 3×3 but the authored
+data usually carves out much less. Region 12850's wall torches are all
+`[2,2,0]` / `[0,2,2]` / `[258,258,0]` / `[0,258,258]`, i.e. a 2×2 quadrant of the
+3×3 box, picked so the quadrant faces the room. Raising `size2d` alone does NOT
+widen the footprint — the row count changes, so `ranges` has to be rewritten to
+match or the light reaches no further (see `lightRangesFor`, which writes full
+rows). An editor that exposes `size2d` without exposing `ranges` will look
+broken.
+
+**Walls read the grid at a different tile than they sit on.** Scenery takes the
+lights over its own footprint, but wall shapes 0-3 (`GraphNode_Sub1_Sub5.
+method13036`) test the wall's side flag — `Engine.method4777`, `{1,2,4,8}[rot]`
+for shapes 0/2 and `{16,32,64,128}[rot]` for 1/3 — against a camera-relative
+table, and when the visible face points away from the wall's own tile they read
+the grid on the tile on the *other side* of the wall. That is why a torch lights
+the walls flanking it even though those walls' own tiles are outside the
+footprint. We can't re-pick per camera while the lighting is baked, so
+`wallLightTiles` takes both tiles; moving lights into the shader would let us do
+it properly. Shape 9 (`WALL_INTERACT`, the diagonal walls) is *not* a wall node
+— it goes through the generic object path and uses its footprint.
+
 **Not surfaced.** No way to see, move, recolour or add one.
 
 **Gotcha.** There is an agreed plan (in `TODO.md`) to move point lights off the

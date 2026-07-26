@@ -3137,10 +3137,52 @@ export function lightRangesFor(size2d: number): number[] {
 
 /** Per-tile point lights for a region, mirroring the client's tile grid. */
 export type LightGrid = {
-  /** The ≤4 lights the client would bind for an object covering these tiles. */
-  at(plane: number, x0: number, y0: number, x1: number, y1: number): PointLight[]
+  /** The ≤4 lights the client would bind for an object covering these tiles.
+   *  `extra` adds tiles outside the footprint rect — see `wallLightTiles`. */
+  at(plane: number, x0: number, y0: number, x1: number, y1: number, extra?: readonly (readonly [number, number])[]): PointLight[]
   /** how many light records went in (0 = nothing to bake) */
   count: number
+}
+
+// Wall side flags -> the tile the wall's OUTWARD face points into.
+// `Engine.method4777`: shapes 0 and 2 take their flag from {1,2,4,8}[rot] (the
+// W/N/E/S edge the wall sits on), shapes 1 and 3 from {16,32,64,128}[rot] (the
+// diagonal corners). The offsets are the branch table at the bottom of
+// `GraphNode_Sub1_Sub5.method13036`.
+const WALL_EDGE_SIDES = [[-1, 0], [0, 1], [1, 0], [0, -1]] as const   // flags 1, 2, 4, 8
+const WALL_CORNER_SIDES = [[-1, 1], [1, 1], [1, -1], [-1, -1]] as const // flags 16, 32, 64, 128
+
+/**
+ * The tiles a wall ALSO takes its lights from, on top of its own.
+ *
+ * `GraphNode_Sub1_Sub5.method13036` doesn't use the wall's own tile
+ * unconditionally the way scenery does. It tests the wall's side flag against
+ * `anIntArray9618[i]`, indexed by where the CAMERA sits relative to the wall's
+ * tile, and when the face you can see is the one pointing away from its own
+ * tile it reads the light grid at the tile on the other side of the wall
+ * instead. That's how a torch lights the walls flanking it: their own tiles are
+ * outside the light's footprint, but the tiles their visible faces point into
+ * are inside it.
+ *
+ * We bake into vertex colours, so we can't re-pick per camera position the way
+ * the client does per frame — we take BOTH tiles, which is the union of the two
+ * answers the client can give and so always contains the right one. The cost is
+ * that a wall separating a lit room from a dark one lights on both faces
+ * instead of only the lit side.
+ *
+ * Shape 2 (`WALL_WHOLE_CORNER`) is two wall nodes in the client — rotations
+ * `r + 4` and `r + 1`, i.e. flags for `r` and `r + 1` — so it has two.
+ * Shape 9 (`WALL_INTERACT`, the diagonal walls) is NOT a wall node: it goes
+ * through the generic object path and uses its footprint, so it gets nothing
+ * here.
+ */
+export function wallLightTiles(shape: number, rotation: number, x: number, y: number): (readonly [number, number])[] {
+  const r = rotation & 3
+  const at = (d: readonly [number, number]) => [x + d[0], y + d[1]] as const
+  if (shape === 0) return [at(WALL_EDGE_SIDES[r])]
+  if (shape === 1 || shape === 3) return [at(WALL_CORNER_SIDES[r])]
+  if (shape === 2) return [at(WALL_EDGE_SIDES[r]), at(WALL_EDGE_SIDES[(r + 1) & 3])]
+  return []
 }
 
 const NO_LIGHTS: PointLight[] = []
@@ -3214,20 +3256,29 @@ export function buildLightGrid(
 
   return {
     count,
-    at(plane, x0, y0, x1, y1) {
+    at(plane, x0, y0, x1, y1, extra) {
       if (plane < 0 || plane >= planeCount) return NO_LIGHTS
       let out: PointLight[] | null = null
-      for (let tx = Math.max(x0, 0); tx <= Math.min(x1, SIZE - 1); tx++) {
-        for (let ty = Math.max(y0, 0); ty <= Math.min(y1, SIZE - 1); ty++) {
-          const list = cells[(plane * SIZE + tx) * SIZE + ty]
-          if (!list) continue
-          for (const l of list) {
-            if (!out) out = []
-            else if (out.includes(l)) continue
-            out.push(l)
-            if (out.length === 4) return out
-          }
+      // the client stops at 4 (its grid packs four 16-bit ids into a long), so
+      // the footprint goes first and the across-the-wall tiles only fill what's
+      // left — a wall standing in its own light keeps that light
+      const take = (tx: number, ty: number): boolean => {
+        if (tx < 0 || ty < 0 || tx >= SIZE || ty >= SIZE) return false
+        const list = cells[(plane * SIZE + tx) * SIZE + ty]
+        if (!list) return false
+        for (const l of list) {
+          if (!out) out = []
+          else if (out.includes(l)) continue
+          out.push(l)
+          if (out.length === 4) return true
         }
+        return false
+      }
+      for (let tx = x0; tx <= x1; tx++) {
+        for (let ty = y0; ty <= y1; ty++) if (take(tx, ty)) return out!
+      }
+      if (extra) {
+        for (const [tx, ty] of extra) if (take(tx, ty)) return out!
       }
       return out ?? NO_LIGHTS
     },
@@ -3570,9 +3621,13 @@ export async function buildLocsMesh(
     const sceneX = (x << 9) + (sizeX << 8)
     const sceneY = (y << 9) + (sizeY << 8)
     // the ≤4 region lights this placement is bound to, picked over its footprint
-    // exactly as GraphNode_Sub1_Sub1.method13036 does
+    // exactly as GraphNode_Sub1_Sub1.method13036 does — plus, for wall shapes,
+    // the tile the wall's outward face points into, which is the tile the
+    // client's own wall node reads when that's the face you're looking at
+    // (see wallLightTiles)
     const points = lightGrid?.count
-      ? lightGrid.at(decodedPlane, x, y, x + sizeX - 1, y + sizeY - 1)
+      ? lightGrid.at(decodedPlane, x, y, x + sizeX - 1, y + sizeY - 1,
+          shape <= 3 ? wallLightTiles(shape, rotation, x, y) : undefined)
       : undefined
 
     // `ObjectDefinition.method7971` applies, in model space and this order:

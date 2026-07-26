@@ -43,12 +43,13 @@ not the long-form project log.
   below.
 
 ### Point lights — the eyeball pass (2026-07-25)
-Compared against the live client, all still open:
-- **Reach is too short.** A torch should light the locs *around* it, not just
-  the one it's on. In-game <https://i.imgur.com/NNKWvLI.png>, viewer
-  <https://i.imgur.com/pv1RHbm.png>. Radius comes from `size2d` (see the point
-  lights note in memory) — worth re-checking that against the client rather
-  than assuming the falloff is what's wrong.
+Compared against the live client. Reach was the first item here and is now
+**signed off** (`wallLightTiles` in mapScene.ts — walls read the light grid at
+the tile their visible face points into, not the tile they sit on; the full
+trace is in `EDITOR.md` under "Region point lights"). Watch for its one
+deliberate divergence as you go: the client re-picks that tile per frame from
+the camera, which a baked renderer can't, so we take both tiles — a wall
+between a lit room and a dark one lights on both faces. Still open:
 - **Intensity is too hot and doesn't blend.** The pool reads as a bright patch
   sitting *on* the tile instead of mixing into it — same two screenshots. Could
   be the intensity scale, could be that we bake into vertex colours so the
