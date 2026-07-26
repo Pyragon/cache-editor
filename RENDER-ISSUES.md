@@ -63,20 +63,31 @@ Compared against the live client, all still open:
 - **The river still looks off** (separate from the un-signed-off water colour
   already tracked in `TODO.md`).
 - **Willow transparency** — better than it was, but still not matching in-game.
-- **Walkways bleed into the grass** — mostly fixed, one mechanism still open.
+- **Walkways bleed into the grass** — all three mechanisms now ported; kept on
+  the list because Cody's verdict was "looking okay", which is not a sign-off.
   The original note here guessed the walkway was simply *bigger* in-game; that
-  was wrong, it's a blend. Full trace in **`docs/terrain-blending.md`** — three
-  independent mechanisms, two now ported (commit `2562f34`): the perimeter
-  blend, where a tile's 8 ring vertices take a neighbouring blendable overlay's
-  colour AND texture AND scale, and the two missing tile-shape families that
-  subdivide the underlay side of shaped tiles. Straight borders and most
-  diagonals now match.
-  **Still open — mechanism 3:** the client draws a tile once per distinct
-  material it contains, each pass covering the tile's *whole* vertex set with a
-  per-vertex alpha weight, so the overlay/underlay split is a partition of
-  weights over a shared mesh rather than of triangles. We assign one material
-  per triangle, so a curved intra-tile boundary (shape 9/10 — tile 3225,3223 is
-  the worked example) stays a hard arc and retriangulation can't fix it. Next
-  step is finding where the alpha byte gets written: `Node_Sub6.method12145`
-  writes only RGB at stride 4, and `method12147` is the likely candidate. Read
-  it before coding — the weight rule is currently inferred, not read.
+  was wrong, it's a blend. Full trace in **`docs/terrain-blending.md`** — read
+  that before touching `emitTile`.
+  - **Mechanism 1, the perimeter blend** (commit `2562f34`) — a tile's 8 ring
+    vertices take a neighbouring blendable overlay's colour AND texture AND
+    scale.
+  - **Mechanism 2, the tile-shape families** (commit `2562f34`) — the two
+    missing families that subdivide the underlay side of shaped tiles. Straight
+    borders and most diagonals matched after these two.
+  - **Mechanism 3, the intra-tile blend** (commit `271e9bd`) — four lines in
+    `Class329.method5851`: on a tile whose own overlay blends, an underlay
+    vertex the overlay's shape covers takes the overlay's colour, texture and
+    scale. No `i_34 < 8` guard, so unlike mechanism 1 it reaches the interior
+    vertices and the tile centre — which is why the coverage table is 13 wide.
+    That was the hard arc on shape 9/10 (tile 3225,3223).
+  **Two earlier write-ups of mechanism 3 in this file were wrong** — first
+  "the client draws each tile once per distinct material over its whole vertex
+  set", then "vertex welding spans the overlay/underlay split". Both are dead;
+  the second is *refuted* in the trace doc, not merely unported (the weld key
+  carries both colours, so it can only merge vertices that already agree — it
+  cannot build a gradient). Don't re-derive either from the screenshots.
+  **What to eyeball before signing this off:** the blend now bleeds noticeably
+  further than it used to — a full half-tile ramp to the far corner. If it
+  reads as too *wide* rather than too hard, the suspect is the `hasOverlay`
+  stand-in for the client's discard test, not the coverage table. Remaining
+  approximations are listed under Maps in `TODO.md`.
