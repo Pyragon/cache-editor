@@ -1027,6 +1027,27 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     }
 
     /**
+     * Tile targeting for drag-to-move: raycasts the GROUND only.
+     *
+     * `pick()` returns the nearest visible mesh of any kind, which is right for
+     * selection but wrong for "which tile is the cursor over": while dragging a
+     * loc the ray keeps landing on the loc itself — and on every wall, tree or
+     * roof the cursor passes over — so the tile, and therefore the ghost, sticks
+     * to that object's surface instead of following the cursor across the map.
+     * The ghost object excludes itself from raycasts already (`ghostify`), so
+     * it never occludes its own target.
+     */
+    function pickGround(): THREE.Intersection | null {
+      raycaster.setFromCamera(pointer, camera)
+      const targets: THREE.Object3D[] = []
+      scene.traverseVisible((o) => {
+        if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).userData.isTerrain) targets.push(o)
+      })
+      const hits = raycaster.intersectObjects(targets, false)
+      return hits[0] ?? null
+    }
+
+    /**
      * Point-light gizmos are raycast on their OWN, ahead of everything else:
      * a light sits inside the loc it lights, so the generic `pick()` (nearest
      * hit across the whole scene) would always hand back the surrounding wall
@@ -1173,13 +1194,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           if (Math.abs(e.clientX - downX) <= DRAG_PX && Math.abs(e.clientY - downY) <= DRAG_PX) return
           movingLoc.armed = true
         }
-        const hit = pick()
-        if (hit) {
-          const t = movingTargetTile(movingLoc, hit.point)
-          if (t) {
-            const [objectId, type, rotation, , , plane] = movingLoc.entry
-            ghostUpdateRef.current?.({ objectId, type, rotation, plane }, t.tx, t.ty)
-          }
+        const hit = pickGround()
+        const t = hit ? movingTargetTile(movingLoc, hit.point) : null
+        if (t) {
+          const [objectId, type, rotation, , , plane] = movingLoc.entry
+          ghostUpdateRef.current?.({ objectId, type, rotation, plane }, t.tx, t.ty)
+        } else {
+          // off the map, or the delta would leave the centre region — drop the
+          // ghost rather than leave it parked somewhere the release won't honour
+          ghostClearRef.current?.()
         }
       }
     }
@@ -1249,7 +1272,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         const hit = pick()
         const res = hit ? resolveLocAt(hit) : null
         if (res && res.isCenter && res.index === sel.index && hit) {
-          const grab = worldTileOf(hit.point)
+          // The grab reference has to come from the ground, like every later
+          // sample — taking it off the object's own surface would bias the
+          // delta by however far up the model the press landed. Falling back to
+          // the loc's own tile makes the delta start at zero.
+          const groundHit = pickGround()
+          const grab = groundHit ? worldTileOf(groundHit.point) : { tx: sel.x, ty: sel.y }
           movingLoc = {
             entry: [sel.objectId, sel.type, sel.rotation, sel.x, sel.y, sel.plane] as LocEntry,
             index: sel.index,
@@ -1299,7 +1327,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         const moving = movingLoc
         movingLoc = null
         ghostClearRef.current?.()
-        const hit = moving.armed ? pick() : null
+        const hit = moving.armed ? pickGround() : null
         if (hit) {
           const t = movingTargetTile(moving, hit.point)
           if (t && (t.tx !== moving.entry[3] || t.ty !== moving.entry[4])) {

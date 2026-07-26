@@ -226,10 +226,26 @@ misclick — which is exactly what the drag-to-move path did until 2026-07-25.
    multi-tile object anywhere except its anchor tile is already "a different
    tile", so a plain click teleports it there.
 
+3. **Target tiles off the ground, not off `pick()`.** `pick()` returns the
+   nearest visible mesh of *any* kind — correct for selection, wrong for "which
+   tile is the cursor over". While dragging a loc the ray keeps landing on the
+   loc itself, and on every wall, tree and roof the cursor crosses, so the tile
+   sticks to that surface instead of tracking the cursor. `pickGround()`
+   raycasts only meshes tagged `userData.isTerrain`. The grab reference taken at
+   pointerdown must come from the same function, or the delta is biased by
+   however far up the model the press landed.
+
 Related trap: `resolveLocAt`'s `isCenter` means "belongs to the centre region"
 (`:1107`), **not** "the object's centre tile". It does not tell you where on an
 object the user clicked, and reading it that way is what made fault 2 look
 guarded when it wasn't.
+
+**Still on the generic `pick()`:** place mode, paste-stamp and the terrain brush
+all target tiles through it, so their cursor feedback drifts onto objects the
+same way. Left alone deliberately — for *placing*, pointing at a wall and
+getting the wall's tile is arguably the intent, whereas a *move* is a delta and
+has no such reading. Worth revisiting if placement feels imprecise near
+scenery.
 
 ## Object (loc) panel — it shows almost nothing and edits live nowhere
 
