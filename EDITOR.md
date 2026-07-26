@@ -252,6 +252,17 @@ guarded when it wasn't.
    clear path bump the token so a build can't land after the interaction ends
    and strand an object in the scene.
 
+5. **A loc's geometry comes back on three paths — preview all of them.**
+   `buildLocsMesh` returns `{ mesh, transparentLocs, markers, shadows,
+   animated }`. `mesh` is the merged **opaque** geometry only; a loc with
+   transparent faces gets its own mesh in `transparentLocs`, and a loc with an
+   idle animation is pulled out of the merge into `animated` (rebuild it with
+   `buildAnimatedLocMesh` and copy `al.matrix`). Anything previewing a single
+   loc that reads only `mesh` silently shows **nothing** for transparent
+   scenery and animated locs — the ghost did exactly this, which is why a
+   fountain produced no ghost while ordinary objects would have. Placement is
+   already baked in for the centre region; only neighbours need an offset.
+
 **Still on the generic `pick()`:** place mode, paste-stamp and the terrain brush
 all target tiles through it, so their cursor feedback drifts onto objects the
 same way. Left alone deliberately — for *placing*, pointing at a wall and

@@ -2104,19 +2104,47 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           ghostPendingKey = key
           const token = ++ghostToken
           void (async () => {
-            const { mesh, markers } = await buildLocsMesh(
+            const { mesh, transparentLocs, markers, animated } = await buildLocsMesh(
               currentTerrain, [[p.objectId, p.type, p.rotation, tx, ty, p.plane] as LocEntry],
               p.plane, centerHeights, assets,
             )
+            // A loc's geometry comes back on one of THREE paths, and ghosting
+            // only the first meant whole classes of object produced no ghost at
+            // all, silently: `mesh` is the merged OPAQUE mesh, `transparentLocs`
+            // is one mesh per loc with transparent faces (a fountain — which is
+            // how this was found), and `animated` is pulled out of the merge
+            // entirely (waving flags). Their placement is already baked in for
+            // the centre region, so no offset is needed here.
+            const parts: THREE.Object3D[] = []
+            if (mesh) parts.push(mesh)
+            for (const lm of transparentLocs) parts.push(lm)
+            for (const al of animated) {
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points)
+              if (!anim) continue
+              anim.mesh.matrixAutoUpdate = false
+              anim.mesh.matrix.copy(al.matrix)
+              anim.mesh.updateMatrixWorld(true)
+              parts.push(anim.mesh)
+            }
+            // marker objects have no visible model — ghost their diamond
+            if (parts.length === 0 && markers.length > 0) {
+              const diamonds = buildMarkersMesh(markers)
+              if (diamonds) parts.push(diamonds)
+            }
             if (disposed || token !== ghostToken) {
-              if (mesh) disposeDeep(mesh)
+              for (const part of parts) disposeDeep(part)
               return
             }
-            // clearGhost bumps the token, so re-read our own key afterwards
+            if (parts.length === 0) return
+            // clearGhost bumps the token; nothing below re-checks it
             clearGhost()
-            // marker objects have no visible model — ghost their diamond
-            const obj: THREE.Object3D | null = mesh ?? (markers.length > 0 ? buildMarkersMesh(markers) : null)
-            if (!obj) return
+            let obj: THREE.Object3D
+            if (parts.length === 1) {
+              obj = parts[0]
+            } else {
+              obj = new THREE.Group()
+              for (const part of parts) obj.add(part)
+            }
             ghostify(obj)
             scene.add(obj)
             ghost = { obj, key }
