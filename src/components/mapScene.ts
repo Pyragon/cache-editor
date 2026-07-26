@@ -1795,7 +1795,10 @@ export async function buildTerrainMesh(
       // 2 = blendable overlay (own colour + cross-overlay corner overrides).
       // `alphas` puts the triangle in a transparent crossfade bucket instead
       // (terrain texture splatting between adjacent underlay textures).
-      const emitTri = (pts: [number, number][], hsl: number, textureId: number, texScale: number, mode: number, alphas?: [number, number, number], ids?: [number, number, number]) => {
+      // `vertHsl` forces a vertex's colour, bypassing the mode's own rule. Used
+      // by the underlay path for `method5851`'s blending branch, where a vertex
+      // inside the overlay's shape takes the overlay's colour outright.
+      const emitTri = (pts: [number, number][], hsl: number, textureId: number, texScale: number, mode: number, alphas?: [number, number, number], ids?: [number, number, number], vertHsl?: (number | null)[]) => {
         const meta = textureId >= 0 ? metas.get(textureId) : null
         const bucket = alphas ? buckets.getBlend(textureId) : buckets.get(textureId)
         bucket.owners.push(x * SIZE + y) // tile index, for terrain picking
@@ -1833,7 +1836,9 @@ export async function buildTerrainMesh(
           const shadowVal = shadow ? lightAt(shadow, sceneX, sceneY) : 0
           const shadowFactor = Math.max(0, 1 - shadowVal / 128)
           const mul = sceneLight * shadowFactor
-          const vHsl = hsl === -1 ? hsl
+          const forced = vertHsl?.[vi]
+          const vHsl = forced !== undefined && forced !== null ? forced
+            : hsl === -1 ? hsl
             : mode === 1 ? underlayVertexHsl(px, py)
             : mode === 2 ? overlayVertexHsl(px, py, hsl, ids?.[vi])
             : hsl
@@ -1914,9 +1919,12 @@ export async function buildTerrainMesh(
       // Any blendable-overlay override on this tile's corners? Then the
       // client subdivides the ground faces (its 6-vertex fans) so the
       // overlay colour fades out by the tile midpoints — emulate with a
-      // midpoint split of each triangle.
-      const hasOverride = ocorners[x * VERTS + y] > 0 || ocorners[(x + 1) * VERTS + y] > 0
-        || ocorners[x * VERTS + y + 1] > 0 || ocorners[(x + 1) * VERTS + y + 1] > 0
+      // midpoint split of each triangle. Blending tiles are exempt: their
+      // shape family already subdivides (mechanism 2) and the split's
+      // synthetic midpoints have no shape-vertex id, which the intra-tile
+      // blend below needs.
+      const hasOverride = !ownBlends && (ocorners[x * VERTS + y] > 0 || ocorners[(x + 1) * VERTS + y] > 0
+        || ocorners[x * VERTS + y + 1] > 0 || ocorners[(x + 1) * VERTS + y + 1] > 0)
       for (let i = 0; i < underlayFaces; i++, faceIdx++) {
         if (!hasUnderlay) continue
         for (const [A, B, C] of splitFace(overlayFaces + i, va[faceIdx], vb[faceIdx], vc[faceIdx])) {
@@ -1924,42 +1932,66 @@ export async function buildTerrainMesh(
           const pb: [number, number] = [vx(B), vy(B)]
           const pc: [number, number] = [vx(C), vy(C)]
           let tris: [number, number][][]
+          let triIds: (number | null)[][]
           if (hasOverride) {
             const mid = (p: [number, number], q: [number, number]): [number, number] =>
               [(p[0] + q[0]) >> 1, (p[1] + q[1]) >> 1]
             const ab = mid(pa, pb), bc = mid(pb, pc), ca = mid(pc, pa)
             tris = [[pa, ab, ca], [ab, pb, bc], [ca, bc, pc], [ab, bc, ca]]
+            triIds = [[A, null, null], [null, B, null], [null, null, C], [null, null, null]]
           } else {
             tris = [[pa, pb, pc]]
+            triIds = [[A, B, C]]
           }
-          for (const tri of tris) {
+          for (let t = 0; t < tris.length; t++) {
+            const tri = tris[t]
+            const ids = triIds[t]
             // Per vertex: a blendable overlay reaching this ring position wins
             // outright (method5851's `anIntArray3842[i_35] >= 0` branch, which
             // takes its texture and scale, not just its colour); otherwise the
             // vertex keeps the underlay-corner texture the splat already used.
             const wins = tri.map(([px, py]) => perimAt(px, py))
             const flus = tri.map(([px, py]) => cornerFluAt(px, py))
+            // `method5851:1218` — on a tile whose own overlay blends, an underlay
+            // vertex that the OVERLAY's shape covers takes the overlay's colour,
+            // texture and scale. Note the absence of an `i_34 < 8` guard: unlike
+            // the perimeter blend this reaches the interior vertices (8-11) and
+            // the tile CENTRE (12), so the falloff runs from the shape boundary
+            // out across the underlay half of the tile. This is the feather
+            // *inside* a tile; without it a curved shape (9/10) draws a hard arc.
+            // `hasOverlay` stands in for the client nulling out an overlay that
+            // has neither a primary nor a secondary colour before it ever sets
+            // `aBool3810` (method5846:633).
+            const blends = ids.map((v) =>
+              ownBlends && hasOverlay && v !== null && OVERLAY_SHAPE_COVERS[shape]?.[v] === true)
             const texes = tri.map((_, vi) => {
               const w = wins[vi]
               if (w && w.flo.texture !== undefined && w.flo.texture >= 0) return w.flo.texture
+              if (blends[vi]) return overlayTexture
               return texOfFlu(flus[vi])
             })
             const scaleAt = (vi: number) => {
               const w = wins[vi]
               if (w && w.flo.texture !== undefined && w.flo.texture >= 0) return w.flo.textureScale || 512
+              if (blends[vi]) return ownScale
               return (flus[vi] === underlayId ? flu : configs.underlays.get(flus[vi] - 1))?.scale || 512
             }
+            // The winner branch runs first in the client, so only a vertex with
+            // no perimeter winner falls through to the overlay's own colour.
+            const vertHsl = tri.map((_, vi) =>
+              wins[vi] === null && blends[vi] && overlayHsl !== -1 ? overlayHsl : null)
             if (texes[0] === texes[1] && texes[0] === texes[2]) {
-              emitTri(tri, underlayHsl, texes[0], scaleAt(0), 1)
+              emitTri(tri, underlayHsl, texes[0], scaleAt(0), 1, undefined, undefined, vertHsl)
             } else {
-              emitTri(tri, underlayHsl, underlayTexture, flu?.scale || 512, 1)
+              emitTri(tri, underlayHsl, underlayTexture, flu?.scale || 512, 1, undefined, undefined, vertHsl)
               const done = new Set<number>([underlayTexture])
               for (let vi = 0; vi < 3; vi++) {
-                const t = texes[vi]
-                if (t < 0 || done.has(t)) continue
-                done.add(t)
-                emitTri(tri, underlayHsl, t, scaleAt(vi), 1,
-                  [texes[0] === t ? 1 : 0, texes[1] === t ? 1 : 0, texes[2] === t ? 1 : 0])
+                const tx = texes[vi]
+                if (tx < 0 || done.has(tx)) continue
+                done.add(tx)
+                emitTri(tri, underlayHsl, tx, scaleAt(vi), 1,
+                  [texes[0] === tx ? 1 : 0, texes[1] === tx ? 1 : 0, texes[2] === tx ? 1 : 0],
+                  undefined, vertHsl)
               }
             }
           }

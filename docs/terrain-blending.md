@@ -2,8 +2,8 @@
 
 Everything traced on 2026-07-25 while chasing "walkways bleed into the grass"
 in `RENDER-ISSUES.md`. Written up because the answer turned out to be **three
-independent mechanisms**, two of which are now ported and one of which is not,
-and because the deob names involved are impossible to hold in your head.
+independent mechanisms**, all now ported, and because the deob names involved
+are impossible to hold in your head.
 
 Sources, in the order they should be trusted:
 
@@ -263,21 +263,80 @@ plain overlays got retriangulated by this too, not only blending ones.
 
 ---
 
-## Mechanism 3 — per-vertex material and vertex welding (NOT PORTED)
+## Mechanism 3 — the intra-tile blend (PORTED)
 
-Still missing, and the reason a curved intra-tile boundary (shape 9/10 — tile
-3225,3223 = region 12850 local 25,23, overlay 236 shape 10 rot 0) renders as a
-hard arc however well mechanisms 1 and 2 are done.
+The reason a curved intra-tile boundary (shape 9/10 — tile 3225,3223 = region
+12850 local 25,23, overlay 236 shape 10 rot 0) rendered as a hard arc however
+well mechanisms 1 and 2 were done.
 
-**Correction, 2026-07-25:** an earlier version of this document claimed the
-client draws each tile once per distinct material over the tile's *whole*
-vertex set. That was wrong — it was inferred from `method12145` writing only
-RGB, before `method12147` and `method12143` had been read. What follows is the
-read version.
+**It is four lines in `method5851`, not a rendering-model change.** Two earlier
+versions of this section guessed wrong before the underlay emitter's `else`
+branch had been read to the bottom: first "the client draws each tile once per
+distinct material over its whole vertex set", then "vertex welding spans the
+overlay/underlay split". Both are dead. The welding hypothesis in particular is
+refuted below.
 
-### How the client actually splats
+### The four lines
 
-Three pieces:
+`Class329.method5851:1218`, the first arm of the `else` that runs when a vertex
+has **no** perimeter winner:
+
+```java
+if (aBool3810 && aBoolArrayArray3822[anInt3844][i_34]) {
+    waterTextures[index] = anInt3848;   // the overlay's texture
+    ints_18[index]       = anInt3849;   // the overlay's textureScale
+    ints_16[index]       = anInt3850;   // the overlay's primaryRGB
+}
+```
+
+On a tile whose own overlay blends (`aBool3810`), an **underlay** vertex that
+the **overlay's** shape covers takes the overlay's colour, texture and scale.
+`ints_13` (material colour) follows at the bottom of the same `else`
+(`ints_13[index] = ints_16[index]`), so both colour channels become the
+overlay's primary — not `VarNPCMap.method2617`'s value.
+
+Two details that make it work:
+
+- **There is no `i_34 < 8` guard here.** Unlike the perimeter blend, this reaches
+  the interior vertices (8-11) and the tile **centre** (12). `aBoolArrayArray3822`
+  is 13 wide precisely so it can answer for them.
+- `i_34` is **shape space** (unrotated), like the height lookups just above it.
+
+Worked example, the tile in question — shape 10, blending family
+(`3775/3821/3836`), 3 overlay + 3 underlay faces:
+
+```
+covers[10] = {0,1,2,3,4,8,9}
+underlay faces: (6,0,8)  (6,8,9)  (4,6,9)
+```
+
+Every underlay vertex except corner 6 is covered. So the path's colour and
+texture start opaque along the arc and fade to pure grass at the one far
+corner — a gradient across the whole grass half of the tile. That is the
+in-game look. Without it those three triangles are uniformly grass right up to
+the arc, which is the hard semicircle.
+
+### Why welding is not the mechanism
+
+The weld key is
+
+```java
+long_47 = (long) i_45 << 48 | (long) i_44 << 32 | (i_42 << 16) | i_43;
+//        materialColour       mainColour          gridX       gridZ
+```
+
+with the grid mask `anInt8529 = 1 << (tileScale - 2)` = 128, and every entry of
+`anIntArray3811/3800` is a multiple of 128 — so *every* ground vertex is
+grid-aligned and the mask never rejects anything. Welding is unconditional on
+position. But the key contains **both colours**, so an overlay vertex and an
+underlay vertex at the same spot weld only when they already agree on colour.
+It cannot create a gradient; it only removes duplicates. Mechanism 3 is what
+makes the colours agree in the first place.
+
+### The splat model, for the record
+
+Confirmed while chasing the above, and it matches what we already do. Three
+pieces:
 
 **Alpha is a binary per-vertex weight.** `Node_Sub6.method12143`:
 
@@ -311,34 +370,19 @@ corners, each pass opaque at its own corners and transparent at the others.
 
 **This is the same shape as what we already do** — our underlay splat, and the
 overlay crossfade added with mechanism 1, are base pass plus one alpha-masked
-pass per distinct neighbouring texture. So mechanism 3 is not a different
-rendering model, and the earlier framing overstated the work.
+pass per distinct neighbouring texture.
 
-### The remaining suspect: vertex welding (HYPOTHESIS, NOT TRACED)
+One difference worth noting, unimplemented and probably invisible: the client
+picks a face's **base** (fully opaque) material as the one with the lowest
+`Node.pointer` among its three corners, and `pointer` is the `tileMap` key
+`intensity<<48 | scale<<42 | colour<<28 | textureScale<<14 | textureId`. So the
+base is chosen by that packed ordering, not by which side of the tile it is.
+We always use the tile's own texture as the base pass.
 
-What we do differently is that **we generate independent vertices per face**.
-The client welds them. In the buffer fill:
-
-```java
-long_47 = (long) i_45 << 48 | (long) i_44 << 32 | (i_42 << 16) | i_43;
-//        materialColour       mainColour          tileX       tileZ
-if ((i_40 & anInt8529 - 1) == 0 && (i_41 & anInt8529 - 1) == 0) {
-    node_80 = class453_10.get(long_47);
-}
-```
-
-Grid-aligned vertices with matching colour pairs are shared between faces. If
-that sharing spans the overlay/underlay split within a tile — and the key
-contains only colours and position, nothing that distinguishes the two — then a
-vertex on shape 10's arc is one vertex with one alpha per material, and the
-weight interpolates across the boundary. With per-face vertices, nothing can
-interpolate across that seam no matter what alphas are written, which is
-exactly the symptom.
-
-**This is a hypothesis.** What has NOT been read: where `class453_10` entries
-are consumed, whether welding really spans overlay/underlay faces, and what
-`anInt8529` (the grid-alignment mask) is. Read those before writing code — the
-same mistake was already made once in this section.
+Also note the material identity itself: a `Node_Sub6` is keyed on **texture +
+texture scale + water tile only** — *not* colour. Colour is per-vertex in every
+material's buffer, so two vertices sharing a texture share a material however
+different their colours.
 
 ### Two colour channels per vertex
 
@@ -369,25 +413,26 @@ colour, and the vertex colour written to the stream is the **material** one
 each `Node_Sub6.method12145`. Whether that distinction matters visually is
 unverified.
 
-### Where to pick this up
+### What we ported
 
-**The alpha write is found** (`method12143`, above) and the splatting model
-turned out to match ours. The open question is now vertex welding — read
-`class453_10`, `anInt8529`, and whether sharing spans the overlay/underlay
-split, before writing anything.
+In `emitTile`'s underlay loop: shape-vertex ids are now threaded through
+`splitFace` to each emitted triangle, and a vertex with no perimeter winner
+whose id is in `OVERLAY_SHAPE_COVERS[shape]` takes `overlayHsl`, `overlayTexture`
+and `ownScale`. `emitTri` grew a `vertHsl` per-vertex colour override to carry
+it, since mode 1 otherwise derives colour from position alone.
 
-**Then the shape of the fix is known.** Our underlay splatting already does
-this in miniature — base pass, then one alpha-masked crossfade pass per
-neighbouring texture. What's needed is to lift it from "per face group" to
-"per tile": collect the distinct materials across *all* of a tile's faces,
-overlay and underlay together, and emit the whole tile once per material with
-the per-vertex alpha. That would subsume the ad-hoc overlay crossfade passes
-added with mechanism 1, and probably the legacy `hasOverride` midpoint split in
-the underlay path too (which currently sits alongside the real `3832` split and
-may double up on some tiles).
+Two guards that are not literally in `method5851`:
 
-Mechanism 2 stays worth having either way: more vertices means a finer weight
-field. It's resolution for the blend, not the blend itself.
+- gated on `hasOverlay`, standing in for the client nulling out an overlay with
+  neither a primary nor a secondary colour before `aBool3810` is ever set
+  (`method5846:633`). We don't decode `secondaryRGB`.
+- the legacy `hasOverride` midpoint split is now **skipped on blending tiles**.
+  Its synthetic midpoints have no shape-vertex id, and the blending family
+  already subdivides. It still runs on non-blending tiles, where it remains an
+  approximation the client doesn't make.
+
+Mechanism 2 matters more now than it looked: more vertices means a finer weight
+field for this blend. It's resolution, not the blend itself.
 
 ---
 
@@ -398,6 +443,8 @@ field. It's resolution for the blend, not the blend itself.
 - `anInt7053`, the low byte of the packed `slot`. We tie-break on the overlay id
   instead (`floSlotKey`). Pre-existing, and consistent with the old corner path.
 - The legacy `hasOverride` 4-way midpoint split of underlay triangles is still
-  in `emitTile` alongside the ported `3832` split.
+  in `emitTile` alongside the ported `3832` split, on non-blending tiles.
+- A face's opaque base pass is the tile's own texture, not the client's
+  lowest-`pointer` material. See "the splat model" above.
 - Shapes >= 13 fall back to the unblendable family; the 13-entry tables don't
   cover them.
