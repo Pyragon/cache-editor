@@ -61,6 +61,18 @@ Chromium silently blocks reading, writing, and even *enumerating* files with "da
 
 `enums` (and the `params`/struct/CS2-script systems it's shared with) use a single-character "ScriptVarType" tagging convention for `keyTypeChar`/`valueTypeChar` — e.g. `i` = int, `s` = string, `o` = obj id, `n` = npc id, `J` = struct id, etc. The full known mapping lives in `EnumViewer.tsx`'s `TYPE_LABELS`, sourced from the darkan-game-client/cryogen client source. Values are numeric unless `valueTypeChar === 's'`; keys are always numeric across the real cache dump.
 
+### Recording render knowledge for the editor (`EDITOR.md`)
+
+The renderer runs well ahead of the editor, so tracing client behaviour keeps
+teaching us how cache fields work long before there's a UI for them. **When a
+change teaches you how a cache field affects rendering, add an entry to
+`EDITOR.md`** — which fields drive it (name as dumped, opcode, and the client's
+own name where they disagree), what's already editable and in which viewer,
+what isn't, and the gotchas (packed values, rebuild triggers, re-dump needs).
+The render fix itself belongs in the code and in `docs/`; `EDITOR.md` answers
+"if someone wanted to make this editable tomorrow, what would they need to
+know?". It's a knowledge file — open work still goes in `TODO.md`.
+
 ### Reference repos for client/cache logic
 
 When porting or verifying RuneScape client/cache logic (binary formats, math, type systems), only trust the user's own repos whose names contain **cryogen** or **darkan** (sibling repos under the same GitHub workspace, e.g. `cryogen-cache`, `darkan-game-client`, `darkan-server`) — not third-party projects like rsmv or RuneLite, which have been found to contain incompatible assumptions for this cache/client revision.
