@@ -35,9 +35,11 @@ not the long-form project log.
   probably not only them.
 - **Point lights** — implemented 2026-07-25 but **not yet signed off**. Region
   `lights[]` are baked into loc vertex colours (`buildLightGrid` in mapScene.ts,
-  the point-light term in `computeModelLitRgb`). Locs only, which matches the
-  client: only the Model shader declares `PointLights*`, and `HardwareGround`
-  always passes a light count of 0. Flicker is baked at intensity 1.0 — the
+  the point-light term in `computeModelLitRgb`). Locs only — which matches the
+  client's *shader* path (only the Model shader declares `PointLights*`, and
+  `HardwareGround` always passes a light count of 0) but NOT the ground, which
+  has a separate path of its own; see the last item below.
+  Flicker is baked at intensity 1.0 — the
   client's value with "Flickering effects" off; animating it needs the lights as
   shader uniforms rather than baked colours. What the eyeball pass turned up is
   below.
@@ -59,6 +61,18 @@ between a lit room and a dark one lights on both faces. Still open:
   though "Flickering effects" were off. Open question: is that just because we
   haven't implemented the setting, or does the field mean something else?
   Trace the client before building anything. **Wanted editable either way.**
+- **The ground gets point lights too, and we don't do it.** Found 2026-07-25
+  while tracing the reach bug — it corrects the earlier "ground is correctly
+  excluded" note. It's true that only the **Model** shader declares
+  `PointLights*` and that `HardwareGround` always passes a light count of 0, but
+  the ground has a *separate* path: `SceneObjectManager.method3431` calls
+  `aGroundArray2591[plane].method6713(lightNode, codes)` for every registered
+  light, and `HardwareGround.method6713` queues a `Node_Sub8` that builds
+  terrain normals from the height field over the light's footprint and emits its
+  own geometry. `method3431` also derives the per-tile `codes` (1 = open, 2..5 =
+  a wall on a given side, from `getInteractableObject(...).aByte9454`) so
+  wall-shadowed tiles are carved out of the pool. Untraced past the `Node_Sub8`
+  constructor. This is why the floor under a torch pools in-game and not here.
 
 ## Terrain / water
 - **The river still looks off** (separate from the un-signed-off water colour
