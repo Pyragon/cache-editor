@@ -1147,8 +1147,19 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       if (marqueeDivRef.current) marqueeDivRef.current.style.display = 'none'
     }
 
-    // drag-to-move: left-drag starting on the selected (editable) loc
-    let movingLoc: { entry: LocEntry; index: number } | null = null
+    // How far the pointer must travel before a press counts as a drag rather
+    // than a click. Shared by the click test in onPointerUp and the drag-to-move
+    // arming below — they used to disagree, which is how a 1px twitch on a
+    // selected loc could commit a move.
+    const DRAG_PX = 5
+
+    // drag-to-move: left-drag starting on the selected (editable) loc.
+    // `grabTx/grabTy` is the tile that was under the cursor at press time, so
+    // the loc moves by DELTA and not to wherever the ray lands — pressing a
+    // multi-tile object anywhere but its anchor tile must not teleport it.
+    // `armed` stays false until the pointer passes DRAG_PX; an unarmed release
+    // falls through and is handled as an ordinary click.
+    let movingLoc: { entry: LocEntry; index: number; grabTx: number; grabTy: number; armed: boolean } | null = null
     let suppressClick = false
 
     function onPointerMove(e: PointerEvent) {
@@ -1158,15 +1169,29 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       if (paintingDrag && terrainBrushRef.current) paintAtPointer(false)
       if (marquee) marqueeRect(e)
       if (movingLoc) {
+        if (!movingLoc.armed) {
+          if (Math.abs(e.clientX - downX) <= DRAG_PX && Math.abs(e.clientY - downY) <= DRAG_PX) return
+          movingLoc.armed = true
+        }
         const hit = pick()
         if (hit) {
-          const t = worldTileOf(hit.point)
-          if (t.tx >= 0 && t.tx < 64 && t.ty >= 0 && t.ty < 64) {
+          const t = movingTargetTile(movingLoc, hit.point)
+          if (t) {
             const [objectId, type, rotation, , , plane] = movingLoc.entry
             ghostUpdateRef.current?.({ objectId, type, rotation, plane }, t.tx, t.ty)
           }
         }
       }
+    }
+    /** Where a drag-in-progress would drop the loc: its anchor shifted by the
+     *  tile delta the cursor has travelled since the press. Null when that
+     *  lands outside the centre region. */
+    function movingTargetTile(moving: { entry: LocEntry; grabTx: number; grabTy: number }, point: THREE.Vector3) {
+      const t = worldTileOf(point)
+      const tx = moving.entry[3] + (t.tx - moving.grabTx)
+      const ty = moving.entry[4] + (t.ty - moving.grabTy)
+      if (tx < 0 || tx >= 64 || ty < 0 || ty >= 64) return null
+      return { tx, ty }
     }
     function onPointerLeave() {
       pointerInside = false
@@ -1223,10 +1248,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         updatePointer(e)
         const hit = pick()
         const res = hit ? resolveLocAt(hit) : null
-        if (res && res.isCenter && res.index === sel.index) {
+        if (res && res.isCenter && res.index === sel.index && hit) {
+          const grab = worldTileOf(hit.point)
           movingLoc = {
             entry: [sel.objectId, sel.type, sel.rotation, sel.x, sel.y, sel.plane] as LocEntry,
             index: sel.index,
+            grabTx: grab.tx,
+            grabTy: grab.ty,
+            armed: false,
           }
           return
         }
@@ -1263,16 +1292,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         return
       }
 
-      // finish a drag-to-move
+      // finish a drag-to-move. An unarmed press never travelled far enough to
+      // be a drag, so it must not commit anything — it falls through to the
+      // click handling below and simply re-selects the loc.
       if (movingLoc) {
         const moving = movingLoc
         movingLoc = null
         ghostClearRef.current?.()
-        const hit = pick()
+        const hit = moving.armed ? pick() : null
         if (hit) {
-          const t = worldTileOf(hit.point)
-          if (t.tx >= 0 && t.tx < 64 && t.ty >= 0 && t.ty < 64
-              && (t.tx !== moving.entry[3] || t.ty !== moving.entry[4])) {
+          const t = movingTargetTile(moving, hit.point)
+          if (t && (t.tx !== moving.entry[3] || t.ty !== moving.entry[4])) {
             const base = objectsPropRef.current ?? data.def.objects
             const next = base.map((o) => [...o] as LocEntry)
             next[moving.index] = [moving.entry[0], moving.entry[1], moving.entry[2], t.tx, t.ty, moving.entry[5]] as LocEntry
@@ -1281,11 +1311,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             return
           }
         }
-        // released in place — treat as a plain re-click below
+        // never armed, dropped out of bounds, or released in place — treat as
+        // a plain re-click below
       }
 
       if (suppressClick) { suppressClick = false; return }
-      if (Math.abs(e.clientX - downX) > 5 || Math.abs(e.clientY - downY) > 5) return // drag, not a click
+      if (Math.abs(e.clientX - downX) > DRAG_PX || Math.abs(e.clientY - downY) > DRAG_PX) return // drag, not a click
 
       // armed paste: a click stamps the clipboard at the tile (SW anchor)
       if (pasteArmedRef.current) {

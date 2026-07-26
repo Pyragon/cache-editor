@@ -210,32 +210,26 @@ Requested 2026-07-25. These are UI/UX work, not cache-format work — grouped
 here rather than in `TODO.md` because they share one theme: the 3D map viewer
 shows far more than it lets you change.
 
-## BUG: an accidental drag moves the selected object
+## Pointer-interaction invariants (drag-to-move)
 
-**Reproduce:** select an object in the View tab, then press and release on it
-with any small mouse movement — or, on a multi-tile object, just click it
-again. It relocates.
+Written up because breaking either of these silently corrupts placements on a
+misclick — which is exactly what the drag-to-move path did until 2026-07-25.
 
-**Root cause found** (`MapSceneViewer.tsx:1220-1233`, commit-free, not yet
-fixed). Two independent faults:
+1. **One drag threshold, shared.** `DRAG_PX` in `MapSceneViewer.tsx` decides
+   click-vs-drag for *both* the click handler and drag-to-move arming. They were
+   separate before: the 5px test existed but sat after the move path's early
+   return, so it never guarded a move and a 1px twitch committed an edit. Any
+   new press-and-drag interaction must arm off the same constant.
+2. **Move by delta, never by picked tile.** A drag moves a loc by the tile
+   delta the cursor has travelled since the press (`movingTargetTile`), not to
+   whatever tile the ray lands on. Dropping on the picked tile means pressing a
+   multi-tile object anywhere except its anchor tile is already "a different
+   tile", so a plain click teleports it there.
 
-1. **No drag threshold on the move path.** `onPointerDown` arms `movingLoc` on
-   *any* left press on the selected editable loc. The 5px click-vs-drag test
-   exists — `onPointerUp:1288` — but it sits *after* the `movingLoc` block
-   returns at :1281, so it never guards a move. A 1px twitch commits an edit.
-2. **The drop tile comes from the ray, not from a delta.** `onPointerUp:1273`
-   moves the loc to whatever tile is under the cursor on release, and only
-   treats it as "released in place" if that tile equals the anchor tile
-   (`entry[3], entry[4]`). For an object spanning several tiles, pressing
-   anywhere except its anchor tile is already a different tile — so a plain
-   click teleports it to the tile you clicked. Note `res.isCenter` in the arming
-   check does **not** help: `isCenter` means "belongs to the centre region"
-   (:1107), not "the object's centre tile".
-
-**Fix shape:** arm on pointerdown but don't *enter* move mode until the pointer
-has travelled past the same 5px threshold; and move by tile **delta** from the
-press point, not by absolute picked tile. Both faults must go — fixing only the
-threshold still lets a deliberate 6px drag on a big object jump it to the cursor.
+Related trap: `resolveLocAt`'s `isCenter` means "belongs to the centre region"
+(`:1107`), **not** "the object's centre tile". It does not tell you where on an
+object the user clicked, and reading it that way is what made fault 2 look
+guarded when it wasn't.
 
 ## Object (loc) panel — it shows almost nothing and edits live nowhere
 
