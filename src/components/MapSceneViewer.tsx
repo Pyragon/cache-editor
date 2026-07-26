@@ -11,12 +11,14 @@ import type { LocEntry, MapData, MapRegionDef, MapTerrain } from '../loaders/map
 import { SIZE, decodeTerrain, decodeUnderwaterTerrain, tileIndex, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS, LOC_TYPE_LABELS } from '../loaders/maps'
 import { rgbToRenderedHex, DEFAULT_MODEL_SUN } from '../loaders/models'
 import { NumberInput } from './defFields'
-import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildRegionOutline, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh } from './mapScene'
+import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildRegionOutline, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef } from './mapScene'
 import { LocAnimator } from './locAnimator'
 import type { AnimationDef } from '../loaders/animations'
 import type { ModelData } from '../loaders/models'
-import type { SceneConfigs, LocRef, MarkerInfo, RegionLight, SunConfig } from './mapScene'
+import type { SceneConfigs, LocRef, MarkerInfo, ObjectDefJson, RegionLight, SunConfig } from './mapScene'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
+import ObjectDefEditor from './ObjectDefEditor'
+import type { AreaInfo, MapSpriteInfo } from './ObjectDefEditor'
 import './MapSceneViewer.css'
 
 // 3D scene preview of a map region and its 8 neighbours (the client always
@@ -168,31 +170,34 @@ type LocSelection = {
   sizeX: number
   sizeY: number
   models: string
-  /** def.mapSpriteId (-1 = none) + resolved sprite frame for the preview */
-  mapSpriteId: number
-  spriteUrl?: string
-  /** def.mapCategoryId (-1 = none) — the areas config whose icon this
-   *  placement puts on the minimap (e.g. the bank symbol on a bank chest) */
-  mapCategoryId: number
-  areaName?: string
-  areaSpriteUrl?: string
+  /** The object definition behind this placement — the draft one when it's
+   *  being edited. Everything except the six placement fields above lives
+   *  here, and is shared by every placement of the object. Null until the
+   *  async read lands. */
+  def: ObjectDefJson | null
 }
+
+/** A scene object the build tracks so later passes can find it by role. */
+type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'riverbed' | 'loc' | 'marker' | 'light' | 'outline' }
+/** Which tagged kinds the sun tint / HDR multiplier is allowed to touch: the
+ *  world geometry only. `applyTint` OVERWRITES `material.color` (world materials
+ *  keep their colour in vertex colours, so there's nothing to preserve), which
+ *  erases the colour of any overlay that carries it in the material instead —
+ *  light gizmos, marker diamonds, region outlines. */
+const TINTED_KINDS: Tagged['kind'][] = ['terrain', 'riverbed', 'loc']
 
 type MarkerSelection = {
   kind: 'marker'
   markerKind: MarkerInfo['kind']
+  /** the kind to fall back to when an edit clears every id field */
+  fallback: 'barrier' | 'other'
   objectId: number
-  lines: string[]
-  spriteUrl?: string
-  areaSpriteUrl?: string
-}
-
-/** Resolved areas-config info for a mapCategoryId. */
-type AreaInfo = {
-  name?: string
-  spriteUrl: string | null
-  bitmap: ImageBitmap | null
-  minimap: boolean
+  worldX: number
+  worldY: number
+  /** The object def backing this marker — the draft one if it's being edited.
+   *  Every field the panel edits lives here, NOT on the placement, so an edit
+   *  changes the object everywhere it appears. */
+  def: ObjectDefJson | null
 }
 
 /** A picked region point light — index into the region's `lights[]`. */
@@ -231,7 +236,16 @@ type TerrainBrush = {
 
 /** One edit against the parent's drafts; coalesce folds it into the previous
  *  undo step (used for drag-stroke continuations). */
-type EditPatch = { terrain?: MapTerrain; objects?: LocEntry[]; lights?: RegionLight[]; coalesce?: boolean }
+type EditPatch = {
+  terrain?: MapTerrain
+  objects?: LocEntry[]
+  lights?: RegionLight[]
+  /** edited object DEFINITIONS keyed by object id (`objects/<id>.json`). Unlike
+   *  the others these aren't region data at all — they're global, so one entry
+   *  changes every placement of that object everywhere in the game. */
+  objectDefs?: Map<number, ObjectDefJson>
+  coalesce?: boolean
+}
 
 /** Copied area: per-plane tile channels + contained placements (relative). */
 type StampClipboard = {
@@ -246,7 +260,7 @@ type StampClipboard = {
   objects: LocEntry[]
 }
 
-export default function MapSceneViewer({ data, focus, objects, terrain, lights, onEdit }: {
+export default function MapSceneViewer({ data, focus, objects, terrain, lights, objectDefs, onEdit }: {
   data: MapData
   focus?: { x: number; y: number; plane: number } | null
   /** draft of the centre region's placements (edits not yet saved) — kept
@@ -259,6 +273,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
    *  until the parent has read the environment file; a light edit re-bakes the
    *  centre locs, since point lights are baked into their vertex colours. */
   lights?: RegionLight[]
+  /** draft object definitions, keyed by object id — see EditPatch.objectDefs.
+   *  Fed to `LocAssets` so everything the scene resolves through `getDef`
+   *  (marker kinds, models, recolours) shows the edit before it's saved. */
+  objectDefs?: Map<number, ObjectDefJson>
   /** commit any edit — the parent owns the drafts, undo history, and save */
   onEdit?: (patch: EditPatch) => void
 }) {
@@ -299,17 +317,28 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const selectFromListRef = useRef<((entry: LocEntry, index: number) => void) | null>(null)
   // light-list row click → select the light + fly the camera to it
   const selectLightFromListRef = useRef<((index: number) => void) | null>(null)
+  const selectMarkerFromListRef = useRef<((marker: MarkerInfo) => void) | null>(null)
   /** show an uncommitted light record in the scene (null = back to committed) */
   const previewLightRef = useRef<((index: number, light: RegionLight | null) => void) | null>(null)
   /** the lights the scene actually built with — used when the parent hasn't
    *  loaded the environment (read-only view) so the list still shows them */
   const [sceneLights, setSceneLights] = useState<RegionLight[]>([])
+  // Marker PLACEMENTS in the centre region, as the build produced them — the
+  // View tab's marker list. Only the build knows which placements are markers
+  // (it takes a model's sentinel colour to tell), so they can't be derived from
+  // the placement list the way the object list is.
+  const [sceneMarkers, setSceneMarkers] = useState<MarkerInfo[]>([])
   const [locNames, setLocNames] = useState<Map<number, string>>(new Map())
 
   // map-sprite previews: config/map_sprites/<id>.json → sprites/<sid>/<sid>_0.png,
   // cached as object URLs (revoked on unmount)
-  const spriteUrlCacheRef = useRef<Map<number, Promise<string | null>>>(new Map())
-  const loadMapSpriteUrl = (mapSpriteId: number): Promise<string | null> => {
+  const spriteUrlCacheRef = useRef<Map<number, Promise<MapSpriteInfo | null>>>(new Map())
+  // `spriteId: -1` is a real, deliberate value here — the map_sprites decoder
+  // has an opcode (4) whose only job is to blank the sprite, and 7 of the 106
+  // records use it (22 alone is referenced by ~940 object defs). So the result
+  // distinguishes "record says no sprite" from "sprite failed to load", which
+  // the panel badges differently; a null result means no record at all.
+  const loadMapSpriteInfo = (mapSpriteId: number): Promise<MapSpriteInfo | null> => {
     const cache = spriteUrlCacheRef.current
     let pending = cache.get(mapSpriteId)
     if (!pending) {
@@ -320,10 +349,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           const cfgDir = await (await root.getDirectoryHandle('config')).getDirectoryHandle('map_sprites')
           const cfgFile = await (await cfgDir.getFileHandle(`${mapSpriteId}.json`)).getFile()
           const def = JSON.parse(await cfgFile.text()) as { spriteId: number }
-          if (def.spriteId < 0) return null
-          const spriteDir = await (await root.getDirectoryHandle('sprites')).getDirectoryHandle(String(def.spriteId))
-          const png = await (await spriteDir.getFileHandle(`${def.spriteId}_0.png`)).getFile()
-          return URL.createObjectURL(png)
+          if (def.spriteId < 0) return { spriteId: -1, url: null }
+          try {
+            const spriteDir = await (await root.getDirectoryHandle('sprites')).getDirectoryHandle(String(def.spriteId))
+            const png = await (await spriteDir.getFileHandle(`${def.spriteId}_0.png`)).getFile()
+            return { spriteId: def.spriteId, url: URL.createObjectURL(png) }
+          } catch {
+            return { spriteId: def.spriteId, url: null } // sprite not dumped
+          }
         } catch {
           return null
         }
@@ -332,8 +365,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     }
     return pending
   }
-  const loadMapSpriteUrlRef = useRef(loadMapSpriteUrl)
-  loadMapSpriteUrlRef.current = loadMapSpriteUrl
+  const loadMapSpriteInfoRef = useRef(loadMapSpriteInfo)
+  loadMapSpriteInfoRef.current = loadMapSpriteInfo
 
   // areas config (mapCategoryId → map function icon): config/areas/<id>.json,
   // icon sprite = defaultIconArchive (cryogen's spriteId field is the
@@ -360,7 +393,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               bitmap = await createImageBitmap(png)
             } catch { /* icon sprite not dumped */ }
           }
-          return { name: def.areaName, spriteUrl, bitmap, minimap: def.displayedOnMinimap !== false }
+          return { name: def.areaName, spriteUrl, bitmap, minimap: def.displayedOnMinimap !== false, iconArchive: def.defaultIconArchive }
         } catch {
           return null
         }
@@ -374,7 +407,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
 
   useEffect(() => () => {
     for (const pending of spriteUrlCacheRef.current.values()) {
-      void pending.then((url) => { if (url) URL.revokeObjectURL(url) })
+      void pending.then((info) => { if (info?.url) URL.revokeObjectURL(info.url) })
     }
     for (const pending of areaInfoCacheRef.current.values()) {
       void pending.then((info) => { if (info?.spriteUrl) URL.revokeObjectURL(info.spriteUrl) })
@@ -508,7 +541,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   }
 
   // --- Place mode: a ghost of the object follows the cursor; click commits --
-  const [sideTab, setSideTab] = useState<'view' | 'place' | 'terrain'>('view')
+  // View = the lists you browse; Edit = whatever is selected, and the only tab
+  // where a left-drag moves an object. Selecting anything (scene click or list
+  // row) switches to Edit, so you can't end up selected-but-elsewhere without
+  // changing tab on purpose.
+  const [sideTab, setSideTab] = useState<'view' | 'edit' | 'place' | 'terrain'>('view')
   const [placing, setPlacing] = useState(false)
   const [placeMultiple, setPlaceMultiple] = useState(false)
   const placeMultipleRef = useRef(false)
@@ -580,6 +617,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const skyMeshRef = useRef<THREE.Mesh | null>(null)
   const highlightClearRef = useRef<(() => void) | null>(null)
   const lightHighlightClearRef = useRef<(() => void) | null>(null)
+  // markers highlight with the select outline rather than a mesh highlight, so
+  // clearing a selection needs this as well as the two above
+  const selectOutlineClearRef = useRef<(() => void) | null>(null)
+  const refreshMarkersRef = useRef<(() => Promise<void>) | null>(null)
   const [status, setStatus] = useState('building terrain…')
   const [hoverText, setHoverText] = useState('')
   // Loading bar = the actual fraction of the build's passes completed (the build
@@ -603,8 +644,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const [selection, setSelection] = useState<Selection | null>(null)
   const selectionRef = useRef<Selection | null>(null)
   selectionRef.current = selection
+  // The marker panel's uncommitted draft def, pushed here on every keystroke so
+  // the scene previews it (LightPanel's onPreview, same idea). Layered OVER
+  // `objectDefs` — the applied drafts — when the overrides are handed to
+  // LocAssets, so an in-flight edit wins over an applied one for that object.
+  const [previewDef, setPreviewDef] = useState<{ id: number; def: ObjectDefJson } | null>(null)
+  // View-tab section collapse state (objects/lights/markers)
+  const [openLists, setOpenLists] = useState({ objects: true, lights: true, markers: true })
   const planeGroupsRef = useRef<(THREE.Group | null)[]>([null, null, null, null])
-  type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'riverbed' | 'loc' | 'marker' | 'light' | 'outline' }
   const taggedRef = useRef<Tagged[]>([])
   // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
   type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; mesh: THREE.Mesh; sphere: THREE.Sphere }
@@ -798,6 +845,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     }
     const hoverOutline = tileOutline(0xffe14d)
     const selectOutline = tileOutline(0xff5ad2)
+    selectOutlineClearRef.current = () => { selectOutline.visible = false }
 
     // terrain-brush footprint ring (unit circle of one tile radius, scaled)
     const ringPts: number[] = []
@@ -949,23 +997,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     // fill in the async def details (name/size/models/map sprite) for a loc
     function fillLocDef(objectId: number) {
       void (async () => {
+        // getDef returns the draft def when one exists, so reselecting an
+        // object mid-edit reopens the panel on the edit, not the file
         const def = await assetsRef.current?.getDef(objectId)
         if (!def) return
-        const mapSpriteId = def.mapSpriteId ?? -1
-        const spriteUrl = mapSpriteId >= 0 ? await loadMapSpriteUrlRef.current(mapSpriteId) : null
-        const mapCategoryId = def.mapCategoryId ?? -1
-        const area = mapCategoryId >= 0 ? await loadAreaInfoRef.current(mapCategoryId) : null
         setSelection((prev) => prev?.kind === 'loc' && prev.objectId === objectId ? {
           ...prev,
           name: def.name && def.name !== 'null' ? def.name : 'Object',
           sizeX: def.sizeX ?? 1,
           sizeY: def.sizeY ?? 1,
           models: def.objectModelIds ? def.objectModelIds.flat().join(', ') : '',
-          mapSpriteId,
-          spriteUrl: spriteUrl ?? undefined,
-          mapCategoryId,
-          areaName: area?.name,
-          areaSpriteUrl: area?.spriteUrl ?? undefined,
+          def,
         } : prev)
       })()
     }
@@ -1007,7 +1049,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         kind: 'loc', name: 'Object', objectId, type, rotation, x, y, plane,
         regionX: data.def.regionX, regionY: data.def.regionY,
         inCenter: true, index, editable: index >= 0,
-        sizeX: 1, sizeY: 1, models: '', mapSpriteId: -1, mapCategoryId: -1,
+        sizeX: 1, sizeY: 1, models: '', def: null,
       })
       fillLocDef(objectId)
     }
@@ -1076,11 +1118,50 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
 
     /** Select a light: panel + highlight, clearing any loc/marker selection. */
     function selectLight(index: number, light: RegionLight) {
-      setSideTab('view') // the selection panel lives in the View tab
+      setSideTab('edit') // selecting anything jumps to the Edit tab
       setSelection({ kind: 'light', index, light })
       selectOutline.visible = false
       clearLocHighlight()
       highlightLight(light)
+    }
+
+    /** Select a marker: panel + outline, clearing any loc/light selection.
+     *  `gp` is the world position of the marker group it belongs to (the region
+     *  offset), since MarkerInfo coordinates are region-local. */
+    function selectMarker(marker: MarkerInfo, gp: THREE.Vector3) {
+      const regionX = data.def.regionX + Math.round(gp.x / (64 * TILE))
+      const regionY = data.def.regionY - Math.round(gp.z / (64 * TILE))
+      setSideTab('edit') // selecting anything jumps to the Edit tab
+      setSelection({
+        kind: 'marker',
+        markerKind: marker.kind,
+        fallback: marker.fallback,
+        objectId: marker.objectId,
+        worldX: regionX * 64 + marker.tileX,
+        worldY: regionY * 64 + marker.tileY,
+        def: null, // filled below; the panel shows a loading state until then
+      })
+      selectOutline.position.set(gp.x + marker.tileX * TILE, gp.y + marker.y + 8, gp.z - marker.tileY * TILE)
+      selectOutline.visible = true
+      clearLocHighlight()
+      clearLightHighlight()
+      void (async () => {
+        // getDef hands back the draft def when one exists, so reselecting a
+        // marker mid-edit reopens the panel on the edit, not the file
+        const def = await assetsRef.current?.getDef(marker.objectId) ?? null
+        setSelection((prev) => prev?.kind === 'marker' && prev.objectId === marker.objectId
+          ? { ...prev, def }
+          : prev)
+      })()
+    }
+
+    // marker-list row click: same selection, plus a camera move (centre-region
+    // markers only, so the group offset is the origin)
+    selectMarkerFromListRef.current = (marker) => {
+      controls.target.set(marker.x, marker.y, marker.z)
+      camera.position.set(marker.x, marker.y + 3000, marker.z + 3600)
+      controls.update()
+      selectMarker(marker, new THREE.Vector3(0, 0, 0))
     }
 
     // light-list row click: select it and fly the camera over its tile
@@ -1255,8 +1336,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         return
       }
 
-      // marquee: Shift+drag — select objects (View) or copy an area (Terrain)
-      if (e.shiftKey && (sideTabRef.current === 'view' || sideTabRef.current === 'terrain')) {
+      // marquee: Shift+drag — select objects (Edit) or copy an area (Terrain)
+      if (e.shiftKey && (sideTabRef.current === 'edit' || sideTabRef.current === 'terrain')) {
         updatePointer(e)
         const hit = pick()
         const tile0 = hit ? (() => { const t = worldTileOf(hit.point); return { tx: t.tx, ty: t.ty } })() : null
@@ -1266,13 +1347,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       }
 
       // drag-to-move: press on the currently selected editable loc.
-      // The View-tab gate is not a silent restriction — selecting a loc forces
-      // the tab (`setSideTab('view')`, three call sites) and selection is
+      // The Edit-tab gate is not a silent restriction — selecting a loc forces
+      // that tab (`setSideTab('edit')`, three call sites) and selection is
       // blocked outright on the Terrain tab, so you can only be selected-but-
       // elsewhere by switching tabs on purpose. On those tabs left-drag already
       // belongs to the terrain brush and to placement, so it has to yield.
       const sel = selectionRef.current
-      if (sideTabRef.current === 'view' && sel?.kind === 'loc' && sel.editable) {
+      if (sideTabRef.current === 'edit' && sel?.kind === 'loc' && sel.editable) {
         updatePointer(e)
         const hit = pick()
         const res = hit ? resolveLocAt(hit) : null
@@ -1307,13 +1388,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       if (paintingDrag) { paintingDrag = false; return }
       if (e.button !== 0) return // middle/right are camera buttons
 
-      // finish a marquee: select objects (View) or copy the area (Terrain)
+      // finish a marquee: select objects (Edit) or copy the area (Terrain)
       if (marquee) {
         const m = marquee
         marquee = null
         hideMarquee()
         updatePointer(e)
-        if (sideTabRef.current === 'view') {
+        if (sideTabRef.current === 'edit') {
           marqueeSelect?.(m.x0, m.y0, e.clientX, e.clientY)
         } else if (m.tile0) {
           const hit = pick()
@@ -1409,42 +1490,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         if (marker) {
           const gp = new THREE.Vector3()
           mesh.getWorldPosition(gp)
-          const regionX = data.def.regionX + Math.round(gp.x / (64 * TILE))
-          const regionY = data.def.regionY - Math.round(gp.z / (64 * TILE))
-          const mwx = regionX * 64 + marker.tileX
-          const mwy = regionY * 64 + marker.tileY
-          setSideTab('view') // the selection panel lives in the View tab
-          setSelection({
-            kind: 'marker',
-            markerKind: marker.kind,
-            objectId: marker.objectId,
-            lines: [`world tile ${mwx}, ${mwy}`],
-          })
-          selectOutline.position.set(gp.x + marker.tileX * TILE, gp.y + marker.y + 8, gp.z - marker.tileY * TILE)
-          selectOutline.visible = true
-          clearLocHighlight()
-          clearLightHighlight()
-          void (async () => {
-            const def = await assetsRef.current?.getDef(marker.objectId)
-            if (!def) return
-            const mapSpriteId = def.mapSpriteId ?? -1
-            const spriteUrl = mapSpriteId >= 0 ? await loadMapSpriteUrlRef.current(mapSpriteId) : null
-            const mapCategoryId = def.mapCategoryId ?? -1
-            const area = mapCategoryId >= 0 ? await loadAreaInfoRef.current(mapCategoryId) : null
-            setSelection((prev) => prev?.kind === 'marker' ? {
-              ...prev,
-              lines: [
-                `world tile ${mwx}, ${mwy}`,
-                def.ambientSoundId !== undefined ? `ambient sound ${def.ambientSoundId}` : '',
-                def.soundId !== undefined ? `sound ${def.soundId}` : '',
-                def.soundGroupIds?.length ? `sound group [${def.soundGroupIds.join(', ')}]` : '',
-                mapCategoryId >= 0 ? `map icon ${mapCategoryId}${area?.name ? ` — ${area.name}` : ''}` : '',
-                mapSpriteId >= 0 ? `map sprite ${mapSpriteId}` : '',
-              ].filter(Boolean),
-              spriteUrl: spriteUrl ?? undefined,
-              areaSpriteUrl: area?.spriteUrl ?? undefined,
-            } : prev)
-          })()
+          selectMarker(marker, gp)
           return
         }
       }
@@ -1453,7 +1499,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         const res = resolveLocAt(hit)
         if (res) {
           const { loc, isCenter, index, meshRegionX, meshRegionY } = res
-          setSideTab('view') // the selection panel lives in the View tab
+          setSideTab('edit') // selecting anything jumps to the Edit tab
           setSelection({
             kind: 'loc',
             name: 'Object',
@@ -1471,8 +1517,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             sizeX: 1,
             sizeY: 1,
             models: '',
-            mapSpriteId: -1,
-            mapCategoryId: -1,
+            def: null, // filled by fillLocDef below
           })
           selectOutline.visible = false
           clearLightHighlight()
@@ -1824,10 +1869,49 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           })
         }
 
+        // Re-derive every marker's kind from the (possibly edited) object defs
+        // and rebuild the diamonds in place. A def edit can turn a sound
+        // emitter into a map-icon anchor, which is purely a colour change — so
+        // this deliberately does NOT go near the region rebuild. Cheap enough
+        // to run per keystroke: markers are a handful of tiny meshes.
+        refreshMarkersRef.current = async () => {
+          const a = assetsRef.current
+          if (!a) return
+          for (const t of taggedRef.current) {
+            if (t.kind !== 'marker') continue
+            const group = t.obj as THREE.Group
+            const all: MarkerInfo[] = []
+            group.traverse((o) => {
+              const list = (o as THREE.Mesh).userData?.markers as MarkerInfo[] | undefined
+              if (list) all.push(...list)
+            })
+            let changed = false
+            for (const m of all) {
+              const d = await a.getDef(m.objectId)
+              const kind = (d ? markerKindFromDef(d) : null) ?? m.fallback
+              if (kind !== m.kind) { m.kind = kind; changed = true }
+            }
+            if (!changed) continue
+            const next = buildMarkersMesh(all)
+            if (!next) continue
+            next.position.copy(group.position)
+            next.visible = group.visible // the per-kind toggle only re-runs on its own deps
+            const parent = group.parent
+            parent?.remove(group)
+            disposeDeep(group)
+            track(next)
+            parent?.add(next)
+            t.obj = next // the tag outlives the mesh it points at
+          }
+        }
+
         refreshTintRef.current = () => {
-          // light gizmos are editor overlays showing each light's own colour —
-          // the sun tint / HDR multiplier must not touch them
-          for (const t of taggedRef.current) if (t.kind !== 'light') applyTint(t.obj)
+          // Same allowlist as the initial pass below. This used to be "anything
+          // that isn't a light gizmo", which quietly whitened every marker
+          // diamond and region outline — and since the effect that calls this
+          // depends on `status`, it ran after EVERY build, so markers were
+          // never seen in their own colour at all.
+          for (const t of taggedRef.current) if (TINTED_KINDS.includes(t.kind)) applyTint(t.obj)
         }
 
         // the centre region renders the parent's draft placements, so an
@@ -1928,6 +2012,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           const shadows = blurredShadows(locBuilds)
 
           if (isCenter) {
+            // the marker list covers the region being edited, like the object list
+            setSceneMarkers(locBuilds.flatMap((b) => b?.markers ?? []))
             minimapBaseRef.current = await renderMinimapGround(terrain, configs, 0, mosaic.underlayRgbBlurFor(dx, dy, 0), assets)
             setMinimapVersion((v) => v + 1)
           }
@@ -2056,7 +2142,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         }
 
         for (const { obj, kind } of taggedRef.current) {
-          if (kind === 'terrain' || kind === 'riverbed' || kind === 'loc') applyTint(obj)
+          if (TINTED_KINDS.includes(kind)) applyTint(obj)
         }
 
 
@@ -2245,7 +2331,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           }
         }
 
-        // View-tab marquee: project every centre-region loc and select those
+        // Edit-tab marquee: project every centre-region loc and select those
         // whose anchor tile lands inside the dragged screen rectangle
         marqueeSelect = (x0, y0, x1, y1) => {
           const rect = renderer.domElement.getBoundingClientRect()
@@ -2344,6 +2430,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           }
           const shadows = blurredShadows(locBuilds)
 
+          setSceneMarkers(locBuilds.flatMap((b) => b?.markers ?? []))
           minimapBaseRef.current = await renderMinimapGround(nextTerrain, configs, 0, nextMosaic.underlayRgbBlurFor(0, 0, 0), assets)
           setMinimapVersion((v) => v + 1)
 
@@ -2488,9 +2575,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       ghostClearRef.current?.()
       highlightClearRef.current = null
       lightHighlightClearRef.current = null
+      selectOutlineClearRef.current = null
       rebuildCenterRef.current = null
       selectFromListRef.current = null
       selectLightFromListRef.current = null
+      selectMarkerFromListRef.current = null
       previewLightRef.current = null
       // light gizmos are rebuilt in place rather than tracked, so they aren't in
       // `disposables` — free them here
@@ -2563,13 +2652,28 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     // camera to the current position instead of the far default overview
   }, [focus, data])
 
-  // close-button / cleared selection also drops the loc + light highlights
+  // close-button / cleared selection also drops every selection visual. The
+  // marker outline was missing here, so closing a sound emitter's panel left it
+  // outlined in the scene with nothing selected.
   useEffect(() => {
     if (!selection) {
       highlightClearRef.current?.()
       lightHighlightClearRef.current?.()
+      selectOutlineClearRef.current?.()
     }
   }, [selection])
+
+  // Draft object defs → the scene. The panel's in-flight edit layers over the
+  // applied drafts, then marker kinds are re-derived; `status` is a dep so a
+  // fresh build (new LocAssets) gets the overrides handed to it again.
+  useEffect(() => {
+    const assets = assetsRef.current
+    if (!assets) return
+    const merged = new Map(objectDefs ?? [])
+    if (previewDef) merged.set(previewDef.id, previewDef.def)
+    assets.setDefOverrides(merged)
+    void refreshMarkersRef.current?.()
+  }, [objectDefs, previewDef, status])
 
   // leaving Place mode (cancel, Esc, or a committed placement) drops the ghost
   useEffect(() => {
@@ -2610,6 +2714,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       if (e.ctrlKey || e.metaKey || e.altKey) return
       const k = e.key.toLowerCase()
       if (k === 'v') setSideTab('view')
+      else if (k === 'e') setSideTab('edit')
       else if (k === 'p') setSideTab('place')
       else if (k === 't') setSideTab('terrain')
       else if (k === '[' || k === ']') {
@@ -2656,14 +2761,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           if (def?.options?.some((o) => o != null)) interactive.add(id)
           // nameless utility objects = the marker anchors
           if (def && (!def.name || def.name === 'null')) {
-            const kind: MarkerInfo['kind'] | null =
-              def.soundId !== undefined || def.ambientSoundId !== undefined || (def.soundGroupIds?.length ?? 0) > 0
-                ? 'sound'
-                : def.mapCategoryId !== undefined && def.mapCategoryId >= 0
-                  ? 'mapicon'
-                  : def.mapSpriteId !== undefined && def.mapSpriteId >= 0
-                    ? 'mapsprite'
-                    : null
+            const kind = markerKindFromDef(def)
             if (kind) {
               const entry = listEntries.find((o) => o[0] === id)
               picks.push({ objectId: id, kind, type: entry?.[1] ?? 10 })
@@ -2680,7 +2778,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       }
     })()
     return () => { cancelled = true }
-  }, [listEntries, status])
+    // objectDefs: a def edit changes a marker's kind (and so this list's colour
+    // and the minimap's icon/sprite lookups) without touching the placements
+  }, [listEntries, status, objectDefs])
 
   // MAP_AREAS static elements (world-map-only pins, scanned out of
   // map_areas/static_elements and resolved to area icons) used to be overlaid
@@ -3028,6 +3128,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             </button>
             <button
               type="button"
+              className={sideTab === 'edit' ? 'selected' : ''}
+              onClick={() => { setSideTab('edit'); setPlacing(false); setAddingLight(false) }}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
               className={sideTab === 'place' ? 'selected' : ''}
               onClick={() => setSideTab('place')}
             >
@@ -3076,7 +3183,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               canPlaceLight={canEditLights && status === ''}
             />
           )}
-          {sideTab === 'view' && <>
+          {/* Edit tab: whatever is selected. Selecting anything from the scene
+              or a View-tab list switches here, and this is the only tab where a
+              left-drag moves the selected object. */}
+          {sideTab === 'edit' && <>
           {multiSel.length > 0 && (
             <div className="mapscene-multisel">
               <span className="item-id-badge">{multiSel.length} objects selected</span>
@@ -3098,51 +3208,33 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           )}
           {!selection && multiSel.length === 0 && (
             <p className="mapscene-side-hint">
-              Click an object in the scene to inspect it; drag a selected object
-              to move it. Shift+drag selects multiple objects. Alt+click in the
-              Place/Terrain tabs samples what's under the cursor. Orbit with the
-              middle mouse button, pan with the right.
+              Nothing selected. Click an object, marker or light in the scene —
+              or a row in the View tab's lists — and its details appear here.
+              With something selected, drag it to move it; Shift+drag selects
+              several at once. Alt+click in the Place/Terrain tabs samples
+              what's under the cursor. Orbit with the middle mouse button, pan
+              with the right.
             </p>
           )}
           {selection?.kind === 'marker' && (
-            <>
-              <div className="mapscene-side-head">
-                <span className="enum-title mapscene-side-title">
-                  <span
-                    className="mapscene-info-dot"
-                    style={{ background: `#${MARKER_COLORS[selection.markerKind].toString(16).padStart(6, '0')}` }}
-                  />
-                  {selection.markerKind === 'sound' ? 'Sound emitter'
-                    : selection.markerKind === 'mapicon' ? 'Map icon anchor'
-                    : selection.markerKind === 'mapsprite' ? 'Map sprite anchor'
-                    : selection.markerKind === 'barrier' ? 'Barrier wall'
-                    : 'Marker'}
-                </span>
-                <div className="item-badges">
-                  <span className="item-id-badge">object {selection.objectId}</span>
-                  {selection.lines.map((line, i) => <span key={i} className="item-id-badge">{line}</span>)}
-                </div>
-              </div>
-              {(selection.spriteUrl || selection.areaSpriteUrl) && (
-                <div className="mapscene-sprite-previews">
-                  {selection.areaSpriteUrl && (
-                    <div className="mapscene-sprite-preview">
-                      <span className="item-field-label">Map icon</span>
-                      <img src={selection.areaSpriteUrl} alt="map icon" />
-                    </div>
-                  )}
-                  {selection.spriteUrl && (
-                    <div className="mapscene-sprite-preview">
-                      <span className="item-field-label">Minimap sprite</span>
-                      <img src={selection.spriteUrl} alt="map sprite" />
-                    </div>
-                  )}
-                </div>
-              )}
-              <div className="mapscene-side-actions">
-                <button type="button" className="save-bar-discard" onClick={() => setSelection(null)}>Close</button>
-              </div>
-            </>
+            <MarkerPanel
+              key={`marker-${selection.objectId}`}
+              sel={selection}
+              canEdit={!!onEdit}
+              placements={listEntries.filter((o) => o[0] === selection.objectId).length}
+              root={data.rootHandle ?? null}
+              loadSprite={loadMapSpriteInfo}
+              loadArea={loadAreaInfo}
+              onPreview={(def) => setPreviewDef(def ? { id: selection.objectId, def } : null)}
+              onApply={(def) => {
+                const next = new Map(objectDefs ?? [])
+                next.set(selection.objectId, def)
+                setPreviewDef(null)
+                setSelection({ ...selection, def, markerKind: markerKindFromDef(def) ?? selection.fallback })
+                onEdit?.({ objectDefs: next })
+              }}
+              onClose={() => { setPreviewDef(null); setSelection(null) }}
+            />
           )}
           {selection?.kind === 'light' && (
             <LightPanel
@@ -3171,7 +3263,19 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             <LocPanel
               key={`${selection.regionX},${selection.regionY},${selection.index},${selection.objectId},${selection.x},${selection.y}`}
               sel={selection}
-              onClose={() => setSelection(null)}
+              canEdit={!!onEdit}
+              root={data.rootHandle ?? null}
+              loadSprite={loadMapSpriteInfo}
+              loadArea={loadAreaInfo}
+              onClose={() => { setPreviewDef(null); setSelection(null) }}
+              onPreviewDef={(def) => setPreviewDef(def ? { id: selection.objectId, def } : null)}
+              onApplyDef={(def) => {
+                const next = new Map(objectDefs ?? [])
+                next.set(selection.objectId, def)
+                setPreviewDef(null)
+                setSelection({ ...selection, def, name: def.name && def.name !== 'null' ? def.name : 'Object' })
+                onEdit?.({ objectDefs: next })
+              }}
               onApply={onEdit ? (entry) => {
                 const base = objects ?? data.def.objects
                 const next = base.map((o) => [...o] as LocEntry)
@@ -3189,12 +3293,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               } : undefined}
             />
           )}
+          </>}
+
+          {/* View tab: just the lists. Picking a row selects in the scene and
+              hands over to the Edit tab. */}
+          {sideTab === 'view' && <>
+          <p className="mapscene-side-hint">
+            Browse what's in this region. Clicking a row selects it, moves the
+            camera to it, and opens it in the Edit tab.
+          </p>
           <LocList
             entries={listEntries}
             names={locNames}
             regionX={data.def.regionX}
             regionY={data.def.regionY}
             selectedIndex={selection?.kind === 'loc' && selection.inCenter ? selection.index : -1}
+            open={openLists.objects}
+            onToggle={() => setOpenLists((s) => ({ ...s, objects: !s.objects }))}
             onPick={(entry, index) => selectFromListRef.current?.(entry, index)}
           />
           <LightList
@@ -3202,26 +3317,20 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             regionX={data.def.regionX}
             regionY={data.def.regionY}
             selectedIndex={selection?.kind === 'light' ? selection.index : -1}
+            open={openLists.lights}
+            onToggle={() => setOpenLists((s) => ({ ...s, lights: !s.lights }))}
             onPick={(index) => selectLightFromListRef.current?.(index)}
           />
-          {markerPicks.length > 0 && (
-            <div className="mapscene-markerbox">
-              <span className="item-field-label">Markers in this region</span>
-              <div className="mapscene-marker-chips">
-                {markerPicks.map((m) => (
-                  <span
-                    key={m.objectId}
-                    className="mapscene-marker-chip is-static"
-                    title={`object ${m.objectId}, placement type ${m.type} — click its diamond in the scene to inspect it`}
-                    style={{ borderColor: `#${MARKER_COLORS[m.kind].toString(16).padStart(6, '0')}` }}
-                  >
-                    <span className="mapscene-info-dot" style={{ background: `#${MARKER_COLORS[m.kind].toString(16).padStart(6, '0')}` }} />
-                    {m.kind} {m.objectId}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
+          <MarkerList
+            markers={sceneMarkers}
+            names={locNames}
+            regionX={data.def.regionX}
+            regionY={data.def.regionY}
+            selectedWorld={selection?.kind === 'marker' ? { x: selection.worldX, y: selection.worldY } : null}
+            open={openLists.markers}
+            onToggle={() => setOpenLists((s) => ({ ...s, markers: !s.markers }))}
+            onPick={(marker) => selectMarkerFromListRef.current?.(marker)}
+          />
           </>}
         </aside>
       </div>
@@ -3776,14 +3885,40 @@ function PlacePanel({
   )
 }
 
+const MARKER_TITLES: Record<MarkerInfo['kind'], string> = {
+  sound: 'Sound emitter',
+  mapicon: 'Map icon anchor',
+  mapsprite: 'Map sprite anchor',
+  barrier: 'Barrier wall',
+  other: 'Marker',
+}
+
+/** Clickable heading for a collapsible list section. The lists already carry a
+ *  head with their own count and filter, so this replaces it rather than
+ *  stacking a second one on top. */
+function SectionHead({ open, onToggle, children }: {
+  open: boolean
+  onToggle: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button type="button" className="mapscene-section-toggle" onClick={onToggle} aria-expanded={open}>
+      <span className="mapscene-section-chevron">{open ? '▾' : '▸'}</span>
+      <span className="item-field-label">{children}</span>
+    </button>
+  )
+}
+
 // All placed objects in the centre region: filterable, virtualized (regions
 // carry up to ~2000 placements), row click selects + flies the camera there.
-function LocList({ entries, names, regionX, regionY, selectedIndex, onPick }: {
+function LocList({ entries, names, regionX, regionY, selectedIndex, open, onToggle, onPick }: {
   entries: LocEntry[]
   names: Map<number, string>
   regionX: number
   regionY: number
   selectedIndex: number
+  open: boolean
+  onToggle: () => void
   onPick: (entry: LocEntry, index: number) => void
 }) {
   const [filter, setFilter] = useState('')
@@ -3817,21 +3952,30 @@ function LocList({ entries, names, regionX, regionY, selectedIndex, onPick }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIndex])
 
+  // collapsing unmounts the scroll element, so re-measure when it comes back
+  // rather than trusting the virtualizer's stale element observation
+  useEffect(() => {
+    if (open) virtualizer.measure()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
   return (
     <div className="mapscene-loclist">
       <div className="mapscene-loclist-head">
-        <span className="item-field-label">
+        <SectionHead open={open} onToggle={onToggle}>
           Objects — {filtered.length}{filter ? ` of ${entries.length}` : ''}
           <span className="mapscene-loclist-region"> · region {regionX}, {regionY}</span>
-        </span>
-        <input
-          className="mapscene-loclist-filter"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="filter by name, id or world x,y"
-        />
+        </SectionHead>
+        {open && (
+          <input
+            className="mapscene-loclist-filter"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="filter by name, id or world x,y"
+          />
+        )}
       </div>
-      <div ref={scrollRef} className="mapscene-loclist-scroll">
+      {open && <div ref={scrollRef} className="mapscene-loclist-scroll">
         <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
           {virtualizer.getVirtualItems().map((vi) => {
             const { e, i } = filtered[vi.index]
@@ -3851,7 +3995,7 @@ function LocList({ entries, names, regionX, regionY, selectedIndex, onPick }: {
             )
           })}
         </div>
-      </div>
+      </div>}
     </div>
   )
 }
@@ -3862,11 +4006,13 @@ const lightSwatch = (colorHsl: number) => `#${lightRgb(colorHsl).toString(16).pa
 /** Region point lights, with click-to-select — the reliable way in, since a
  *  light buried inside a lantern is a small gizmo to hit. Adding one lives in
  *  the Place tab, with the rest of the placement tools. */
-function LightList({ lights, regionX, regionY, selectedIndex, onPick }: {
+function LightList({ lights, regionX, regionY, selectedIndex, open, onToggle, onPick }: {
   lights: RegionLight[]
   regionX: number
   regionY: number
   selectedIndex: number
+  open: boolean
+  onToggle: () => void
   onPick: (index: number) => void
 }) {
   const [filter, setFilter] = useState('')
@@ -3883,10 +4029,10 @@ function LightList({ lights, regionX, regionY, selectedIndex, onPick }: {
   return (
     <div className="mapscene-loclist mapscene-lightlist">
       <div className="mapscene-loclist-head">
-        <span className="item-field-label">
+        <SectionHead open={open} onToggle={onToggle}>
           Point lights — {rows.length}{filter ? ` of ${lights.length}` : ''}
-        </span>
-        {lights.length > 8 && (
+        </SectionHead>
+        {open && lights.length > 8 && (
           <input
             className="mapscene-loclist-filter"
             value={filter}
@@ -3895,7 +4041,7 @@ function LightList({ lights, regionX, regionY, selectedIndex, onPick }: {
           />
         )}
       </div>
-      <div className="mapscene-loclist-scroll mapscene-lightlist-scroll">
+      {open && <div className="mapscene-loclist-scroll mapscene-lightlist-scroll">
         {rows.map(({ l, i }) => (
           <button
             key={i}
@@ -3914,7 +4060,76 @@ function LightList({ lights, regionX, regionY, selectedIndex, onPick }: {
         {lights.length === 0 && (
           <p className="mapscene-side-hint">This region's environment has no point lights.</p>
         )}
+      </div>}
+    </div>
+  )
+}
+
+/** Marker placements in the centre region — the sound emitters, map-icon and
+ *  map-sprite anchors and barriers that render as floating diamonds. Same
+ *  click-to-select as the object list; the diamonds are small targets in a busy
+ *  scene, so the list is usually the easier way in. */
+function MarkerList({ markers, names, regionX, regionY, selectedWorld, open, onToggle, onPick }: {
+  markers: MarkerInfo[]
+  names: Map<number, string>
+  regionX: number
+  regionY: number
+  /** world tile of the selected marker — the same object id can be placed many
+   *  times, so the row match is by position, not by id */
+  selectedWorld: { x: number; y: number } | null
+  open: boolean
+  onToggle: () => void
+  onPick: (marker: MarkerInfo) => void
+}) {
+  const [filter, setFilter] = useState('')
+  const rows = useMemo(() => {
+    const q = filter.trim().toLowerCase()
+    if (!q) return markers
+    return markers.filter((m) =>
+      String(m.objectId).includes(q)
+      || m.kind.includes(q)
+      || MARKER_TITLES[m.kind].toLowerCase().includes(q)
+      || (names.get(m.objectId)?.toLowerCase().includes(q) ?? false)
+      || `${regionX * 64 + m.tileX},${regionY * 64 + m.tileY}`.includes(q))
+  }, [markers, names, filter, regionX, regionY])
+
+  return (
+    <div className="mapscene-loclist mapscene-lightlist">
+      <div className="mapscene-loclist-head">
+        <SectionHead open={open} onToggle={onToggle}>
+          Markers — {rows.length}{filter ? ` of ${markers.length}` : ''}
+        </SectionHead>
+        {open && markers.length > 8 && (
+          <input
+            className="mapscene-loclist-filter"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="filter by kind, object id or tile x,y"
+          />
+        )}
       </div>
+      {open && <div className="mapscene-loclist-scroll mapscene-lightlist-scroll">
+        {rows.map((m, i) => {
+          const wx = regionX * 64 + m.tileX
+          const wy = regionY * 64 + m.tileY
+          return (
+            <button
+              key={`${m.objectId}-${m.tileX}-${m.tileY}-${m.plane}-${i}`}
+              type="button"
+              className={`mapscene-loclist-row${selectedWorld && selectedWorld.x === wx && selectedWorld.y === wy ? ' active' : ''}`}
+              onClick={() => onPick(m)}
+              title={`object ${m.objectId}${names.get(m.objectId) ? ` — ${names.get(m.objectId)}` : ''}, ${MARKER_TITLES[m.kind].toLowerCase()}`}
+            >
+              <span className="mapscene-loclist-dot" style={{ background: `#${MARKER_COLORS[m.kind].toString(16).padStart(6, '0')}` }} />
+              <span className="mapscene-loclist-name">{MARKER_TITLES[m.kind]} ({m.objectId})</span>
+              <span className="mapscene-loclist-pos">{wx}, {wy}, {m.plane}</span>
+            </button>
+          )
+        })}
+        {markers.length === 0 && (
+          <p className="mapscene-side-hint">No markers in this region.</p>
+        )}
+      </div>}
     </div>
   )
 }
@@ -3922,6 +4137,104 @@ function LightList({ lights, regionX, regionY, selectedIndex, onPick }: {
 // Flicker phase offset is a 3-bit field stored as `(packed & 0xe0) << 3`, so it
 // only ever takes these eight values.
 const LIGHT_PHASES = [0, 256, 512, 768, 1024, 1280, 1536, 1792]
+
+/** Editable details for a picked marker.
+ *
+ *  Everything the panel edits lives on the OBJECT DEFINITION
+ *  (`objects/<id>.json`), not on the placement — there is no per-placement copy
+ *  of these fields — so an edit changes every placement of that object in the
+ *  game. The panel says so, and shows how many placements this region has.
+ *
+ *  The fields themselves are `ObjectDefEditor`, shared with the object panel:
+ *  a marker IS an object, so the only difference is which sections are worth
+ *  showing (a marker has no models, name or footprint worth speaking of). */
+function MarkerPanel({ sel, canEdit, placements, root, loadSprite, loadArea, onPreview, onApply, onClose }: {
+  sel: MarkerSelection
+  canEdit: boolean
+  /** placements of this object in the region being edited — context for how
+   *  wide the blast radius of an edit is locally (it's global regardless) */
+  placements: number
+  root: FileSystemDirectoryHandle | null
+  loadSprite: (id: number) => Promise<MapSpriteInfo | null>
+  loadArea: (id: number) => Promise<AreaInfo | null>
+  onPreview: (def: ObjectDefJson | null) => void
+  onApply: (def: ObjectDefJson) => void
+  onClose: () => void
+}) {
+  const base = sel.def
+  const [draft, setDraft] = useState<ObjectDefJson | null>(base)
+  useEffect(() => setDraft(base), [base])
+  const changed = !!draft && !!base && JSON.stringify(draft) !== JSON.stringify(base)
+
+  // Push the in-flight draft at the scene so the diamond recolours as you type
+  // (a def edit can change the marker's kind), and drop it when the panel goes.
+  const previewRef = useRef(onPreview)
+  previewRef.current = onPreview
+  useEffect(() => { previewRef.current(changed && draft ? draft : null) }, [changed, draft])
+  useEffect(() => () => previewRef.current(null), [])
+
+  if (!draft) {
+    return (
+      <>
+        <div className="mapscene-side-head">
+          <span className="enum-title mapscene-side-title">{MARKER_TITLES[sel.markerKind]}</span>
+          <div className="item-badges"><span className="item-id-badge">object {sel.objectId}</span></div>
+        </div>
+        <p className="mapscene-side-hint">Loading the object definition…</p>
+        <div className="mapscene-side-actions">
+          <button type="button" className="save-bar-discard" onClick={onClose}>Close</button>
+        </div>
+      </>
+    )
+  }
+
+  return (
+    <>
+      <div className="mapscene-side-head">
+        <span className="enum-title mapscene-side-title">
+          <span
+            className="mapscene-info-dot"
+            style={{ background: `#${MARKER_COLORS[sel.markerKind].toString(16).padStart(6, '0')}` }}
+          />
+          {MARKER_TITLES[sel.markerKind]}
+        </span>
+        <div className="item-badges">
+          <span className="item-id-badge">object {sel.objectId}</span>
+          <span className="item-id-badge">world tile {sel.worldX}, {sel.worldY}</span>
+        </div>
+      </div>
+
+      <p className="mapscene-side-hint">
+        These fields belong to the <strong>object definition</strong>, not to this
+        placement — editing them changes object {sel.objectId} everywhere it
+        appears in the game{placements > 1 ? `, including all ${placements} placements in this region` : ''}.
+        {canEdit
+          ? ` Apply updates the scene; the region's Save button writes objects/${sel.objectId}.json.`
+          : ' This view is read-only.'}
+      </p>
+
+      <ObjectDefEditor
+        draft={draft}
+        canEdit={canEdit}
+        onChange={setDraft}
+        sections={['sprite', 'icon', 'sound']}
+        root={root}
+        loadSprite={loadSprite}
+        loadArea={loadArea}
+      />
+
+      <div className="mapscene-side-actions">
+        {canEdit && (
+          <button type="button" className="save-bar-save" disabled={!changed} onClick={() => onApply(draft)}>Apply</button>
+        )}
+        {canEdit && (
+          <button type="button" className="save-bar-discard" disabled={!changed} onClick={() => setDraft(base)}>Discard</button>
+        )}
+        <button type="button" className="save-bar-discard" onClick={onClose}>Close</button>
+      </div>
+    </>
+  )
+}
 
 /** Editable details for a picked point light. Same convention as LocPanel:
  *  local draft, Apply hands the updated record to the parent. */
@@ -4139,11 +4452,24 @@ const ROTATION_LABELS = [
   { dir: 'S', title: 'South — 270°' },
 ]
 
-// Editable details for a picked loc. Draft state is local; Apply hands the
-// updated placement entry to the parent (which rebuilds the scene with it).
-function LocPanel({ sel, onClose, onApply, onDelete }: {
+/** Editable details for a picked loc.
+ *
+ *  Two different things live in this panel and they save to different files:
+ *  the six PLACEMENT fields (object id, type, rotation, x, y, plane) belong to
+ *  this region's map file and to this instance alone, while everything under
+ *  `ObjectDefEditor` is the object DEFINITION, shared by every placement of
+ *  that object in the game. Apply commits whichever of the two changed. */
+function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClose, onPreviewDef, onApplyDef, onApply, onDelete }: {
   sel: LocSelection
+  /** def edits are global, so they don't need the placement to be editable — a
+   *  neighbour region's object definition is as editable as the centre's */
+  canEdit: boolean
+  root: FileSystemDirectoryHandle | null
+  loadSprite: (id: number) => Promise<MapSpriteInfo | null>
+  loadArea: (id: number) => Promise<AreaInfo | null>
   onClose: () => void
+  onPreviewDef: (def: ObjectDefJson | null) => void
+  onApplyDef: (def: ObjectDefJson) => void
   onApply?: (entry: LocEntry) => void
   onDelete?: () => void
 }) {
@@ -4151,11 +4477,23 @@ function LocPanel({ sel, onClose, onApply, onDelete }: {
     objectId: sel.objectId, type: sel.type, rotation: sel.rotation,
     x: sel.x, y: sel.y, plane: sel.plane,
   })
-  const changed = draft.objectId !== sel.objectId || draft.type !== sel.type
+  const placementChanged = draft.objectId !== sel.objectId || draft.type !== sel.type
     || draft.rotation !== sel.rotation || draft.x !== sel.x || draft.y !== sel.y
     || draft.plane !== sel.plane
   const canEdit = sel.editable && !!onApply
   const slot = OBJECT_SLOTS[draft.type] ?? 2
+
+  const base = sel.def
+  const [defDraft, setDefDraft] = useState<ObjectDefJson | null>(base)
+  useEffect(() => setDefDraft(base), [base])
+  const defChanged = !!defDraft && !!base && JSON.stringify(defDraft) !== JSON.stringify(base)
+
+  // live-preview def edits in the scene (marker colours, and anything else
+  // resolved through getDef), and drop the preview when the panel goes
+  const previewRef = useRef(onPreviewDef)
+  previewRef.current = onPreviewDef
+  useEffect(() => { previewRef.current(defChanged && defDraft ? defDraft : null) }, [defChanged, defDraft])
+  useEffect(() => () => previewRef.current(null), [])
 
   const field = (label: string, key: keyof typeof draft, max: number) => (
     <label className="item-field">
@@ -4175,38 +4513,19 @@ function LocPanel({ sel, onClose, onApply, onDelete }: {
         <div className="item-badges">
           <span className="item-id-badge">world {sel.regionX * 64 + sel.x}, {sel.regionY * 64 + sel.y}</span>
           <span className="item-id-badge">plane {sel.plane}</span>
-          <span className="item-id-badge">size {sel.sizeX}×{sel.sizeY}</span>
+          <span className="item-id-badge">size {sel.sizeX}x{sel.sizeY}</span>
           {sel.models && <span className="item-id-badge">models {sel.models}</span>}
-          {sel.mapSpriteId >= 0 && <span className="item-id-badge">map sprite {sel.mapSpriteId}</span>}
-          {sel.mapCategoryId >= 0 && (
-            <span className="item-id-badge">map icon {sel.mapCategoryId}{sel.areaName ? ` — ${sel.areaName}` : ''}</span>
-          )}
         </div>
       </div>
-      {(sel.spriteUrl || sel.areaSpriteUrl) && (
-        <div className="mapscene-sprite-previews">
-          {sel.areaSpriteUrl && (
-            <div className="mapscene-sprite-preview">
-              <span className="item-field-label">Map icon</span>
-              <img src={sel.areaSpriteUrl} alt="map icon" />
-            </div>
-          )}
-          {sel.spriteUrl && (
-            <div className="mapscene-sprite-preview">
-              <span className="item-field-label">Minimap sprite</span>
-              <img src={sel.spriteUrl} alt="map sprite" />
-            </div>
-          )}
-        </div>
-      )}
       {!sel.editable && (
         <p className="mapscene-side-hint">
           {!sel.inCenter
-            ? 'In a neighbouring region — teleport there to edit it.'
-            : 'This placement could not be matched for editing.'}
+            ? 'In a neighbouring region — teleport there to move or delete this placement. Its object definition is still editable below: that is shared cache-wide.'
+            : 'This placement could not be matched, so it cannot be moved or deleted. Its object definition is still editable below.'}
         </p>
       )}
 
+      <div className="mapscene-side-section">Placement — this instance only</div>
       <div className="mapscene-side-grid">
         {field('Object ID', 'objectId', 131071)}
         <div className="item-field">
@@ -4272,22 +4591,65 @@ function LocPanel({ sel, onClose, onApply, onDelete }: {
         </div>
       </div>
 
+      {defDraft ? (
+        <>
+          <p className="mapscene-side-hint">
+            Everything below belongs to the <strong>object definition</strong> —
+            shared by every placement of object {sel.objectId} in the game, not
+            just this one. Written to objects/{sel.objectId}.json on Save.
+            {draft.objectId !== sel.objectId && ' (Still object ' + sel.objectId
+              + "'s definition — changing the placement's Object ID above swaps which object sits here, it doesn't reload this section.)"}
+          </p>
+          <ObjectDefEditor
+            draft={defDraft}
+            canEdit={canEditDef}
+            onChange={setDefDraft}
+            sections={['identity', 'cursors', 'shape', 'appearance', 'morph', 'sprite', 'icon', 'sound']}
+            root={root}
+            loadSprite={loadSprite}
+            loadArea={loadArea}
+          />
+        </>
+      ) : (
+        <p className="mapscene-side-hint">Loading the object definition…</p>
+      )}
+
       <div className="mapscene-side-actions">
-        {canEdit && (
+        {(canEdit || canEditDef) && (
           <button
             type="button"
             className="save-bar-save"
-            disabled={!changed}
-            onClick={() => onApply!([draft.objectId, draft.type, draft.rotation, draft.x, draft.y, draft.plane])}
+            disabled={!placementChanged && !defChanged}
+            onClick={() => {
+              // def first: applying the placement rebuilds the scene and clears
+              // the selection, which unmounts this panel
+              if (defChanged && defDraft) onApplyDef(defDraft)
+              if (placementChanged && onApply) {
+                onApply([draft.objectId, draft.type, draft.rotation, draft.x, draft.y, draft.plane])
+              }
+            }}
           >
             Apply
+          </button>
+        )}
+        {(placementChanged || defChanged) && (
+          <button
+            type="button"
+            className="save-bar-discard"
+            onClick={() => {
+              setDraft({ objectId: sel.objectId, type: sel.type, rotation: sel.rotation, x: sel.x, y: sel.y, plane: sel.plane })
+              setDefDraft(base)
+            }}
+          >
+            Discard
           </button>
         )}
         {canEdit && (
           <button type="button" className="save-bar-discard mapscene-delete-btn" onClick={onDelete}>Delete</button>
         )}
-        <button type="button" className="save-bar-discard" onClick={onClose}>Cancel</button>
+        <button type="button" className="save-bar-discard" onClick={onClose}>Close</button>
       </div>
     </>
   )
 }
+

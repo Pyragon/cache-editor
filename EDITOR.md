@@ -230,16 +230,170 @@ alpha feeds the transparency rules traced in `TODO.md`.
 
 ---
 
+## Loc sound / map-icon / map-sprite fields
+
+Traced 2026-07-25 while making the map-scene markers editable. cryogen's
+`ObjectDefinitions` and darkan's `ObjectType` decode these **opcode for
+opcode identically** — only the field NAMES differ, and cryogen's dump uses its
+own. Left column is what you'll find in `objects/<id>.json`:
+
+| dumped (cryogen) | client (darkan `ObjectType`) | opcode | notes |
+| --- | --- | --- | --- |
+| `ambientSoundId` | `soundId` | 78 | looping ambient `sound_effects` id |
+| `ambientSoundHearDistance` | `soundRadius` | 78, 79 | tiles the sound carries |
+| `soundMinInterval` / `soundMaxInterval` | same | 79 | gap between plays, ticks |
+| `soundGroupIds` | `soundGroupIds` | 79 | random pick per play |
+| `ambientSoundVolume` | `soundVolume` | 104 | **-1 = opcode absent; the client's own default is 255** |
+| `ambientSoundMinDelay` / `ambientSoundMaxDelay` | same | 173 | client default 256 each |
+| `ambientSoundMaxHearDistance` | same | 178 | darkan comments it "not sure if this is correct" |
+| `instrumentSoundEffect` / `instrumentAmbientSound` | same | 168 / 169 | |
+| `mapSpriteId` | `mapIconId` | 102 | `config/map_sprites` record — the minimap symbol |
+| `mapSpriteRotation` | `mapIconRotation` | 101 | quarter turns |
+| `flipMapSprite` | `mapIconFlipped` | 105 | |
+| `adjustMapSceneRotation` | `mapIconRotates` | 97 | false ⇒ client forces rotation 0 rather than adding the placement's |
+| `mapCategoryId` | `mapCategoryid` | 107 | `config/areas` (MEC) record — the map pin |
+
+Three gotchas that cost real debugging time:
+
+- **An unset id is dumped as `-1`, never omitted.** Every one of the 73913
+  objects carries `ambientSoundId`. Any `!== undefined` test on these fields is
+  therefore always true — that's what classified all 206 nameless map-icon
+  anchors (the musician among them) as sound emitters. Always test `>= 0`;
+  `markerKindFromDef` in `mapScene.ts` is the single place that does it now.
+  `soundGroupIds` is the exception: absent unless populated, never negative
+  (384 objects carry one, lowest entry 710), and 340 of those are emitters whose
+  only sound is the group — so it can't be dropped from the "is this a sound
+  emitter" test.
+- **`map_sprites` has an explicit blank.** Opcode 4's only job is to set the
+  sprite id to -1, and the field's natural default is 0 — so `spriteId: -1` is
+  authored intent, not a dump failure. 7 of the 106 records are blank this way
+  (22, 36–40, 95) and **map sprite 22 alone is referenced by ~940 object defs**
+  (the invisible clip walls lining water, e.g. object 83: nameless,
+  `blocks: true`, `clipType: 2`, wall shapes `[0,2,3,9]`). Its neighbours' sprite
+  ids run 1623, 1624, ⟨gap⟩, 1625, 1626 — a retired symbol whose references were
+  never cleaned up. The client draws nothing for it: `createRotatedNativeSprite`
+  fails `isFileCached(-1)` and returns null, and `ComponentMinimap` keeps the
+  whole draw — `backgroundColor` fill included — inside `if (nativeSprite != null)`.
+- **`config/areas` has the same blank**, as `defaultIconArchive: -1`. Both are
+  now badged in the marker panel ("no sprite" / "no icon") and distinguished
+  from "record missing" and "sprite N not dumped", because rendering nothing for
+  all four cases is what made map sprite 22 look like a bug.
+
+**Editable where:** `ObjectDefEditor.tsx`, shared by the map scene's marker and
+object panels — a marker IS an object, so they differ only in which sections
+they ask for (`identity` / `shape` / `sprite` / `icon` / `sound`). Note these
+fields live on the **object definition**, not the placement — there is no
+per-placement copy — so an edit changes every placement of that object in the
+game. Both panels say so, and the marker one reports how many placements the
+current region has. Drafts flow panel → `EditPatch.objectDefs` → `MapViewer`
+state → `LocAssets.setDefOverrides`, so the scene previews an edit before it's
+saved; the region's Save button writes `objects/<id>.json` whole.
+
+**Picking by eye, not by id.** `MapSymbolPicker.tsx` is a thumbnail browser over
+three tables — `map_sprites`, `areas` and `cursors` — opened from the Browse…
+button next to each id field. `map_sprites` (106) and `cursors` (183) are
+instant; `config/areas` is **73913 files of which only 643 have an icon** (132
+distinct sprites) and 635 a name, so the scan filters to those, reports its two
+phases separately (listing the folder, then a real percentage while reading),
+and is cached per cache-root for the session in a `WeakMap` — its object URLs
+are deliberately never revoked, since the cache outlives any one modal. Blank
+records still get a cell, labelled with *why* they're blank, so "no sprite"
+stays distinguishable from a failed load.
+
+## Loc cursors, appearance and morph fields
+
+Same treatment as the sound/icon table above — opcodes verified against both
+decoders 2026-07-26 while filling out the object panel.
+
+| dumped (cryogen) | client (darkan) | opcode | notes |
+| --- | --- | --- | --- |
+| `primaryCursor` / `primaryCursorActionIndex` | same | 99 | cursor id + which right-click option it applies to |
+| `secondaryCursor` / `secondaryCursorActionIndex` | same | 100 | **9139 objects set at least one cursor** |
+| `interactable` | `interactionType` | 19 | |
+| `ambient` | same | 29 | signed byte |
+| `contrast` | same | 39 | raw byte in the dump; the client's effective value is `850 + raw·5` — see below |
+| `scaleX/Y/Z` | `resizeX/Y/Z` | 65/66/67 | 128 = 100% |
+| `offsetX/Y/Z` | same | 70/71/72 | stored as `short << 2` |
+| `inverted` | same | 62 | mirrored model |
+| `staticShadow` | same | 64 clears it | |
+| `dynamicShadow` | same | 88 clears it | |
+| `obstructsGround` | `forceDisplayDecoration` | **73** | not 69 — 69 is `accessBlockFlag` in cryogen and a discarded byte in darkan |
+| `supportsItems` | same | **75** | |
+| `clipType` | `blocksMovement` | 27 (=1), 17 (=0) | the names disagree; the values don't |
+| `occludes` | `occlusionMode` | 23 (=1), 103 (=0) | |
+| `varpBit` / `varp` / `transformTo` | same | 77, 92 | 92 also reads the extra target |
+
+### `ambient` / `contrast`: what the client actually does (VERIFIED 2026-07-26)
+
+Traced in **darkan-game-client** (the rendering authority), not just the bot
+refactor. Every lit def resolves to the same pair of numbers handed to
+`createMeshRasterizer(mesh, flags, _, ambientArg, contrastArg)`, and the
+renderer then scales the sun by `intensity * 768 / contrastArg`
+(`MeshRasterizer_Sub3:3254`). So `contrastArg` is a *divisor*: bigger contrast =
+flatter shading, and 768 is a fixed numerator, not a base.
+
+| def | decode | use site | effective contrastArg |
+| --- | --- | --- | --- |
+| Object | `readByte() * 5` (`ObjectDefinition:206`) | `850 + contrast` (`:449`) | **850 + raw·5** |
+| NPC | `readByte()` (`NPCDefinitions:604`) | `anInt4888 * 5 + 850` (`:268`) | **850 + raw·5** |
+| Item (world/inv model) | `readByte()` (`ItemDefinitions:439`) | `contrast * 5 + 850` (`:201`) | **850 + raw·5** |
+| Item (**icon** render) | same field | `contrast * 5 + 768` (`:552`) | **768 + raw·5** |
+| SpotAnim | `readUnsignedByte()` (`SpotAnimationDefinitions:73`) | `anInt6981 + 850` (`:157`) | **850 + raw** — no ·5, and unsigned |
+| interface models, hint arrow | — | literal `64, 768` | 768 |
+
+So the ·5 is real for objects/NPCs/items; the *only* difference between the
+object path and the others is that the client folds it in at decode time
+instead of at use. **cryogen dumps the raw byte** (`ObjectDefinitions:283`,
+symmetric encode at `:800`), which matches every other def type in the dump —
+the JSON is self-consistent and correct. Ambient is uniformly `64 + raw`.
+
+Two consequences for our code, neither of them the "our bake is 5× off" I
+guessed before checking:
+
+- **The map scene's loc bake never reads `ambient`/`contrast` at all.**
+  `computeModelLitRgb` (models.ts) takes only a `ModelSun`; there are no
+  ambient/contrast parameters on it. So there is no 5× error there — there's an
+  unimplemented field. (`computeLitFaceRgb`, which *does* take them, is exported
+  but has no callers.)
+- **`ModelViewer` gets the ·5 right and the base wrong.** `ModelViewer.tsx:451`
+  computes `768 / (768 + 5 * contrast)`; for objects/NPCs/items-in-world it
+  should be `768 / (850 + 5 * contrast)`. 768 is the *item icon* base. At
+  contrast 0 that's 1.0 where the client gets 0.903 — every previewed model is
+  ~10% over-lit, shrinking as contrast rises. Spot animations want
+  `768 / (850 + contrast)` with no multiplier at all.
+
 # Editor gaps (map scene)
 
 Requested 2026-07-25. These are UI/UX work, not cache-format work — grouped
 here rather than in `TODO.md` because they share one theme: the 3D map viewer
 shows far more than it lets you change.
 
+## Side-panel tabs
+
+**View / Edit / Place / Terrain.** View is browsing only — the objects, point
+lights and markers lists, each a collapsible section whose header is its own
+count-and-filter row (`SectionHead`). Edit is whatever is selected: the loc,
+light and marker panels, plus the multi-select actions.
+
+Selecting anything — a scene click, or a row in any View-tab list — switches to
+**Edit**. That's what keeps the drag gate honest: left-drag moves the selected
+object only on the Edit tab, and since selection forces that tab (and is blocked
+outright on Terrain), you can only end up selected-but-elsewhere by changing tab
+on purpose. Shift+drag marquee follows the same rule (Edit selects objects,
+Terrain copies an area). Keyboard: `v`/`e`/`p`/`t`.
+
+The **marker list** is per-placement, not per-object, and can't be derived from
+the placement list: only the build knows which placements are markers, since it
+takes a model's sentinel colour to tell. `buildLocsMesh` returns them and the
+centre region's go into `sceneMarkers` state. Rows match the selection by world
+tile rather than object id — the same utility object is placed hundreds of times.
+
 ## Pointer-interaction invariants (drag-to-move)
 
 Written up because breaking either of these silently corrupts placements on a
 misclick — which is exactly what the drag-to-move path did until 2026-07-25.
+
+(The tab named below is now **Edit**, not View — see the section above.)
 
 1. **One drag threshold, shared.** `DRAG_PX` in `MapSceneViewer.tsx` decides
    click-vs-drag for *both* the click handler and drag-to-move arming. They were
@@ -329,6 +483,45 @@ Today the panel shows x, y, type, rotation, plane. Wanted:
   need surfacing too.)
 - **Needs a table**, like locs and point lights already have: list every
   emitter in the region, select/jump to one, edit in place.
+- **BUG: things with no sound are listed as emitters.** The musician map icon
+  shows up as a sound emitter despite having sound `-1` and being nothing but a
+  map icon. The marker-kind ternary in `mapScene.ts` (`:3799`) tests
+  `def.soundId !== undefined || def.ambientSoundId !== undefined ||
+  soundGroupIds?.length`, so a field that is *present but disabled* (`-1`) still
+  beats the `mapCategoryId >= 0` branch underneath it — which does test `>= 0`
+  properly. Fix: require `>= 0` on both sound ids, the way the icon and sprite
+  branches already do. Check the dump first for what "unset" actually looks like
+  (`-1` vs absent) and whether `soundGroupIds` can carry `-1` entries. The same
+  predicate is duplicated in `MapSceneViewer.tsx` (`:2660`, the Place-tab
+  quick-picks) and has to change in both.
+- **BUG: Close leaves the emitter selected.** Clicking Close on an emitter's
+  detail panel dismisses the panel but the marker stays selected/highlighted in
+  the 3D view, so scene and panel disagree about what's selected. Close should
+  clear the selection exactly like deselecting does. Check the other marker
+  kinds and the loc panel for the same leak.
+
+## Editing placements without rebuilding the scene
+
+Moving, placing or deleting a loc currently re-runs the whole region build,
+which is slow enough to break the flow of laying scenery out. Wanted: apply the
+geometry change immediately and let the *baked* results go stale, with a small
+disclaimer saying lighting and shadows won't be re-baked until a reload, plus a
+**Reload** button somewhere obvious to force the full rebuild when you want them
+correct again.
+
+- **The merged opaque mesh is the obstacle.** A loc that lives in it can't just
+  be moved — its triangles are baked into a shared buffer. The practical route
+  is to pull the edited loc out into its own mesh, which the transparent-loc
+  path already does (`transparentLocs`), and rebuild only that one.
+- **Deletes are the easy case** — collapsing the loc's triangles is enough
+  without touching the rest of the buffer; adds and moves are where the own-mesh
+  split is needed.
+- **What actually goes stale:** the sun/ambient vertex bake, baked point lights,
+  and static shadows (the darkened ring under scenery). Say so in the
+  disclaimer rather than a vague "lighting may be wrong".
+- **Sequencing:** this overlaps the point-lights-in-the-shader plan in
+  `TODO.md` — once lights stop being baked into vertex colours, light edits stop
+  going stale at all and only the sun bake and shadows still need the reload.
 
 ## Map icons / map sprites — needs a table
 

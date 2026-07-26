@@ -2067,22 +2067,83 @@ export type ObjectDefJson = {
   modifiedTextures?: number[]
   name?: string
   options?: (string | null)[]
+  /** Movement blocking. Default true; opcodes 17/18 clear it. */
+  blocks?: boolean
+  /** Clip mode — default 2 (opcode 17 sets 0 alongside `blocks`, 24 sets 1) */
+  clipType?: number
+  /** opcode 69 — hides the ground decoration beneath the object */
+  obstructsGround?: boolean
+  /** opcode 71 — whether ground items stack on it (-1 = unset) */
+  supportsItems?: number
   staticShadow?: boolean
+  // Sound fields. Names are cryogen's dumped ones; the client (darkan
+  // `ObjectType`) calls several of them something else, noted per field, and
+  // the opcodes are identical between the two decoders. An unset id is dumped
+  // as -1, never omitted — see markerKindFromDef.
+  /** not present in this dump (0 of 73913 objects); kept for other revisions */
   soundId?: number
+  /** client `soundId`, opcode 78 — the looping ambient sound_effects id */
   ambientSoundId?: number
+  /** client `soundRadius`, opcodes 78/79 — tiles the sound carries */
+  ambientSoundHearDistance?: number
+  /** client `ambientSoundMaxHearDistance`, opcode 178 */
+  ambientSoundMaxHearDistance?: number
+  /** client `soundVolume`, opcode 104. -1 = opcode absent, which the client
+   *  reads as its own default of 255 — the two spellings of "full volume". */
+  ambientSoundVolume?: number
+  /** opcode 79 — gap between plays, in ticks */
+  soundMinInterval?: number
+  soundMaxInterval?: number
+  /** opcode 173 — client defaults are 256 for both */
+  ambientSoundMinDelay?: number
+  ambientSoundMaxDelay?: number
+  /** opcode 168 / 169 */
+  instrumentSoundEffect?: boolean
+  instrumentAmbientSound?: boolean
+  /** opcode 79 — sounds picked from at random; never holds a negative */
   soundGroupIds?: number[]
+  /** client `mapCategoryid`, opcode 107 — the config/areas record whose icon
+   *  every placement of this object pins on the map. -1 = none. */
   mapCategoryId?: number
   /** config/map_sprites id — the "mapscene" symbol drawn on the minimap. */
   mapSpriteId?: number
+  /** client `mapIconRotation`, opcode 101 — quarter turns */
   mapSpriteRotation?: number
+  /** client `mapIconFlipped`, opcode 105 */
   flipMapSprite?: boolean
+  /** client `mapIconRotates`, opcode 97 — when false the client forces the
+   *  sprite's rotation to 0 instead of adding the placement's */
+  adjustMapSceneRotation?: boolean
   /** Ground-contour ("hillskew") mode — 0 none, 1 follow ground, 2 partial,
    *  4/5 stretch to the next plane (bridges/raised floors). */
   groundContourType?: number
   groundContourModifier?: number
-  /** ModelSM lighting: model ambient = 64 + this, contrast = 850 + this. */
+  /** Model lighting, as the raw dumped bytes. The client feeds
+   *  `createMeshRasterizer` with `64 + ambient` and `850 + contrast * 5`
+   *  (`ObjectDefinition:448-449`, which folds the ·5 in at decode), then scales
+   *  the sun by `768 / contrastArg` — so contrast is a divisor, higher = flatter.
+   *  NOTE our loc bake reads neither: see the TODO entry. */
   ambient?: number
   contrast?: number
+  /** Cursor overrides — a cursor id (config/cursors) plus which right-click
+   *  option it applies to. Opcodes 99 (primary) and 100 (secondary). */
+  primaryCursor?: number
+  primaryCursorActionIndex?: number
+  secondaryCursor?: number
+  secondaryCursorActionIndex?: number
+  /** opcode 19 — whether the object takes interactions at all (-1 = unset) */
+  interactable?: number
+  /** opcode 91 */
+  members?: boolean
+  /** opcode 88 clears this — the GPU sun-following shadow */
+  dynamicShadow?: boolean
+  /** opcode 22 */
+  delayShading?: boolean
+  /** opcode 82 — only drawn when textures are enabled */
+  requiresTextures?: boolean
+  /** client `occlusionMode`: opcode 23 sets 1, opcode 103 sets 0 (-1 = unset) */
+  occludes?: number
+  groundDecorationHeight?: number
   /** Sequence ids this loc idles through (ObjectType animation array) — e.g. a
    *  waving flag. Empty/absent = static. The scene animates these. */
   animations?: number[]
@@ -2134,6 +2195,12 @@ export class LocAssets {
   private specExponents = new Map<number, number>()
   // single-flight directory resolution: cache the PROMISE, not the result —
   // dozens of parallel first calls must not each re-resolve the folder
+  /** Unsaved object-def edits, keyed by object id — the marker/loc panels' draft
+   *  state. Checked ahead of the file in `getDef`, so every consumer (marker
+   *  classification, models, recolours) previews the edit without the file
+   *  changing and without invalidating the read cache: dropping an override
+   *  falls straight back to the already-cached file read. */
+  private defOverrides: ReadonlyMap<number, ObjectDefJson> = new Map()
   private objectsDirP: Promise<FileSystemDirectoryHandle | null> | undefined
   private modelsDirP: Promise<FileSystemDirectoryHandle | null> | undefined
   private texturesDirP: Promise<FileSystemDirectoryHandle | null> | undefined
@@ -2344,7 +2411,18 @@ export class LocAssets {
     return p
   }
 
+  setDefOverrides(overrides: ReadonlyMap<number, ObjectDefJson>) {
+    this.defOverrides = overrides
+  }
+
+  /** The draft def for `id`, or undefined when it isn't being edited. */
+  defOverride(id: number): ObjectDefJson | undefined {
+    return this.defOverrides.get(id)
+  }
+
   async getDef(id: number): Promise<ObjectDefJson | null> {
+    const override = this.defOverrides.get(id)
+    if (override) return override
     let p = this.defs.get(id)
     if (!p) {
       p = (async () => {
@@ -2979,8 +3057,15 @@ export type MarkerInfo = {
   z: number
   objectId: number
   kind: 'sound' | 'mapicon' | 'mapsprite' | 'barrier' | 'other'
+  /** What `kind` falls back to when the def carries none of the three id fields
+   *  — decided by the model's sentinel colour, which only the build knows. Kept
+   *  on the record so an edit can re-derive `kind` without a scene rebuild. */
+  fallback: 'barrier' | 'other'
   tileX: number
   tileY: number
+  /** the placement's own plane (what the maps file says), for the marker list —
+   *  not necessarily the plane group the diamond renders in */
+  plane: number
 }
 
 /** One placed loc in a merged mesh, for click-picking via triangleOwners. */
@@ -2991,6 +3076,26 @@ export type LocRef = {
   x: number
   y: number
   plane: number
+}
+
+/** Which marker kind a def's own fields imply, or null if none of them do.
+ *  Callers add their own fallback for the kinds that aren't in the def (the
+ *  colour-sentinel 'barrier'/'other').
+ *
+ *  Every test is `>= 0`, NOT `!== undefined`: the dump emits these fields on
+ *  every object whether they're set or not — all 73913 carry `ambientSoundId`,
+ *  `-1` when there's no sound — so a presence test says "sound emitter" for
+ *  literally everything, which is how all 206 nameless map-icon anchors (the
+ *  musician icon among them) ended up listed as sound emitters. `soundId`
+ *  isn't in this dump at all (0 objects) but is kept for other revisions;
+ *  `soundGroupIds` is absent unless populated and never holds a negative
+ *  (384 objects carry one, lowest entry 710), and 340 of those are emitters
+ *  whose only sound is the group, so it has to stay part of the test. */
+export function markerKindFromDef(def: ObjectDefJson): 'sound' | 'mapicon' | 'mapsprite' | null {
+  if ((def.soundId ?? -1) >= 0 || (def.ambientSoundId ?? -1) >= 0 || (def.soundGroupIds?.some((s) => s >= 0) ?? false)) return 'sound'
+  if ((def.mapCategoryId ?? -1) >= 0) return 'mapicon'
+  if ((def.mapSpriteId ?? -1) >= 0) return 'mapsprite'
+  return null
 }
 
 export const MARKER_COLORS: Record<MarkerInfo['kind'], number> = {
@@ -3796,17 +3901,9 @@ export async function buildLocsMesh(
     locRefs.push({ objectId, shape, rotation, x, y, plane: decodedPlane })
 
     if (markerModels > 0) {
-      const kind: MarkerInfo['kind'] =
-        def.soundId !== undefined || def.ambientSoundId !== undefined || (def.soundGroupIds?.length ?? 0) > 0
-          ? 'sound'
-          : def.mapCategoryId !== undefined && def.mapCategoryId >= 0
-            ? 'mapicon'
-            : def.mapSpriteId !== undefined && def.mapSpriteId >= 0
-              ? 'mapsprite'
-              : markerIsBarrier
-                ? 'barrier'
-                : 'other'
-      markers.push({ x: sceneX, y: -avgHeight, z: -sceneY, objectId, kind, tileX: x, tileY: y })
+      const fallback = markerIsBarrier ? 'barrier' : 'other'
+      const kind: MarkerInfo['kind'] = markerKindFromDef(def) ?? fallback
+      markers.push({ x: sceneX, y: -avgHeight, z: -sceneY, objectId, kind, fallback, tileX: x, tileY: y, plane: decodedPlane })
     }
   }
   // Opaque locs stay merged (order-independent). Transparent ones are the

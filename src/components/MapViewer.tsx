@@ -7,7 +7,9 @@ import { useZoom } from './useZoom'
 import { useConfirm } from './useConfirm'
 import MapSceneViewer from './MapSceneViewer'
 import { loadRegionEnvironment, saveRegionEnvironment } from './mapScene'
-import type { RegionEnvironment, RegionLight } from './mapScene'
+import type { ObjectDefJson, RegionEnvironment, RegionLight } from './mapScene'
+import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
+import { writeJsonItem } from '../loaders/common'
 import './MapViewer.css'
 
 const ZOOM_LEVELS = [4, 6, 8, 10, 14]
@@ -39,6 +41,11 @@ export default function MapViewer({ world, onDirtyChange }: {
   // record is kept so a save round-trips fog/sun/skybox/HDR untouched.
   const [env, setEnv] = useState<RegionEnvironment | null>(null)
   const [lights, setLights] = useState<RegionLight[] | null>(null)
+  // Draft edits to object DEFINITIONS (objects/<id>.json), keyed by object id —
+  // made from the 3D marker panel. Global data, not region data: one entry
+  // rewrites a file every region shares. Held here anyway so they ride the same
+  // draft/undo/Discard/Save flow as everything else in this editor.
+  const [objectDefs, setObjectDefs] = useState<Map<number, ObjectDefJson>>(new Map())
   // latest written environment record, so consecutive saves keep round-tripping
   // the parts we don't edit (kept out of state — see handleSave)
   const envRef = useRef<RegionEnvironment | null>(null)
@@ -95,7 +102,7 @@ export default function MapViewer({ world, onDirtyChange }: {
 
   // last-saved state, for Discard — kept out of `data` so saving doesn't
   // change the scene viewer's data prop (which would force a full rebuild)
-  type Snapshot = { terrain: MapData['terrain']; objects: LocEntry[]; lights: RegionLight[] | null }
+  type Snapshot = { terrain: MapData['terrain']; objects: LocEntry[]; lights: RegionLight[] | null; objectDefs: Map<number, ObjectDefJson> }
   const baselineRef = useRef<Snapshot | null>(null)
   // per-step undo/redo over the drafts. Snapshots are references (every edit
   // path copies the arrays it changes), so pushing them is free.
@@ -106,11 +113,12 @@ export default function MapViewer({ world, onDirtyChange }: {
     // Point lights are only editable when we have a cache root to write the
     // environment file back to; otherwise the 3D view shows them read-only.
     const initialLights = world.rootHandle ? (env?.lights ?? []) : null
-    baselineRef.current = { terrain: data.terrain, objects: data.def.objects, lights: initialLights }
+    baselineRef.current = { terrain: data.terrain, objects: data.def.objects, lights: initialLights, objectDefs: new Map() }
     historyRef.current = { past: [], future: [] }
     setTerrain(data.terrain)
     setObjects(data.def.objects)
     setLights(initialLights)
+    setObjectDefs(new Map())
     setIsDirty(false)
     setSelected(null)
     setPlane(0)
@@ -119,16 +127,17 @@ export default function MapViewer({ world, onDirtyChange }: {
 
   // Single entry point for every 3D-view edit (brush strokes, loc edits,
   // placements, stamps). `coalesce` folds drag-stroke steps into one undo.
-  function applyEdit(patch: { terrain?: MapData['terrain']; objects?: LocEntry[]; lights?: RegionLight[]; coalesce?: boolean }) {
+  function applyEdit(patch: { terrain?: MapData['terrain']; objects?: LocEntry[]; lights?: RegionLight[]; objectDefs?: Map<number, ObjectDefJson>; coalesce?: boolean }) {
     if (!terrain || !objects) return
     if (!patch.coalesce) {
-      historyRef.current.past.push({ terrain, objects, lights })
+      historyRef.current.past.push({ terrain, objects, lights, objectDefs })
       if (historyRef.current.past.length > 60) historyRef.current.past.shift()
       historyRef.current.future = []
     }
     if (patch.terrain) setTerrain(patch.terrain)
     if (patch.objects) setObjects(patch.objects)
     if (patch.lights) setLights(patch.lights)
+    if (patch.objectDefs) setObjectDefs(patch.objectDefs)
     setIsDirty(true)
   }
   const applyEditRef = useRef(applyEdit)
@@ -138,20 +147,22 @@ export default function MapViewer({ world, onDirtyChange }: {
   undoRef.current = () => {
     const prev = historyRef.current.past.pop()
     if (!prev || !terrain || !objects) return
-    historyRef.current.future.push({ terrain, objects, lights })
+    historyRef.current.future.push({ terrain, objects, lights, objectDefs })
     setTerrain(prev.terrain)
     setObjects(prev.objects)
     setLights(prev.lights)
+    setObjectDefs(prev.objectDefs)
     setIsDirty(true)
   }
   const redoRef = useRef(() => {})
   redoRef.current = () => {
     const next = historyRef.current.future.pop()
     if (!next || !terrain || !objects) return
-    historyRef.current.past.push({ terrain, objects, lights })
+    historyRef.current.past.push({ terrain, objects, lights, objectDefs })
     setTerrain(next.terrain)
     setObjects(next.objects)
     setLights(next.lights)
+    setObjectDefs(next.objectDefs)
     setIsDirty(true)
   }
 
@@ -323,9 +334,18 @@ export default function MapViewer({ world, onDirtyChange }: {
       // reset below and hand the 3D view a new lights array (= full rebuild)
       envRef.current = nextEnv
     }
+    // Edited object definitions are a third target again — objects/<id>.json,
+    // outside this region entirely. Written whole (the draft is the parsed file
+    // with fields replaced), so anything the editor doesn't model round-trips.
+    if (world.rootHandle && objectDefs.size > 0) {
+      const objectsDir = await resolveEntryHandle(world.rootHandle, getEntryPath('objects'))
+      if (objectsDir) {
+        for (const [id, def] of objectDefs) await writeJsonItem(objectsDir, id, def)
+      }
+    }
     // deliberately no setData: the drafts already show the saved state, and a
     // data change would rebuild the whole 3D scene for nothing
-    baselineRef.current = { terrain, objects, lights }
+    baselineRef.current = { terrain, objects, lights, objectDefs }
     setIsSaving(false)
     setIsDirty(false)
   }
@@ -571,6 +591,7 @@ export default function MapViewer({ world, onDirtyChange }: {
           objects={objects ?? undefined}
           terrain={terrain ?? undefined}
           lights={lights ?? undefined}
+          objectDefs={objectDefs}
           onEdit={(patch) => applyEditRef.current(patch)}
         />
       )}
@@ -689,7 +710,7 @@ export default function MapViewer({ world, onDirtyChange }: {
       {isDirty && (
         <div className="save-bar">
           <span className="save-bar-label">Unsaved changes</span>
-          <button type="button" className="save-bar-discard" onClick={() => { setTerrain(baselineRef.current?.terrain ?? data.terrain); setObjects(baselineRef.current?.objects ?? data.def.objects); setLights(baselineRef.current?.lights ?? null); historyRef.current = { past: [], future: [] }; setIsDirty(false) }}>Discard</button>
+          <button type="button" className="save-bar-discard" onClick={() => { setTerrain(baselineRef.current?.terrain ?? data.terrain); setObjects(baselineRef.current?.objects ?? data.def.objects); setLights(baselineRef.current?.lights ?? null); setObjectDefs(baselineRef.current?.objectDefs ?? new Map()); historyRef.current = { past: [], future: [] }; setIsDirty(false) }}>Discard</button>
           <button type="button" className="save-bar-save" onClick={handleSave} disabled={isSaving}>
             {isSaving ? 'Saving…' : 'Save'}
           </button>
