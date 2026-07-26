@@ -55,7 +55,7 @@ darkan-bot-refactor:
 | `blendsWithUnderlay` | 12 | `aBool7061` | **the master switch.** Picks the tile-shape family AND enables the intra-tile blend |
 | `slot` | 11 | `anInt7052` | priority; the winner of every cross-tile comparison |
 | `colorRgb` | 1 | `primaryRGB` | the blended colour |
-| `minimapColorRgb` | 7 | **`secondaryRGB`** | see the naming trap below — this is *not* minimap-only |
+| `secondaryRgb` | 7 | `secondaryRGB` | three jobs — see below. Called `minimapColorRgb` before 2026-07-25 |
 | `texture` | 2 / 3 | `texture` | blended alongside the colour, as a crossfade pass |
 | `textureScale` | 9 | `anInt7057` | `readUnsignedShort() << 2`, default 512; blended too |
 
@@ -85,18 +85,29 @@ above, and both save. Nothing new is needed at the *definition* level.
 
 **Gotchas.**
 
-- **The naming trap: `minimapColorRgb` is the client's `secondaryRGB`, and it
-  is not just a minimap colour.** Opcode 7. The client uses it as the ground
-  **material colour** (`VarNPCMap.method2617` prefers it over the tile colour),
-  and — critically — an overlay with `primaryRGB == -1 && secondaryRGB == -1` is
-  discarded entirely before `aBool7061` is ever read (`Class329:633`), so it
-  gates whether a tile blends at all. Both cryogen and darkan-bot-refactor call
-  it a minimap colour; only the game client names it `secondaryRGB`. The field
-  IS dumped and IS editable — `mapScene.ts` simply doesn't read it in the
-  blending path yet, and stands in `hasOverlay` for that test. **Worth asking
-  Cody whether to rename it**, since CLAUDE.md's hierarchy puts
-  darkan-bot-refactor first for config decoders but the client first for
-  rendering, and here they disagree. A rename means a cryogen re-dump.
+- **Opcode 7 does three jobs, and was named after one of them.** It was
+  `minimapColorRgb` in cryogen and here until 2026-07-25; **renamed to
+  `secondaryRgb`**, the game client's own name. Both cryogen and
+  darkan-bot-refactor called it a minimap colour, which is why it took a
+  rendering trace to notice — CLAUDE.md's hierarchy puts darkan-bot-refactor
+  first for config decoders, but this field's *meaning* is a rendering
+  question, and there the client wins. The three jobs:
+  1. the minimap tile colour, overriding a texture's average
+     (`Class291.method5164`) — the only one the old name covered;
+  2. the ground **material colour** in the 3D scene — `VarNPCMap.method2617`
+     prefers it over the tile colour;
+  3. a **gate**: an overlay with `primaryRGB == -1 && secondaryRGB == -1` is
+     discarded before `aBool7061` is ever read (`Class329:633`), so it decides
+     whether a tile blends at all.
+
+  Note it is *not* a fallback for the tile colour — `anInt3850` is `primaryRGB`
+  alone, which is why `floTileHsl` still ignores it.
+
+  **Old dumps:** the rename needs a cryogen re-dump. Until then
+  `migrateOverlayDef` (in the loader) and `floSecondaryRgb` (in `mapScene`) read
+  either spelling. The migration matters more than it looks: without it an old
+  dump would show the field empty *and drop it on save*, silently discarding
+  opcode 7.
 - **`slot` is packed after decode.** `postDecode` does `slot = slot << 8 | id`,
   so the editable value is the raw byte from opcode 11, not what the comparison
   code sees. Our `floSlotKey` reproduces the packing.

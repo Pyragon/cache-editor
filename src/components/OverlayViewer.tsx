@@ -115,12 +115,15 @@ export default function OverlayViewer({ data, onSave, onDirtyChange }: Props) {
         <h3>Colour</h3>
         <div className="item-grid">
           <ColorField label="Tile Colour" value={draft.colorRgb} onChange={(v) => set('colorRgb', v)} />
-          <ColorField label="Minimap Colour" value={draft.minimapColorRgb} onChange={(v) => set('minimapColorRgb', v)} />
+          <ColorField label="Secondary Colour" value={draft.secondaryRgb} onChange={(v) => set('secondaryRgb', v)} />
         </div>
         <p className="tex-op-note">
           The client quantises tile colour through the same 65,536-entry HSL palette used for model
-          faces — the "in-game" swatch shows the result. Minimap colour, when set, is what the
-          minimap uses instead of the tile colour (and overrides a texture's own average colour).
+          faces — the "in-game" swatch shows the result. Secondary colour (opcode 7) does three
+          jobs, despite having been labelled "Minimap Colour" here until 2026-07-25: it is what the
+          minimap uses instead of the tile colour (overriding a texture's own average), it is the
+          ground <em>material</em> colour in the 3D scene, and an overlay with neither a tile nor a
+          secondary colour is ignored outright — including its "blends with underlay" flag.
         </p>
       </section>
 

@@ -479,6 +479,9 @@ export type FloJson = {
   colorRgb?: number
   texture?: number
   textureScale?: number
+  /** Opcode 7 — the client's `secondaryRGB`. `minimapColorRgb` is what dumps
+   *  made before 2026-07-25 call it; `floSecondaryRgb` reads either. */
+  secondaryRgb?: number
   minimapColorRgb?: number
   waterColor?: number
   blendsWithUnderlay?: boolean
@@ -573,7 +576,7 @@ export async function renderMinimapGround(
   const out = new Uint8ClampedArray(W * W * 4)
 
   // per-overlay colour — the dumper's getOverlayRGB rule: colorRgb unless
-  // invalid (absent/0/-1/magenta), else minimapColorRgb; the texture's
+  // invalid (absent/0/-1/magenta), else the secondary colour; the texture's
   // average colour only when still unresolved
   const invalidCol = (c: number | undefined): boolean => c === undefined || c === 0 || c === -1 || c === NO_COLOR
   const overlayCol = new Map<number, number>()
@@ -584,7 +587,7 @@ export async function renderMinimapGround(
   }
   for (const id of overlayIdsUsed) {
     const flo = configs.overlays.get(id - 1)
-    let col = !flo || invalidCol(flo.colorRgb) ? (flo?.minimapColorRgb ?? -1) : flo.colorRgb!
+    let col = !flo || invalidCol(flo.colorRgb) ? floSecondaryRgb(flo) : flo.colorRgb!
     if (invalidCol(col)) col = 0
     if (col === 0 && flo?.texture !== undefined && flo.texture >= 0) {
       const meta = await assets.getMaterialMeta(flo.texture)
@@ -646,12 +649,23 @@ export async function renderMinimapGround(
   return out
 }
 
+/** Opcode 7, under either spelling — see `FloJson.secondaryRgb`. Returns -1
+ *  ("no colour") for the magenta sentinel, matching the client, whose decode
+ *  runs the same rgb→hsl conversion with its magenta special case. */
+function floSecondaryRgb(flo: FloJson | undefined): number {
+  const v = flo?.secondaryRgb ?? flo?.minimapColorRgb
+  return v === undefined || v === NO_COLOR ? -1 : v
+}
+
 function floTileHsl(flo: FloJson | undefined): number {
   if (!flo) return -1
-  // minimapColorRgb is deliberately NOT a fallback: overlays with no tile
-  // colour and no texture are invisible in the main view (e.g. bridge decks,
-  // where the bridge MODEL provides the visible surface) — the minimap colour
-  // only paints the minimap.
+  // The secondary colour (opcode 7) is deliberately NOT a fallback here. The
+  // client sets the tile colour from primaryRGB alone (`anInt3850`), so an
+  // overlay with no tile colour and no texture is invisible in the main view
+  // (e.g. bridge decks, where the bridge MODEL provides the visible surface)
+  // even though it still paints the minimap. Its other two jobs — the material
+  // colour channel, and gating whether the overlay counts at all — are
+  // separate; see EDITOR.md.
   if (flo.colorRgb !== undefined && flo.colorRgb !== NO_COLOR) return rgbToHsl16(flo.colorRgb)
   return -1
 }
