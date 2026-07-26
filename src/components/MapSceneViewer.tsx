@@ -1265,7 +1265,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         return
       }
 
-      // drag-to-move: press on the currently selected editable loc
+      // drag-to-move: press on the currently selected editable loc.
+      // The View-tab gate is not a silent restriction — selecting a loc forces
+      // the tab (`setSideTab('view')`, three call sites) and selection is
+      // blocked outright on the Terrain tab, so you can only be selected-but-
+      // elsewhere by switching tabs on purpose. On those tabs left-drag already
+      // belongs to the terrain brush and to placement, so it has to yield.
       const sel = selectionRef.current
       if (sideTabRef.current === 'view' && sel?.kind === 'loc' && sel.editable) {
         updatePointer(e)
