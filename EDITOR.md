@@ -1,5 +1,20 @@
 # EDITOR.md — turning what the renderer knows into things you can edit
 
+Two parts: **field knowledge** (what a render trace taught us about a cache
+field, so a UI can be built from it later) and **editor gaps** (the running list
+of what the editor can't do yet). Open work is still tracked in `TODO.md`; this
+is the detail behind it.
+
+## The rule
+
+> "This is an editor, we need to be able to edit **absolutely everything**."
+> — Cody, 2026-07-25
+
+Read-only is a bug, not a limitation. If the viewer can show a value, the editor
+should be able to change it, preview the change live, and warn before losing it.
+When a new panel shows a field it can't edit, that's an entry in this file at
+minimum.
+
 ## Why this file exists
 
 The renderer runs well ahead of the editor. Every time we trace a piece of
@@ -186,3 +201,102 @@ UI**, not after.
 alpha feeds the transparency rules traced in `TODO.md`.
 
 **Not surfaced.** Neither is editable, and both visibly change rendering.
+
+---
+
+# Editor gaps (map scene)
+
+Requested 2026-07-25. These are UI/UX work, not cache-format work — grouped
+here rather than in `TODO.md` because they share one theme: the 3D map viewer
+shows far more than it lets you change.
+
+## BUG: an accidental drag moves the selected object
+
+**Reproduce:** select an object in the View tab, then press and release on it
+with any small mouse movement — or, on a multi-tile object, just click it
+again. It relocates.
+
+**Root cause found** (`MapSceneViewer.tsx:1220-1233`, commit-free, not yet
+fixed). Two independent faults:
+
+1. **No drag threshold on the move path.** `onPointerDown` arms `movingLoc` on
+   *any* left press on the selected editable loc. The 5px click-vs-drag test
+   exists — `onPointerUp:1288` — but it sits *after* the `movingLoc` block
+   returns at :1281, so it never guards a move. A 1px twitch commits an edit.
+2. **The drop tile comes from the ray, not from a delta.** `onPointerUp:1273`
+   moves the loc to whatever tile is under the cursor on release, and only
+   treats it as "released in place" if that tile equals the anchor tile
+   (`entry[3], entry[4]`). For an object spanning several tiles, pressing
+   anywhere except its anchor tile is already a different tile — so a plain
+   click teleports it to the tile you clicked. Note `res.isCenter` in the arming
+   check does **not** help: `isCenter` means "belongs to the centre region"
+   (:1107), not "the object's centre tile".
+
+**Fix shape:** arm on pointerdown but don't *enter* move mode until the pointer
+has travelled past the same 5px threshold; and move by tile **delta** from the
+press point, not by absolute picked tile. Both faults must go — fixing only the
+threshold still lets a deliberate 6px drag on a big object jump it to the cursor.
+
+## Object (loc) panel — it shows almost nothing and edits live nowhere
+
+Today the panel shows x, y, type, rotation, plane. Wanted:
+
+- **Much more info.** At minimum the object's name and id, its models and the
+  textures each face group uses (see the loc/texture panel entry above),
+  size, clip/blocking, `groundContourType`, animation, and the `transformTo`
+  set. Treat "what does the def say" as the baseline.
+- **Live preview on edit.** Changing any field should update the scene
+  immediately, not on Apply — including **rotation**, which currently only
+  previews after Apply.
+- **Dirty state + discard.** Edits mark the panel dirty; Discard reverts.
+- **Warn before losing edits.** Selecting another object, switching tabs, or
+  navigating away with unsaved changes must prompt. **Reuse what exists** —
+  `App.tsx` already has `confirmLeaveItem()` (`:687`), a `confirmDialog` modal
+  with Discard/Cancel, plus a `beforeunload` guard (`:321`), driven by
+  `isContentDirty`. The map panel should feed the same flag rather than grow
+  its own dialog. The general pattern is CLAUDE.md's "Editable viewer
+  convention" (local `draft`, `isDirty`, sticky save bar).
+- **`transformTo` preview.** Let the panel choose which morph target the loc
+  renders as, so a multiloc can be inspected in each of its states. This pairs
+  with the open "REVISIT: transforming objects" item in `TODO.md` — that item
+  decides which target to show *by default*; this one is about overriding it by
+  hand. Doing this first would make that decision much easier to reason about.
+
+## Sound emitters — read-only, and no table
+
+- **Selecting one is read-only.** Everything about an emitter should be
+  editable, same as any loc. (It *is* a loc — an invisible utility object — so
+  the loc panel work above mostly subsumes this, but the sound-specific fields
+  need surfacing too.)
+- **Needs a table**, like locs and point lights already have: list every
+  emitter in the region, select/jump to one, edit in place.
+
+## Map icons / map sprites — needs a table
+
+List every map icon/sprite used in the region, and for each, **which objects
+display it**. The link runs through an object def's `mapCategoryId` (an `areas`
+/ MECType record), plus static-element placements — see the related
+"REMINDER: verify object-placed map icons" item in `TODO.md`, which is about
+whether those placements resolve correctly. The table is how you'd check.
+
+## Light editing — sliders as well as values
+
+The light table's editable cells take typed numbers only. Every numeric field
+(position, radius/`size2d`, colour components, intensity) should have a slider
+*and* the number, so a value can be dialled in while watching the scene. The
+number field stays for precision and for pasting exact values.
+
+**Sequencing:** see the point-lights gotcha above — moving lights into the loc
+shader first makes these edits live at 60fps instead of triggering a rebuild,
+which is what makes sliders worth having at all.
+
+## Terrain painting
+
+Drag-to-paint tiles, for both **materials/textures** and **plain colours**. A
+terrain brush already exists (`terrainBrushRef`, and `onPointerDown:1237` starts
+a `paintingDrag` that continues through `onPointerMove:1158`), so this is
+extending what that brush can apply rather than new interaction plumbing.
+
+Worth doing alongside the per-tile overlay shape/rotation painting described in
+the ground-blending entry — same interaction, and together they'd cover most of
+what hand-authoring terrain needs.
