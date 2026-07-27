@@ -186,6 +186,11 @@ type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'river
  *  light gizmos, marker diamonds, the chunk grid. */
 const TINTED_KINDS: Tagged['kind'][] = ['terrain', 'riverbed', 'loc']
 
+/** Above this many changed placements the targeted patch stops being a win —
+ *  each added loc costs its own mesh and draw call, so a big paste is better
+ *  off re-merging once. Drags, rotations, places and deletes are all 1-2. */
+const PATCH_LIMIT = 8
+
 type MarkerSelection = {
   kind: 'marker'
   markerKind: MarkerInfo['kind']
@@ -315,6 +320,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // unified centre rebuild (terrain + locs + shadows + minimap) — assigned by
   // the scene build once its closure state (mosaic grid, assets) exists
   const rebuildCenterRef = useRef<((t: MapTerrain, objs: LocEntry[], lights?: RegionLight[]) => Promise<void>) | null>(null)
+  /** Targeted placement patch — see its definition for what it does and does
+   *  not update. Resolves false when the edit is too broad, and the caller
+   *  falls back to the full rebuild. */
+  const patchLocsRef = useRef<((prev: LocEntry[], next: LocEntry[]) => Promise<boolean>) | null>(null)
   // list-row click → select + highlight + fly the camera over the loc
   const selectFromListRef = useRef<((entry: LocEntry, index: number) => void) | null>(null)
   // light-list row click → select the light + fly the camera to it
@@ -596,6 +605,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // still toggleable in the controls).
   const [visiblePlanes, setVisiblePlanes] = useState([true, false, false, false])
   const [showLocs, setShowLocs] = useState(true)
+  // the patch path attaches meshes without the visibility effect re-running
+  // (it keys off `status`, which a patch never changes), so it sets their
+  // initial visibility from the same toggles that effect uses. Plane
+  // visibility needs no ref — that lives on the plane GROUP.
+  const showLocsRef = useRef(showLocs)
+  showLocsRef.current = showLocs
   const [showGfxPanel, setShowGfxPanel] = useState(false)
   // Bloom is live-tunable so it can be matched against the client side by side.
   // The client's own FilterBloom params are (threshold 1.0, strength 0.25), but its
@@ -609,6 +624,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const refreshTintRef = useRef<(() => void) | null>(null)
   const [showOutlines, setShowOutlines] = useState(false)
   const [showMarkers, setShowMarkers] = useState(true)
+  const showMarkersRef = useRef(showMarkers)
+  showMarkersRef.current = showMarkers
   // point-light gizmos. On by default and drawn x-ray (see buildLightsMesh) —
   // lights live inside the locs they light, so depth-tested gizmos would be
   // unreachable. Off hides them AND stops them being picked.
@@ -2375,6 +2392,191 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           setMultiSelRef.current(sel)
         }
 
+        /** Blank out one placement's triangles in whichever centre merged mesh
+         *  owns them. Collapsing to a degenerate triangle is how the loc build
+         *  already hides alpha-hidden faces, and it keeps every index stable —
+         *  `triangleOwners` and the material groups are both positional, so
+         *  actually removing triangles would invalidate picking. Zero-area
+         *  triangles rasterise to nothing and can't be raycast, so the BVH is
+         *  left alone too. */
+        function hideLocInMerged(entry: LocEntry): boolean {
+          // EVERY mesh, not the first match: one placement is routinely split
+          // across several — its opaque faces in the plane's merged mesh, its
+          // transparent ones in a per-loc mesh or the shared-transparent
+          // bucket. Stopping at the first left the rest of the object on
+          // screen, which read as "the delete didn't work".
+          // An animated placement is its own mesh, posed every frame — blanking
+          // its triangles achieves nothing because the animator rewrites them
+          // on the next tick. It has to leave the scene and the pose list.
+          let removedAnimated = false
+          animLocsRef.current = animLocsRef.current.filter((rec) => {
+            const l = (rec.mesh?.userData.locs as LocRef[] | undefined)?.[0]
+            if (rec.neighbor || !l) return true
+            if (l.objectId !== entry[0] || l.shape !== entry[1] || l.rotation !== entry[2]
+              || l.x !== entry[3] || l.y !== entry[4] || l.plane !== entry[5]) return true
+            // an animated loc's highlight SHARES this geometry (so it follows
+            // the pose) — dropping it first, or the dispose below guts it
+            clearLocHighlight()
+            rec.mesh.parent?.remove(rec.mesh)
+            disposeDeep(rec.mesh)
+            taggedRef.current = taggedRef.current.filter((t) => t.obj !== rec.mesh)
+            sortCentreRef.current = sortCentreRef.current.filter((m) => m !== rec.mesh)
+            removedAnimated = true
+            return false
+          })
+          if (removedAnimated) return true
+
+          let hidAny = false
+          for (const tagged of taggedRef.current) {
+            if (tagged.neighbor || tagged.kind !== 'loc') continue
+            const mesh = tagged.obj as THREE.Mesh
+            const locs = mesh.userData.locs as LocRef[] | undefined
+            const owners = mesh.userData.triangleOwners as Int32Array | undefined
+            if (!locs || !owners) continue
+            const owner = locs.findIndex((l) => l.objectId === entry[0] && l.shape === entry[1]
+              && l.rotation === entry[2] && l.x === entry[3] && l.y === entry[4] && l.plane === entry[5])
+            if (owner < 0) continue
+            const attr = mesh.geometry.getAttribute('position') as THREE.BufferAttribute
+            const pos = attr.array as Float32Array
+            let hid = false
+            for (let t = 0; t < owners.length; t++) {
+              if (owners[t] !== owner) continue
+              pos.fill(0, t * 9, t * 9 + 9)
+              hid = true
+            }
+            if (hid) { attr.needsUpdate = true; hidAny = true }
+          }
+          return hidAny
+        }
+
+        /** Fast path for an edit that touches only a handful of placements —
+         *  which is every drag, rotate, place and delete.
+         *
+         *  The full rebuild below re-merges every loc on all four planes (5926
+         *  of them in Lumbridge, 3574 on plane 0 alone) plus four planes of
+         *  terrain, because the locs of a plane share ONE geometry and loc
+         *  shadows feed the terrain's vertex lighting. None of that is needed
+         *  to move one object: this hides the old placement in the merge and
+         *  gives the new one a mesh of its own, built by the same
+         *  `buildLocsMesh` with a one-entry list so contouring, lighting,
+         *  textures and transparency all still come from the real pipeline.
+         *
+         *  What it deliberately does NOT update: the static shadow the loc
+         *  casts on the ground, and the minimap. Both are terrain-side and
+         *  both catch up on the next full rebuild (a terrain edit, a region
+         *  change, or Save). Returns false when the edit is too broad to
+         *  patch, and the caller falls back to the full rebuild. */
+        patchLocsRef.current = async (prev, next) => {
+          if (disposed) return false
+          const key = (e: LocEntry) => e.join(',')
+          const before = new Map<string, LocEntry>()
+          for (const e of prev) before.set(key(e), e)
+          const added: LocEntry[] = []
+          for (const e of next) {
+            const k = key(e)
+            if (before.has(k)) before.delete(k)
+            else added.push(e)
+          }
+          const removed = [...before.values()]
+          if (added.length === 0 && removed.length === 0) return true
+          if (added.length + removed.length > PATCH_LIMIT) return false
+
+          // BUILD FIRST, then touch the scene. Anything unexpected below bails
+          // to the full rebuild, and bailing must leave the scene exactly as it
+          // was — hiding the old placement before knowing the new one built
+          // would strand a half-applied edit with nothing to correct it.
+          const fresh: { obj: THREE.Object3D; plane: number; kind: Tagged['kind'] }[] = []
+          const freshAnim: AnimLocRecord[] = []
+          // Animators are shared by animation id — the full rebuild caches them
+          // that way too — so a MOVED animated loc can reuse the instance
+          // already in memory and never touch the disk. A newly PLACED one has
+          // no such instance and does need the rebuild to load it.
+          const animators = new Map<number, LocAnimator>()
+          for (const rec of animLocsRef.current) {
+            if (rec.animator && !animators.has(rec.animationId)) animators.set(rec.animationId, rec.animator)
+          }
+          const bail = (why: string) => {
+            console.info(`[map] placement patch fell back to a full rebuild: ${why}`)
+            return false
+          }
+          try {
+            for (const entry of added) {
+              let built = false
+              // Only the planes this placement can land on, not all four. A loc
+              // renders on its decoded plane, or one below it when its tile
+              // carries the bridge flag — so at most two builds, each of which
+              // costs a set of fresh materials (and their shader compiles).
+              const candidates = entry[5] > 0 ? [entry[5], entry[5] - 1] : [0]
+              for (const plane of candidates) {
+                const b = await buildLocsMesh(
+                  currentTerrain, [entry], plane, centerHeights, assets, undefined, lightGrid,
+                )
+                if (disposed) return false
+                for (const m of [...(b.mesh ? [b.mesh] : []), ...b.transparentLocs]) {
+                  m.renderOrder = m === b.mesh ? ORDER_OPAQUE_LOC : ORDER_TRANSPARENT_LOC
+                  m.geometry.computeBoundsTree({ indirect: true })
+                  track(m)
+                  applyTint(m)
+                  fresh.push({ obj: m, plane, kind: 'loc' })
+                  built = true
+                }
+                if (b.markers.length > 0) {
+                  const markerGroup = buildMarkersMesh(b.markers)
+                  if (markerGroup) {
+                    track(markerGroup)
+                    fresh.push({ obj: markerGroup, plane, kind: 'marker' })
+                    built = true
+                  }
+                }
+                for (const al of b.animated) {
+                  const animator = animators.get(al.animationId)
+                  // no loaded animator means nothing in the scene uses this
+                  // animation yet — the rebuild reads and preloads it
+                  if (!animator) return bail(`object ${entry[0]} animation ${al.animationId} is not loaded yet`)
+                  const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points)
+                  if (disposed) return false
+                  if (!anim) continue
+                  anim.mesh.matrixAutoUpdate = false
+                  anim.mesh.matrix.copy(al.matrix)
+                  anim.mesh.updateMatrixWorld(true)
+                  anim.mesh.userData.locRegion = { x: data.def.regionX, y: data.def.regionY }
+                  track(anim.mesh)
+                  applyTint(anim.mesh)
+                  fresh.push({ obj: anim.mesh, plane, kind: 'loc' })
+                  freshAnim.push({
+                    update: anim.update, model: al.model, animationId: al.animationId,
+                    animator, neighbor: false, mesh: anim.mesh,
+                    sphere: anim.mesh.geometry.boundingSphere
+                      ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
+                      : new THREE.Sphere(new THREE.Vector3(), 1e9),
+                  })
+                  built = true
+                }
+              }
+              // produced nothing on any plane: the placement would silently
+              // vanish, so hand it to the rebuild instead
+              if (!built) return bail(`object ${entry[0]} built no geometry on plane ${entry[5]}`)
+            }
+            // a placement we can't find in the merge means the scene isn't the
+            // one this diff was computed against — fall back rather than guess
+            for (const e of removed) {
+              if (!hideLocInMerged(e)) return bail(`object ${e[0]} at ${e[3]},${e[4]} plane ${e[5]} not found in any merged mesh`)
+            }
+          } catch (e) {
+            return bail(String(e))
+          }
+
+          for (const { obj, plane, kind } of fresh) {
+            obj.visible = kind === 'loc' ? showLocsRef.current : showMarkersRef.current
+            planeGroupsRef.current[plane]?.add(obj)
+            taggedRef.current.push({ obj, neighbor: false, kind })
+            const mesh = obj as THREE.Mesh
+            if (mesh.userData?.sortCentreY !== undefined) sortCentreRef.current.push(mesh)
+          }
+          animLocsRef.current.push(...freshAnim)
+          return true
+        }
+
         // unified partial rebuild for terrain AND placement edits: recompute
         // the mosaic, rebuild the centre's locs (whose static shadows feed
         // the terrain lighting), minimap, terrain and outline. Neighbour
@@ -2580,6 +2782,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       lightHighlightClearRef.current = null
       selectOutlineClearRef.current = null
       rebuildCenterRef.current = null
+      patchLocsRef.current = null
       selectFromListRef.current = null
       selectLightFromListRef.current = null
       selectMarkerFromListRef.current = null
@@ -2602,11 +2805,19 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     if (!objects || objects === lastBuiltObjectsRef.current) return
     const rebuild = rebuildCenterRef.current
     if (!rebuild) return
+    const prevObjects = lastBuiltObjectsRef.current
+    // a terrain edit landing in the same commit changes the ground the locs
+    // sit on, so only a placement-only change is patchable
+    const terrainUnchanged = lastBuiltTerrainRef.current === terrainPropRef.current
     // the unified rebuild consumes BOTH drafts — mark both as built so a
     // combined commit (e.g. a stamp paste) doesn't rebuild twice
     lastBuiltObjectsRef.current = objects
     lastBuiltTerrainRef.current = terrainPropRef.current
-    void rebuild(terrainPropRef.current ?? data.terrain, objects)
+    void (async () => {
+      const patch = patchLocsRef.current
+      if (patch && prevObjects && terrainUnchanged && await patch(prevObjects, objects)) return
+      await rebuild(terrainPropRef.current ?? data.terrain, objects)
+    })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [objects, status])
 
