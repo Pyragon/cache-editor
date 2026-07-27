@@ -134,6 +134,14 @@ above, and both save. Nothing new is needed at the *definition* level.
 - **Coverage is in unrotated shape space.** `OVERLAY_SHAPE_COVERS[shape][id]`
   is indexed before rotation; a UI showing "which corners does this overlay
   cover" must apply `(corner + 2·rotation) & 7` first.
+- **Per-tile underlay/overlay bytes are definition id + 1.** The map opcode
+  stream stores `underlayId` as `opcode − 81` and the dump keeps that raw
+  byte, where 0 means "none" — so byte 164 is underlay *163* (Lumbridge
+  grass), and the same +1 convention holds for the overlay byte. Everything
+  that resolves a definition must subtract one (`configs.underlays.get(id −
+  1)` throughout `mapScene.ts`; the 2D preview had an off-by-one until
+  2026-07-27). The tile inspector edits the raw byte, so what users type is
+  the +1 value; `createRegionDef`'s fill takes the raw byte too.
 
 ---
 

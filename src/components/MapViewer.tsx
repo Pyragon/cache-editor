@@ -77,7 +77,9 @@ export default function MapViewer({ world, onDirtyChange }: {
   // create it (optionally pre-filled with a flat ground slab)
   const [pendingCreate, setPendingCreate] = useState<{ rx: number; ry: number; target: WorldCoords } | null>(null)
   const [createFill, setCreateFill] = useState(true)
-  const [createUnderlay, setCreateUnderlay] = useState(1)
+  // stored tile byte = underlay definition id + 1 (0 = none). 164 = underlay
+  // 163, the Lumbridge grass (what's on the ground at world tile 3219, 3224).
+  const [createUnderlay, setCreateUnderlay] = useState(164)
   // world-grid region picker: shows every existing region, click to visit or
   // click a free cell to start creating there
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -248,13 +250,15 @@ export default function MapViewer({ world, onDirtyChange }: {
         const underlayId = terrain.underlayIds[idx]
         const overlayId = terrain.overlayIds[idx]
 
+        // stored bytes are definition id + 1 (0 = none) — same convention the
+        // 3D ground path uses (configs.underlays.get(id - 1))
         let rgb: number | null = null
         if (overlayId > 0) {
-          const c = data.overlayColors.get(overlayId)
+          const c = data.overlayColors.get(overlayId - 1)
           if (c != null && c !== NO_OVERLAY_COLOR) rgb = c
         }
         if (rgb == null && underlayId > 0) {
-          rgb = data.underlayColors.get(underlayId) ?? null
+          rgb = data.underlayColors.get(underlayId - 1) ?? null
         }
 
         ctx.fillStyle = rgb != null ? rgbToRenderedHex(rgb) : '#0c0e14'
@@ -740,7 +744,7 @@ export default function MapViewer({ world, onDirtyChange }: {
             fill plane 0 with flat ground
           </label>
           {createFill && (
-            <label className="map-create-underlay">
+            <label className="map-create-underlay" title="Stored tile byte — underlay definition id + 1. Default 164 = underlay 163, Lumbridge grass.">
               <span className="item-field-label">underlay</span>
               <NumberInput value={createUnderlay} onChange={setCreateUnderlay} min={0} max={255} />
             </label>
@@ -865,9 +869,10 @@ export default function MapViewer({ world, onDirtyChange }: {
             )}
           </div>
           <p className="tex-op-note">
-            Bit 0x1 of Tile Flags blocks the tile (the red tint above). Height is an explicit
-            override — when off, the client derives a smooth default from its terrain noise
-            function (the 3D view reproduces it).
+            Underlay and Overlay IDs are the stored tile byte — the definition id <em>plus one</em>,
+            with 0 meaning none (byte 164 = underlay 163). Bit 0x1 of Tile Flags blocks the tile
+            (the red tint above). Height is an explicit override — when off, the client derives a
+            smooth default from its terrain noise function (the 3D view reproduces it).
           </p>
         </section>
       )}
