@@ -215,14 +215,25 @@ export function IntListInput({ value, onChange, placeholder }: {
   onChange: (value: number[] | undefined) => void
   placeholder?: string
 }) {
+  // Free text while focused: a controlled input that re-renders the parsed
+  // list on every keystroke eats the comma you just typed ("3," parses to
+  // [3] and renders back as "3"), which makes typing a second value
+  // impossible. The parsed list still commits per keystroke; blur snaps the
+  // text back to the canonical comma-joined form.
+  const [text, setText] = useState<string | null>(null)
+  const canonical = (value ?? []).join(', ')
   return (
     <input
       className="def-int-list"
       type="text"
       placeholder={placeholder ?? '—'}
-      value={(value ?? []).join(', ')}
+      value={text ?? canonical}
+      onFocus={() => setText(canonical)}
+      onBlur={() => setText(null)}
       onChange={(e) => {
-        const trimmed = e.target.value.trim()
+        const raw = e.target.value
+        setText(raw)
+        const trimmed = raw.trim()
         if (trimmed === '') {
           onChange(undefined)
           return

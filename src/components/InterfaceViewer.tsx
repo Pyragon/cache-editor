@@ -102,11 +102,31 @@ function scriptToText(script: CS2Script | null | undefined): string {
 function textToScript(text: string): CS2Script | null {
   const trimmed = text.trim()
   if (trimmed === '') return null
-  return trimmed.split(',').map((tok) => {
-    const t = tok.trim()
+  // empty tokens are typing artifacts ("1, "), not script args — drop them
+  return trimmed.split(',').map((tok) => tok.trim()).filter((t) => t !== '').map((t) => {
     const n = Number(t)
-    return t !== '' && Number.isFinite(n) ? n : t
+    return Number.isFinite(n) ? n : t
   })
+}
+
+/** Script args as free text while focused — a controlled input that
+ *  re-renders the parsed script every keystroke would normalize away the
+ *  separator being typed. Commits per keystroke; blur snaps to canonical. */
+function ScriptInput({ script, onCommit }: { script: CS2Script | null; onCommit: (s: CS2Script | null) => void }) {
+  const [text, setText] = useState<string | null>(null)
+  const canonical = scriptToText(script)
+  return (
+    <input
+      className="cell-input"
+      value={text ?? canonical}
+      onFocus={() => setText(canonical)}
+      onBlur={() => setText(null)}
+      onChange={(e) => {
+        setText(e.target.value)
+        onCommit(textToScript(e.target.value))
+      }}
+    />
+  )
 }
 
 function depthOf(byId: Map<number, IComponentDefinition>, c: IComponentDefinition): number {
@@ -524,10 +544,9 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                   {SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null).map(([key, label]) => (
                     <label key={key} className="item-field iface-text-field">
                       <span className="item-field-label">{label}</span>
-                      <input
-                        className="cell-input"
-                        value={scriptToText(selected[key] as CS2Script | null)}
-                        onChange={(e) => set(key, textToScript(e.target.value))}
+                      <ScriptInput
+                        script={selected[key] as CS2Script | null}
+                        onCommit={(s) => set(key, s)}
                       />
                     </label>
                   ))}
