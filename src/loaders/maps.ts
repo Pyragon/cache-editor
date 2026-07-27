@@ -270,6 +270,19 @@ export async function loadRegion(
   return { id: regionId, def, terrain, underwaterTerrain, underlayColors, overlayColors, rootHandle }
 }
 
+/** Build the in-memory MapData for a freshly created region def that doesn't
+ *  exist on disk yet — creation is a draft like any other edit, and the file
+ *  is only written when the user saves. */
+export async function newRegionData(
+  rootHandle: FileSystemDirectoryHandle | undefined,
+  def: MapRegionDef,
+): Promise<MapData> {
+  const [underlayColors, overlayColors] = rootHandle
+    ? await getColorLookups(rootHandle)
+    : [new Map<number, number>(), new Map<number, number>()]
+  return { id: def.id, def, terrain: decodeTerrain(def), underlayColors, overlayColors, rootHandle }
+}
+
 /** Persist a region's terrain back to its own <regionId>.json. */
 export async function saveRegion(mapsDir: FileSystemDirectoryHandle, data: MapData): Promise<void> {
   const encoded = encodeTerrain(data.def, data.terrain)

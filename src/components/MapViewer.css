@@ -152,10 +152,23 @@
   border-radius: 6px;
   image-rendering: pixelated;
   cursor: crosshair;
+  touch-action: none; /* pointer-drag panning */
+}
+
+.map-picker-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim, #8a90a0);
+}
+
+.map-picker-msg {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #ffb26b;
 }
 
 .map-picker-status {
-  margin-top: 8px;
+  margin-top: 4px;
   font-size: 12px;
   color: var(--text-dim, #8a90a0);
   min-height: 16px;
@@ -185,6 +198,13 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* the shared label style ellipsizes under flex pressure ("UND…") — here it
+   sits in a roomy bar, so let it keep its natural width */
+.map-create-underlay .item-field-label {
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 .map-create-underlay .item-field-input {

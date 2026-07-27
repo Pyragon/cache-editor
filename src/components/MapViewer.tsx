@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LocEntry, MapData, WorldMapData } from '../loaders/maps'
-import { PLANES, SIZE, tileIndex, loadRegion, saveRegion, createRegionDef, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS } from '../loaders/maps'
+import { PLANES, SIZE, tileIndex, loadRegion, saveRegion, createRegionDef, newRegionData, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS } from '../loaders/maps'
 import { rgbToRenderedHex } from '../loaders/models'
 import { NumberInput } from './defFields'
 import { useZoom } from './useZoom'
@@ -13,6 +13,21 @@ import { writeJsonItem } from '../loaders/common'
 import './MapViewer.css'
 
 const ZOOM_LEVELS = [4, 6, 8, 10, 14]
+
+// world region picker view: canvas is a fixed 512px square, zoom levels are
+// px-per-region (2 = whole 256×256 world exactly fits)
+const PICKER_SIZE = 512
+const PICKER_ZOOMS = [2, 3, 4, 6, 8, 12, 16, 24, 32]
+
+function clampPickerView(scale: number, ox: number, oy: number) {
+  // keep the world covering the canvas — you can't pan the map off screen
+  const lim = PICKER_SIZE - 256 * scale
+  return {
+    scale,
+    ox: Math.min(0, Math.max(lim, Math.round(ox))),
+    oy: Math.min(0, Math.max(lim, Math.round(oy))),
+  }
+}
 
 const NO_OVERLAY_COLOR = 0xff00ff
 
@@ -68,7 +83,16 @@ export default function MapViewer({ world, onDirtyChange }: {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [usedRegions, setUsedRegions] = useState<Set<number> | null>(null)
   const [pickerHover, setPickerHover] = useState<{ rx: number; ry: number; used: boolean } | null>(null)
+  const [pickerView, setPickerView] = useState(() => clampPickerView(2, 0, 0))
+  const [pickerMsg, setPickerMsg] = useState('')
+  const pickerDragRef = useRef<{ startX: number; startY: number; ox: number; oy: number; moved: boolean } | null>(null)
   const pickerCanvasRef = useRef<HTMLCanvasElement>(null)
+  // id of a region created in-memory this session but not yet saved to disk —
+  // it rides the normal dirty/Save/Discard flow instead of being written on
+  // creation, so the load effect must not try to read it from the cache
+  const unsavedNewRef = useRef<number | null>(null)
+  // where Discard returns to when it abandons an unsaved created region
+  const prevCoordsRef = useRef<WorldCoords | null>(null)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const { confirm: confirmDialog, dialog: confirmDialogElement } = useConfirm()
@@ -78,6 +102,10 @@ export default function MapViewer({ world, onDirtyChange }: {
   // load the region containing the current coords (teleports validate the
   // target exists before moving, so failures here mean the initial region)
   useEffect(() => {
+    // an unsaved created region only exists in memory — there's nothing on
+    // disk to load, and moving anywhere else abandons the draft
+    if (unsavedNewRef.current != null && unsavedNewRef.current !== regionId) unsavedNewRef.current = null
+    if (unsavedNewRef.current === regionId) return
     let cancelled = false
     ;(async () => {
       setLoadError('')
@@ -119,7 +147,8 @@ export default function MapViewer({ world, onDirtyChange }: {
     setObjects(data.def.objects)
     setLights(initialLights)
     setObjectDefs(new Map())
-    setIsDirty(false)
+    // a just-created region starts dirty — it doesn't exist on disk until saved
+    setIsDirty(unsavedNewRef.current === data.id)
     setSelected(null)
     setPlane(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -323,6 +352,17 @@ export default function MapViewer({ world, onDirtyChange }: {
     setIsSaving(true)
     const next = { ...data, def: { ...data.def, objects }, terrain }
     await saveRegion(world.mapsDir, next)
+    // a draft-created region is now on disk — from here it's a normal region
+    if (unsavedNewRef.current === data.id) {
+      unsavedNewRef.current = null
+      prevCoordsRef.current = null
+      setUsedRegions((prev) => {
+        if (!prev) return prev
+        const nextSet = new Set(prev)
+        nextSet.add(data.id)
+        return nextSet
+      })
+    }
     // Point lights live in a different file (map_environments/<id>.json), so
     // they're only rewritten when they actually changed — and the rest of the
     // environment record goes back untouched.
@@ -347,6 +387,26 @@ export default function MapViewer({ world, onDirtyChange }: {
     // data change would rebuild the whole 3D scene for nothing
     baselineRef.current = { terrain, objects, lights, objectDefs }
     setIsSaving(false)
+    setIsDirty(false)
+  }
+
+  function handleDiscard() {
+    if (!data) return
+    if (unsavedNewRef.current === data.id) {
+      // abandon the draft-created region entirely — it was never on disk, so
+      // there's no baseline to restore; go back to where creation started
+      unsavedNewRef.current = null
+      historyRef.current = { past: [], future: [] }
+      setIsDirty(false)
+      setCoords(prevCoordsRef.current ?? HOME)
+      prevCoordsRef.current = null
+      return
+    }
+    setTerrain(baselineRef.current?.terrain ?? data.terrain)
+    setObjects(baselineRef.current?.objects ?? data.def.objects)
+    setLights(baselineRef.current?.lights ?? null)
+    setObjectDefs(baselineRef.current?.objectDefs ?? new Map())
+    historyRef.current = { past: [], future: [] }
     setIsDirty(false)
   }
 
@@ -391,6 +451,7 @@ export default function MapViewer({ world, onDirtyChange }: {
 
   async function openRegionPicker() {
     setPickerOpen(true)
+    setPickerMsg('')
     if (usedRegions) return // scanned once per session — regions rarely change under us
     const used = new Set<number>()
     for await (const handle of world.mapsDir.values()) {
@@ -401,35 +462,133 @@ export default function MapViewer({ world, onDirtyChange }: {
     setUsedRegions(used)
   }
 
-  // draw the 256×256 world grid (2px per region, north up)
+  // draw the 256×256 world grid (north up) through the picker's pan/zoom view
   useEffect(() => {
     const ctx = pickerCanvasRef.current?.getContext('2d')
     if (!pickerOpen || !usedRegions || !ctx) return
-    const P = 2
+    const { scale, ox, oy } = pickerView
     ctx.fillStyle = '#0c0e14'
-    ctx.fillRect(0, 0, 256 * P, 256 * P)
+    ctx.fillRect(0, 0, PICKER_SIZE, PICKER_SIZE)
     ctx.fillStyle = '#2f6b46'
     for (const id of usedRegions) {
-      const rx = id >> 8
-      const ry = id & 0xff
-      ctx.fillRect(rx * P, (255 - ry) * P, P, P)
+      const x = (id >> 8) * scale + ox
+      const y = (255 - (id & 0xff)) * scale + oy
+      if (x + scale < 0 || x > PICKER_SIZE || y + scale < 0 || y > PICKER_SIZE) continue
+      ctx.fillRect(x, y, scale, scale)
     }
     // regions created this session (in pendingCreate flow they appear after
     // creation via the load effect, so mark the current region specially)
     ctx.fillStyle = '#2f8fff'
-    ctx.fillRect((regionId >> 8) * P, (255 - (regionId & 0xff)) * P, P, P)
-  }, [pickerOpen, usedRegions, regionId])
+    ctx.fillRect((regionId >> 8) * scale + ox, (255 - (regionId & 0xff)) * scale + oy, scale, scale)
+    // faint region-boundary grid, once cells are big enough for it to read
+    if (scale >= 4) {
+      ctx.fillStyle = `rgba(255, 255, 255, ${scale >= 8 ? 0.09 : 0.05})`
+      const gx0 = Math.max(0, ox)
+      const gx1 = Math.min(PICKER_SIZE, 256 * scale + ox)
+      const gy0 = Math.max(0, oy)
+      const gy1 = Math.min(PICKER_SIZE, 256 * scale + oy)
+      for (let i = 0; i <= 256; i++) {
+        const x = i * scale + ox
+        if (x >= gx0 && x <= gx1) ctx.fillRect(x, gy0, 1, gy1 - gy0)
+        const y = i * scale + oy
+        if (y >= gy0 && y <= gy1) ctx.fillRect(gx0, y, gx1 - gx0, 1)
+      }
+    }
+  }, [pickerOpen, usedRegions, regionId, pickerView])
 
-  function pickerCell(e: React.MouseEvent<HTMLCanvasElement>): { rx: number; ry: number; used: boolean } {
+  // wheel-zoom toward the cursor. Native listener because React registers
+  // wheel as passive, and we need preventDefault to keep the page still.
+  useEffect(() => {
+    const canvas = pickerCanvasRef.current
+    if (!pickerOpen || !usedRegions || !canvas) return
+    function onWheel(e: WheelEvent) {
+      e.preventDefault()
+      const rect = canvas!.getBoundingClientRect()
+      const cx = e.clientX - rect.left
+      const cy = e.clientY - rect.top
+      setPickerView((v) => {
+        const idx = PICKER_ZOOMS.indexOf(v.scale)
+        const scale = PICKER_ZOOMS[Math.max(0, Math.min(PICKER_ZOOMS.length - 1, idx + (e.deltaY < 0 ? 1 : -1)))]
+        if (scale === v.scale) return v
+        // keep the region under the cursor under the cursor
+        return clampPickerView(scale, cx - ((cx - v.ox) / v.scale) * scale, cy - ((cy - v.oy) / v.scale) * scale)
+      })
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', onWheel)
+  }, [pickerOpen, usedRegions])
+
+  function pickerCell(e: React.MouseEvent<HTMLCanvasElement>): { rx: number; ry: number; used: boolean } | null {
     const rect = e.currentTarget.getBoundingClientRect()
-    const P = 2
-    const rx = Math.max(0, Math.min(255, Math.floor((e.clientX - rect.left) / P)))
-    const ry = 255 - Math.max(0, Math.min(255, Math.floor((e.clientY - rect.top) / P)))
+    const { scale, ox, oy } = pickerView
+    const rx = Math.floor((e.clientX - rect.left - ox) / scale)
+    const ry = 255 - Math.floor((e.clientY - rect.top - oy) / scale)
+    if (rx < 0 || rx > 255 || ry < 0 || ry > 255) return null
     return { rx, ry, used: usedRegions?.has((rx << 8) | ry) ?? false }
   }
 
-  async function handlePickerClick(e: React.MouseEvent<HTMLCanvasElement>) {
+  // left/middle drag pans; a left press that never moves is a click (select)
+  function handlePickerPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (e.button !== 0 && e.button !== 1) return
+    e.preventDefault() // middle button would start browser autoscroll
+    e.currentTarget.setPointerCapture(e.pointerId)
+    pickerDragRef.current = { startX: e.clientX, startY: e.clientY, ox: pickerView.ox, oy: pickerView.oy, moved: false }
+  }
+
+  function handlePickerPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+    setPickerHover(pickerCell(e))
+    const drag = pickerDragRef.current
+    if (!drag) return
+    const dx = e.clientX - drag.startX
+    const dy = e.clientY - drag.startY
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return
+    drag.moved = true
+    e.currentTarget.style.cursor = 'grabbing'
+    setPickerView((v) => clampPickerView(v.scale, drag.ox + dx, drag.oy + dy))
+  }
+
+  function handlePickerPointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+    const drag = pickerDragRef.current
+    pickerDragRef.current = null
+    e.currentTarget.style.cursor = ''
+    if (!drag || drag.moved || e.button !== 0) return
     const cell = pickerCell(e)
+    if (cell) void pickerSelect(cell)
+  }
+
+  // Right-click deletes a region file, after an are-you-sure. Unlike edits
+  // and creation this writes (well, removes) on disk immediately — a file
+  // deletion isn't representable in the one-region draft/save model.
+  async function handlePickerContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
+    e.preventDefault()
+    const cell = pickerCell(e)
+    if (!cell?.used) return
+    const id = (cell.rx << 8) | cell.ry
+    if (id === regionId) {
+      setPickerMsg("can't delete the region you're standing in — move somewhere else first")
+      return
+    }
+    const ok = await confirmDialog(
+      `Delete region ${cell.rx}, ${cell.ry}? This permanently removes ${id}.json from the maps folder on disk.`,
+      { title: 'Delete region', confirmLabel: 'Delete', danger: true },
+    )
+    if (!ok) return
+    try {
+      await world.mapsDir.removeEntry(`${id}.json`)
+    } catch (err) {
+      setPickerMsg(`delete failed: ${err}`)
+      return
+    }
+    setPickerMsg(`deleted region ${cell.rx}, ${cell.ry}`)
+    setUsedRegions((prev) => {
+      if (!prev) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }
+
+  async function pickerSelect(cell: { rx: number; ry: number; used: boolean }) {
     const target: WorldCoords = { x: cell.rx * 64 + 32, y: cell.ry * 64 + 32, plane: 0 }
     if (cell.used) {
       if (isDirty && regionIdOf(target) !== regionId) {
@@ -449,28 +608,28 @@ export default function MapViewer({ world, onDirtyChange }: {
     }
   }
 
-  // Create the pending region: write its file, then teleport into it. This
-  // writes to disk immediately (a region file either exists or it doesn't) —
-  // subsequent edits go through the normal draft/save flow.
+  // Create the pending region as an in-memory draft: nothing touches disk
+  // until Save writes the region file. Discard — or navigating away past the
+  // unsaved-changes confirm — abandons it entirely.
   async function handleCreateRegion() {
     if (!pendingCreate) return
-    const def = createRegionDef(pendingCreate.rx, pendingCreate.ry, createFill ? { underlayId: createUnderlay } : undefined)
-    try {
-      const fileHandle = await world.mapsDir.getFileHandle(`${def.id}.json`, { create: true })
-      const writable = await fileHandle.createWritable()
-      await writable.write(JSON.stringify(def))
-      await writable.close()
-    } catch (e) {
-      setSearchMsg(`create failed: ${e}`)
-      setPendingCreate(null)
-      return
+    if (isDirty) {
+      const ok = await confirmDialog('You have unsaved changes in this region. Discard them and create the new region?', {
+        title: 'Unsaved changes',
+        confirmLabel: 'Discard',
+        danger: true,
+      })
+      if (!ok) return
     }
-    setUsedRegions((prev) => {
-      if (!prev) return prev
-      const next = new Set(prev)
-      next.add(def.id)
-      return next
-    })
+    const def = createRegionDef(pendingCreate.rx, pendingCreate.ry, createFill ? { underlayId: createUnderlay } : undefined)
+    const created = await newRegionData(world.rootHandle, def)
+    // Discard returns here; creating on top of another unsaved creation keeps
+    // the original return point (the abandoned draft is no place to go back to)
+    prevCoordsRef.current = unsavedNewRef.current === regionId ? (prevCoordsRef.current ?? HOME) : coords
+    unsavedNewRef.current = def.id
+    envRef.current = null
+    setEnv(null)
+    setData(created)
     const target = pendingCreate.target
     setPendingCreate(null)
     setCoords(target)
@@ -509,10 +668,10 @@ export default function MapViewer({ world, onDirtyChange }: {
           {data.def.hasLocations && <span className="item-id-badge">{(objects ?? data.def.objects).length} objects</span>}
           {!data.def.hasLocations && <span className="item-id-badge">no location key</span>}
           {data.id !== regionId && <span className="item-id-badge">loading region {regionId >> 8}, {regionId & 0xff}…</span>}
+          <button type="button" className="map-regions-btn" onClick={openRegionPicker} title="World region map — visit a region or pick a free slot to create">
+            Regions
+          </button>
         </div>
-        <button type="button" className="map-regions-btn" onClick={openRegionPicker} title="World region map — visit a region or pick a free slot to create">
-          Regions…
-        </button>
         <form className="map-coord-search" onSubmit={handleSearchSubmit}>
           {searchMsg && <span className="map-coord-msg">{searchMsg}</span>}
           <input
@@ -546,19 +705,26 @@ export default function MapViewer({ world, onDirtyChange }: {
               <canvas
                 ref={pickerCanvasRef}
                 className="map-picker-canvas"
-                width={512}
-                height={512}
-                onMouseMove={(e) => setPickerHover(pickerCell(e))}
+                width={PICKER_SIZE}
+                height={PICKER_SIZE}
+                onPointerDown={handlePickerPointerDown}
+                onPointerMove={handlePickerPointerMove}
+                onPointerUp={handlePickerPointerUp}
+                onPointerCancel={() => { pickerDragRef.current = null }}
                 onMouseLeave={() => setPickerHover(null)}
-                onClick={handlePickerClick}
+                onContextMenu={handlePickerContextMenu}
               />
             ) : (
               <p className="loading-text">Scanning regions…</p>
             )}
+            {usedRegions && (
+              <div className="map-picker-hint">scroll to zoom · drag (or middle-drag) to pan · right-click a region to delete it · north is up</div>
+            )}
+            {pickerMsg && <div className="map-picker-msg">{pickerMsg}</div>}
             <div className="map-picker-status">
               {pickerHover
                 ? `region ${pickerHover.rx}, ${pickerHover.ry} — world ${pickerHover.rx * 64}, ${pickerHover.ry * 64} ${pickerHover.used ? '(exists)' : '(free)'}`
-                : usedRegions ? `${usedRegions.size} regions in the cache — north is up` : ''}
+                : usedRegions ? `${usedRegions.size} regions in the cache` : ''}
             </div>
           </div>
         </div>
@@ -710,7 +876,7 @@ export default function MapViewer({ world, onDirtyChange }: {
       {isDirty && (
         <div className="save-bar">
           <span className="save-bar-label">Unsaved changes</span>
-          <button type="button" className="save-bar-discard" onClick={() => { setTerrain(baselineRef.current?.terrain ?? data.terrain); setObjects(baselineRef.current?.objects ?? data.def.objects); setLights(baselineRef.current?.lights ?? null); setObjectDefs(baselineRef.current?.objectDefs ?? new Map()); historyRef.current = { past: [], future: [] }; setIsDirty(false) }}>Discard</button>
+          <button type="button" className="save-bar-discard" onClick={handleDiscard}>Discard</button>
           <button type="button" className="save-bar-save" onClick={handleSave} disabled={isSaving}>
             {isSaving ? 'Saving…' : 'Save'}
           </button>
