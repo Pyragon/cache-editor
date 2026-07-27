@@ -3,6 +3,16 @@ import { NumberInput } from './defFields'
 import MapSymbolPicker from './MapSymbolPicker'
 import type { SymbolKind } from './MapSymbolPicker'
 import type { ObjectDefJson } from './mapScene'
+import { OBJECT_SLOTS, LOC_TYPE_LABELS } from '../loaders/maps'
+
+/** The placement slot whose `mapSpriteId` the client never reads.
+ *
+ *  Its per-tile minimap pass (`Static.method13042`) asks the scene for exactly
+ *  three slots — `getWall` (0), `getInteractableObject` (2) and
+ *  `getGroundDecoration` (3) — and checks `mapSpriteId` on each. It never asks
+ *  for the wall-decoration slot, so a loc placed as type 4-8 cannot draw a map
+ *  sprite however its definition is set. (The wall it hangs on draws its own.) */
+const NO_MAP_SPRITE_SLOT = 1
 
 /** What a map_sprites record resolved to: `spriteId: -1` is the record's own
  *  "blank" value, `url: null` with a real id means the PNG isn't dumped. */
@@ -59,7 +69,7 @@ function cursorSpriteUrl(root: FileSystemDirectoryHandle, id: number): Promise<s
  *  Labels use cryogen's dumped field names (what you'd search the JSON for);
  *  the client's own names and the opcodes are in the tooltips, since the two
  *  disagree on most of the sound fields. `EDITOR.md` has the full mapping. */
-export default function ObjectDefEditor({ draft, canEdit, onChange, sections, root, loadSprite, loadArea }: {
+export default function ObjectDefEditor({ draft, canEdit, onChange, sections, root, loadSprite, loadArea, placementType }: {
   draft: ObjectDefJson
   canEdit: boolean
   onChange: (next: ObjectDefJson) => void
@@ -68,12 +78,18 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
   root: FileSystemDirectoryHandle | null
   loadSprite: (id: number) => Promise<MapSpriteInfo | null>
   loadArea: (id: number) => Promise<AreaInfo | null>
+  /** The placement's shape (0-22), when opened from one. Only used to close
+   *  off the map-sprite fields where the client would ignore them; omit it and
+   *  everything stays editable. */
+  placementType?: number
 }) {
   const set = <K extends keyof ObjectDefJson>(key: K, value: ObjectDefJson[K]) =>
     onChange({ ...draft, [key]: value })
 
   const spriteId = draft.mapSpriteId ?? -1
   const categoryId = draft.mapCategoryId ?? -1
+  const spriteBlocked = placementType !== undefined
+    && (OBJECT_SLOTS[placementType] ?? 2) === NO_MAP_SPRITE_SLOT
   const [sprite, setSprite] = useState<MapSpriteInfo | null>(null)
   const [area, setArea] = useState<AreaInfo | null>(null)
   // which field the open browser writes back to — the cursor rows mean there
@@ -375,22 +391,40 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
 
       {show('sprite') && <>
         <div className="mapscene-side-section">Map sprite — the minimap symbol</div>
-        <div className="mapscene-side-grid is-compact">
-          {idPick('Sprite id', 'config/map_sprites record (client mapIconId, opcode 102). -1 = none', spriteId, 'mapsprite', (v) => set('mapSpriteId', v))}
-          {num('Rotation', 'Quarter turns (client mapIconRotation, opcode 101)', draft.mapSpriteRotation ?? 0, (v) => set('mapSpriteRotation', v), 0, 3)}
-          {flag('Flip', 'Draw the sprite flipped vertically (client mapIconFlipped, opcode 105)', draft.flipMapSprite ?? false, (v) => set('flipMapSprite', v))}
-          {flag('Rotates', "Add the placement's rotation to the sprite's (client mapIconRotates, opcode 97). Off = always drawn unrotated.", draft.adjustMapSceneRotation ?? false, (v) => set('adjustMapSceneRotation', v))}
-        </div>
-        {spriteId >= 0 && (
-          <div className="mapscene-sprite-previews">
-            <div className="mapscene-sprite-preview">
-              <span className="item-field-label">Minimap sprite</span>
-              {sprite?.url
-                ? <img src={sprite.url} alt="map sprite" />
-                : <span className="mapscene-field-value">{spriteNote ?? 'loading…'}</span>}
-            </div>
+        {spriteBlocked ? (
+          <div className="mapscene-blocked-section">
+            <p>
+              <strong>Wall decorations don't draw a map sprite.</strong> This
+              placement is a {(LOC_TYPE_LABELS[placementType!] ?? `type ${placementType}`).toLowerCase()} (type {placementType}),
+              which the client files in the wall-decoration slot. Its per-tile
+              minimap pass only reads <code>mapSpriteId</code> from the wall,
+              scenery and floor-decoration slots — it never looks at
+              wall decorations at all, so setting one here would do nothing in
+              game. The wall it hangs on draws its own symbol.
+            </p>
+            <p className="mapscene-blocked-value">
+              Stored value: <code>mapSpriteId {spriteId}</code>
+              {spriteId >= 0 && ' — only ever drawn where this object is also placed in another slot.'}
+            </p>
           </div>
-        )}
+        ) : <>
+          <div className="mapscene-side-grid is-compact">
+            {idPick('Sprite id', 'config/map_sprites record (client mapIconId, opcode 102). -1 = none', spriteId, 'mapsprite', (v) => set('mapSpriteId', v))}
+            {num('Rotation', 'Quarter turns (client mapIconRotation, opcode 101)', draft.mapSpriteRotation ?? 0, (v) => set('mapSpriteRotation', v), 0, 3)}
+            {flag('Flip', 'Draw the sprite flipped vertically (client mapIconFlipped, opcode 105)', draft.flipMapSprite ?? false, (v) => set('flipMapSprite', v))}
+            {flag('Rotates', "Add the placement's rotation to the sprite's (client mapIconRotates, opcode 97). Off = always drawn unrotated.", draft.adjustMapSceneRotation ?? false, (v) => set('adjustMapSceneRotation', v))}
+          </div>
+          {spriteId >= 0 && (
+            <div className="mapscene-sprite-previews">
+              <div className="mapscene-sprite-preview">
+                <span className="item-field-label">Minimap sprite</span>
+                {sprite?.url
+                  ? <img src={sprite.url} alt="map sprite" />
+                  : <span className="mapscene-field-value">{spriteNote ?? 'loading…'}</span>}
+              </div>
+            </div>
+          )}
+        </>}
       </>}
 
       {show('icon') && <>

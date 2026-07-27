@@ -3062,6 +3062,9 @@ export type MarkerInfo = {
    *  — decided by the model's sentinel colour, which only the build knows. Kept
    *  on the record so an edit can re-derive `kind` without a scene rebuild. */
   fallback: 'barrier' | 'other'
+  /** the placement's shape (0-22) — decides its slot, which is what says
+   *  whether the client would ever draw its map sprite */
+  type: number
   tileX: number
   tileY: number
   /** the placement's own plane (what the maps file says), for the marker list —
@@ -3918,7 +3921,7 @@ export async function buildLocsMesh(
     if (markerModels > 0) {
       const fallback = markerIsBarrier ? 'barrier' : 'other'
       const kind: MarkerInfo['kind'] = markerKindFromDef(def) ?? fallback
-      markers.push({ x: sceneX, y: -avgHeight, z: -sceneY, objectId, kind, fallback, tileX: x, tileY: y, plane: decodedPlane })
+      markers.push({ x: sceneX, y: -avgHeight, z: -sceneY, objectId, kind, fallback, type: shape, tileX: x, tileY: y, plane: decodedPlane })
     }
   }
   // Opaque locs stay merged (order-independent). Transparent ones are the

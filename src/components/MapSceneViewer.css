@@ -230,6 +230,41 @@
   margin: 10px 0 0;
 }
 
+/* Stands in for a section whose fields the client would ignore for this
+   placement — the explanation replaces the inputs rather than sitting above a
+   row of controls that look editable but change nothing in game. */
+.mapscene-blocked-section {
+  border: 1px solid var(--border);
+  border-left: 3px solid #ffa64d; /* SLOT_COLORS wall-decoration orange */
+  border-radius: 6px;
+  background: rgba(255, 166, 77, 0.06);
+  padding: 9px 11px;
+  margin-top: 8px;
+}
+
+.mapscene-blocked-section p {
+  margin: 0;
+  color: var(--text-dim, #8a90a0);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.mapscene-blocked-section strong {
+  color: var(--text);
+}
+
+.mapscene-blocked-section code {
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.mapscene-blocked-value {
+  margin-top: 8px !important;
+  opacity: 0.8;
+}
+
 .mapscene-side-tabs {
   margin-left: 0;
   margin-bottom: 12px;

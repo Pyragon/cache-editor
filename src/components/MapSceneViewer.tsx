@@ -192,6 +192,8 @@ type MarkerSelection = {
   /** the kind to fall back to when an edit clears every id field */
   fallback: 'barrier' | 'other'
   objectId: number
+  /** the placement's shape, so the panel can tell which slot it sits in */
+  type: number
   worldX: number
   worldY: number
   /** The object def backing this marker — the draft one if it's being edited.
@@ -1137,6 +1139,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         markerKind: marker.kind,
         fallback: marker.fallback,
         objectId: marker.objectId,
+        type: marker.type,
         worldX: regionX * 64 + marker.tileX,
         worldY: regionY * 64 + marker.tileY,
         def: null, // filled below; the panel shows a loading state until then
@@ -2959,9 +2962,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       }
     }
 
-    // mapscene sprites (tree/rock symbols), anchored at the placement tile
+    // mapscene sprites (tree/rock symbols), anchored at the placement tile.
+    // Wall decorations are skipped: the client's per-tile pass
+    // (Static.method13042) reads mapSpriteId from the wall, scenery and
+    // floor-decoration slots only and never asks for the decoration slot, so
+    // a type 4-8 placement never draws one however its def is set.
     for (const e of listEntries) {
       if (e[5] !== 0) continue
+      if ((OBJECT_SLOTS[e[1]] ?? 2) === 1) continue
       const spriteId = objSprites.get(e[0])
       if (spriteId === undefined) continue
       const bmp = spriteBitmaps.get(spriteId)
@@ -4384,6 +4392,7 @@ function MarkerPanel({ sel, canEdit, placements, root, loadSprite, loadArea, onP
         root={root}
         loadSprite={loadSprite}
         loadArea={loadArea}
+        placementType={sel.type}
       />
 
       <div className="mapscene-side-actions">
@@ -4771,6 +4780,7 @@ function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClos
             root={root}
             loadSprite={loadSprite}
             loadArea={loadArea}
+            placementType={draft.type}
           />
         </>
       ) : (

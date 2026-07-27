@@ -253,8 +253,23 @@ own. Left column is what you'll find in `objects/<id>.json`:
 | `adjustMapSceneRotation` | `mapIconRotates` | 97 | false ⇒ client forces rotation 0 rather than adding the placement's |
 | `mapCategoryId` | `mapCategoryid` | 107 | `config/areas` (MEC) record — the map pin |
 
-Three gotchas that cost real debugging time:
+Four gotchas that cost real debugging time:
 
+- **`mapSpriteId` is read per SLOT, and the wall-decoration slot is never asked
+  (TRACED 2026-07-26).** `Static.method13042` is the client's whole per-tile
+  minimap pass. It queries the scene three times — `getWall`,
+  `getInteractableObject`, `getGroundDecoration` — and checks `mapSpriteId` on
+  each, drawing the sprite when set and falling back to the wall lines / the
+  `WALL_INTERACT` diagonal when not. It **never calls the wall-decoration
+  accessor at all**, so a loc placed as type 4–8 (slot 1 — `ObjectType`'s second
+  column, mirrored by our `OBJECT_SLOTS`) cannot draw a map sprite however its
+  definition is set; the wall it hangs on draws its own. Cody hit this setting a
+  sprite on a wall decoration and seeing nothing in game. The def field is
+  shared by every placement, so it's the *placement's* shape that decides,
+  not the object: the same def placed as scenery elsewhere still draws there.
+  `ObjectDefEditor` now takes a `placementType` and replaces the whole map
+  sprite section with an explanation when the slot is 1 (still showing the
+  stored value), and the editor minimap skips slot 1 to match.
 - **An unset id is dumped as `-1`, never omitted.** Every one of the 73913
   objects carries `ambientSoundId`. Any `!== undefined` test on these fields is
   therefore always true — that's what classified all 206 nameless map-icon
