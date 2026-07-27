@@ -156,10 +156,10 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
     <div className="item-field" title={title}>
       <span className="item-field-label">{label}</span>
       {canEdit ? (
-        <label className="mapscene-toggle">
-          <input type="checkbox" checked={value} onChange={(e) => onValue(e.target.checked)} />
-          {value ? 'yes' : 'no'}
-        </label>
+        <span className="btn-pill mapscene-flag-pill">
+          <button type="button" className={`zoom-btn${value ? ' active' : ''}`} onClick={() => onValue(true)}>yes</button>
+          <button type="button" className={`zoom-btn${!value ? ' active' : ''}`} onClick={() => onValue(false)}>no</button>
+        </span>
       ) : <span className="mapscene-field-value">{value ? 'yes' : 'no'}</span>}
     </div>
   )

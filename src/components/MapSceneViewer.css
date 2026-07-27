@@ -950,3 +950,12 @@ span.mapscene-loclist-thumb.empty {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .mapscene-gfx-live .mapscene-gamma { gap: 6px; }
+
+/* yes/no pill for boolean def fields (ObjectDefEditor's flag rows) — the
+   shared segmented pill at side-panel size, self-aligned so it doesn't
+   stretch to the field column's width */
+.mapscene-flag-pill {
+  align-self: flex-start;
+  margin: 2px 0;
+}
+.mapscene-flag-pill .zoom-btn { padding: 4px 14px; font-size: 11px; }
