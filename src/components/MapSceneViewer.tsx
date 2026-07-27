@@ -88,12 +88,14 @@ const WATER_VERT = `
   varying vec3 vWorldPos;
   varying vec3 vViewVec;
   varying float vDepth;
+  varying float vFogDepth;
   uniform vec3 uEyePos;
   void main() {
     vec4 wp = modelMatrix * vec4(position, 1.0);
     vWorldPos = wp.xyz;
     vViewVec = uEyePos - wp.xyz;
     vDepth = waterDepth;
+    vFogDepth = -(viewMatrix * wp).z;
     gl_Position = projectionMatrix * viewMatrix * wp;
   }
 `
@@ -115,9 +117,13 @@ const WATER_FRAG = `
   uniform float uSpecExp;
   uniform float uBreakDepth;
   uniform float uTime;
+  uniform vec3 uFogColor;
+  uniform float uFogNear;
+  uniform float uFogFar;
   varying vec3 vWorldPos;
   varying vec3 vViewVec;
   varying float vDepth;
+  varying float vFogDepth;
   vec3 skyEnv(vec3 dir) {
     float up = clamp(dir.y, 0.0, 1.0);
     return mix(uSkyHorizon, uSkyZenith, pow(up, 0.55));
@@ -144,6 +150,13 @@ const WATER_FRAG = `
     // so the bed shows. alpha rises steeply with depth (shore²).
     vec3 colour = mix(env, uDeepTint, shore * 0.8) + (diffuse + spec) * shore * uSunColour;
     float alpha = depthFade * clamp(shore * shore * 0.9 + shore * 0.2 + fres * shore * 0.35, 0.0, 1.0);
+    // Region distance fog, same linear ramp scene.fog applies to everything
+    // else — without it the river stays crisp while its banks haze out. Alpha
+    // rises with the fog too: fully fogged water is a wall of fog, not a
+    // window onto an (equally fogged) riverbed.
+    float fogF = clamp((vFogDepth - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);
+    colour = mix(colour, uFogColor, fogF);
+    alpha = mix(alpha, 1.0, fogF);
     gl_FragColor = vec4(colour, alpha);
   }
 `
@@ -620,6 +633,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const bloomOnRef = useRef(true)
   bloomOnRef.current = bloomOn
   const bloomPassRef = useRef<ClientBloomPass | null>(null)
+  // Region distance fog — client formula: LINEAR fog ending at the draw
+  // distance, starting (fogDepth+256)·4 units before it (Class239.method4075 →
+  // renderer.c → glFog GL_LINEAR). The client's fog is NOT gated on lighting
+  // detail — Atmosphere reads fogColour/fogDepth outside that branch — which is
+  // why the client hazes distant foliage at LOW while we didn't. The draw
+  // distance is the client's projection far plane, a client setting we can't
+  // know, so it's the one exposed knob: at client-like zooms ~24 tiles matches;
+  // the editor default sits further out so the overhead view isn't a wall of
+  // fog.
+  const [fogOn, setFogOn] = useState(true)
+  const [fogTiles, setFogTiles] = useState(40)
+  // refs so the build effect can apply the current values without depending on
+  // them (a fog tweak must not rebuild the scene)
+  const fogOnRef = useRef(fogOn); fogOnRef.current = fogOn
+  const fogTilesRef = useRef(fogTiles); fogTilesRef.current = fogTiles
+  const fogApplyRef = useRef<((on: boolean, tiles: number) => void) | null>(null)
+  useEffect(() => { fogApplyRef.current?.(fogOn, fogTiles) }, [fogOn, fogTiles])
   /** re-applies the sun tint (and the HDR overbright factor) to every built mesh */
   const refreshTintRef = useRef<(() => void) | null>(null)
   const [showOutlines, setShowOutlines] = useState(false)
@@ -732,7 +762,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     } catch { /* ignore */ }
 
     const scene = new THREE.Scene()
-    scene.fog = new THREE.Fog(0x0b0d12, REGION_UNITS * 2, REGION_UNITS * 5)
+    // no fog until the environment loads — applyFog (client formula, region
+    // colour/depth, live draw-distance slider) owns scene.fog from then on
     const camera = new THREE.PerspectiveCamera(50, w / h, 8, REGION_UNITS * 10)
     const center = new THREE.Vector3(REGION_UNITS / 2, 0, -REGION_UNITS / 2)
     camera.position.set(center.x, REGION_UNITS * 0.55, center.z + REGION_UNITS * 0.75)
@@ -791,6 +822,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       uBreakDepth: { value: 256 }, // client breakWaterDepth
       uTime: { value: 0 },
       uEyePos: { value: new THREE.Vector3() },
+      // region distance fog — kept in step with scene.fog by applyFog below
+      uFogColor: { value: new THREE.Color(0xc8c0a8) },
+      uFogNear: { value: 1e8 },
+      uFogFar: { value: 1e9 },
     }
     let hasWater = false
     const track = (obj: THREE.Object3D) => {
@@ -1784,6 +1819,35 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           bloomPassRef.current.strength = env?.hdr?.bloomStrength ?? 0.25
           bloomPassRef.current.whitePoint = env?.hdr?.whitePoint ?? 1.0
         }
+
+        // Region distance fog. Colour and depth come from the environment
+        // (Lumbridge: 0x8DA4C2, depth 600); the defaults are the client's own
+        // (Class239.anInt2932 = 0xC8C0A8, depth 0). scene.fog covers every
+        // standard material; the water ShaderMaterial mirrors it through its
+        // uniforms; the skybox opts out (fog:false in buildSkyboxMesh).
+        {
+          const fogColour = env?.environment?.fogColour ?? 0xc8c0a8
+          const fogDepthUnits = ((env?.environment?.fogDepth ?? 0) + 256) * 4
+          const fogObj = new THREE.Fog(fogColour, 1, 2)
+          fogApplyRef.current = (on, tiles) => {
+            if (disposed) return
+            if (!on) {
+              scene.fog = null
+              waterUniforms.uFogNear.value = 1e8
+              waterUniforms.uFogFar.value = 1e9
+              return
+            }
+            const end = tiles * 512
+            const start = Math.max(1, end - fogDepthUnits)
+            fogObj.near = start
+            fogObj.far = end
+            scene.fog = fogObj
+            ;(waterUniforms.uFogColor.value as THREE.Color).copy(fogObj.color)
+            waterUniforms.uFogNear.value = start
+            waterUniforms.uFogFar.value = end
+          }
+          fogApplyRef.current(fogOnRef.current, fogTilesRef.current)
+        }
         const sun: SunConfig = env?.environment
           ? {
               x: env.environment.sunPosition?.[0] ?? DEFAULT_SUN.x,
@@ -1792,12 +1856,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               ambient: env.environment.sunAmbient ?? DEFAULT_SUN.ambient,
             }
           : DEFAULT_SUN
+        // clear colour = fog colour, so anything past the terrain fades into
+        // the same backdrop. The fog itself is applyFog above (client formula);
+        // the old approximate horizon fade that lived here fought with it.
         if (env?.environment?.fogColour !== undefined) {
-          const fogColor = env.environment.fogColour & 0xffffff
-          renderer.setClearColor(fogColor)
-          const density = Math.min(env.environment.fogDepth ?? 0, 1200) / 1200
-          const scale = 1 - density * 0.5
-          scene.fog = new THREE.Fog(fogColor, REGION_UNITS * 2 * scale, REGION_UNITS * 5 * scale)
+          renderer.setClearColor(env.environment.fogColour & 0xffffff)
         }
 
         setStatus('computing mosaic…')
@@ -2783,6 +2846,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       selectOutlineClearRef.current = null
       rebuildCenterRef.current = null
       patchLocsRef.current = null
+      fogApplyRef.current = null
       selectFromListRef.current = null
       selectLightFromListRef.current = null
       selectMarkerFromListRef.current = null
@@ -3327,6 +3391,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                     (client default: off — threshold 1.0, strength 0.25; HDR overbright
                     textures only load while bloom is on, exactly like the client)
                   </span>
+                </label>
+                <label className="mapscene-toggle">
+                  <input type="checkbox" checked={fogOn} onChange={(e) => setFogOn(e.target.checked)} />
+                  Fog <span className="mapscene-gfx-def">
+                    (region fogColour/fogDepth, client formula: linear, ending at the draw
+                    distance, fading over the last (fogDepth+256)·4 units — Lumbridge hazes
+                    its last ~6.7 tiles. Applies at every lighting-detail setting.)
+                  </span>
+                </label>
+                <label className="mapscene-toggle mapscene-fog-dist">
+                  Draw distance <input
+                    type="range" min={8} max={96} step={1} value={fogTiles}
+                    onChange={(e) => setFogTiles(Number(e.target.value))}
+                    disabled={!fogOn}
+                  /> <span className="mapscene-gfx-def">{fogTiles} tiles — the client's is a
+                    graphics setting we can't read; ~24 matches a client-like zoom, the
+                    editor default sits further out so the overhead view stays clear</span>
                 </label>
               </div>
               <table className="mapscene-gfx-table">
