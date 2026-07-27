@@ -717,8 +717,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // `objectDefs` — the applied drafts — when the overrides are handed to
   // LocAssets, so an in-flight edit wins over an applied one for that object.
   const [previewDef, setPreviewDef] = useState<{ id: number; def: ObjectDefJson } | null>(null)
-  // View-tab section collapse state (objects/lights/markers)
-  const [openLists, setOpenLists] = useState({ objects: true, lights: true, markers: true })
+  // View-tab section collapse state (objects/lights/markers) — only the
+  // objects list starts open; lights and markers are occasional-use
+  const [openLists, setOpenLists] = useState({ objects: true, lights: false, markers: false })
   const planeGroupsRef = useRef<(THREE.Group | null)[]>([null, null, null, null])
   const taggedRef = useRef<Tagged[]>([])
   // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
