@@ -1069,3 +1069,57 @@ span.mapscene-loclist-thumb.empty {
   display: inline-block;
   background: repeating-linear-gradient(45deg, #23262f 0 4px, #171a21 4px 8px);
 }
+
+/* View-tab controls legend — the mouse/keyboard how-to under the lists */
+.mapscene-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.mapscene-legend-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mapscene-legend-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim, #8a90a0);
+  margin-bottom: 1px;
+}
+
+.mapscene-legend-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.mapscene-legend-keys {
+  flex-shrink: 0;
+  width: 96px;
+  color: var(--text-dim, #8a90a0);
+}
+
+.mapscene-legend-keys kbd {
+  display: inline-block;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text, #d5d9e4);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 5px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.mapscene-legend-desc {
+  color: var(--text-dim, #8a90a0);
+  line-height: 1.45;
+}

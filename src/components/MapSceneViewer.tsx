@@ -742,9 +742,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     else next[previewMorph.index][0] = previewMorph.objectId
     return next
   }, [objects, previewMorph, data])
-  // View-tab section collapse state (objects/lights/markers) — only the
-  // objects list starts open; lights and markers are occasional-use
-  const [openLists, setOpenLists] = useState({ objects: true, lights: false, markers: false })
+  // View-tab section collapse state (objects/lights/markers/controls) — only
+  // the objects list and the controls legend start open; lights and markers
+  // are occasional-use
+  const [openLists, setOpenLists] = useState({ objects: true, lights: false, markers: false, controls: true })
   const planeGroupsRef = useRef<(THREE.Group | null)[]>([null, null, null, null])
   const taggedRef = useRef<Tagged[]>([])
   // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
@@ -3794,6 +3795,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             onToggle={() => setOpenLists((s) => ({ ...s, markers: !s.markers }))}
             onPick={(marker) => selectMarkerFromListRef.current?.(marker)}
           />
+          <ControlsLegend
+            open={openLists.controls}
+            onToggle={() => setOpenLists((s) => ({ ...s, controls: !s.controls }))}
+          />
           </>}
         </aside>
       </div>
@@ -4721,6 +4726,81 @@ function MarkerList({ markers, names, symbols, regionX, regionY, selectedWorld, 
           <p className="mapscene-side-hint">No markers in this region.</p>
         )}
       </div>}
+    </div>
+  )
+}
+
+/** How-to reference for the 3D view's mouse and keyboard controls, shown at
+ *  the bottom of the View tab. Keep it in sync with the actual handlers:
+ *  OrbitControls' mouseButtons (camera), onPointerDown/onSceneClick (per-tab
+ *  pointer behaviour) and the two window keydown effects (hotkeys). */
+const CONTROLS_LEGEND: { group: string; rows: [keys: string, does: string][] }[] = [
+  {
+    group: 'Camera', rows: [
+      ['Middle drag', 'orbit'],
+      ['Right drag', 'pan'],
+      ['Scroll', 'zoom'],
+    ],
+  },
+  {
+    group: 'View / Edit tabs', rows: [
+      ['Click', 'select the object, marker or light under the cursor (opens Edit)'],
+      ['Click ground', 'clear the selection'],
+      ['Drag selection', 'move the selected object tile by tile — release commits'],
+      ['Shift+drag', 'marquee-select several objects (Edit tab)'],
+    ],
+  },
+  {
+    group: 'Place tab', rows: [
+      ['Click', 'place the ghost object on its tile'],
+      ['R', 'rotate the ghost'],
+      ['Alt+click', 'copy an existing placement into the ghost (eyedropper)'],
+    ],
+  },
+  {
+    group: 'Terrain tab', rows: [
+      ['Left drag', 'paint with the brush'],
+      ['Alt+click', 'sample the tile under the cursor into the brush'],
+      ['Shift+drag', 'copy an area as a stamp — arm Paste, then click to stamp it'],
+      ['[ / ]', 'shrink / grow the brush'],
+    ],
+  },
+  {
+    group: 'Anywhere', rows: [
+      ['V / E / P / T', 'switch to the View / Edit / Place / Terrain tab'],
+      ['Esc', 'cancel placing, pasting or adding a light; clear the multi-selection'],
+    ],
+  },
+]
+
+function ControlsLegend({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <div className="mapscene-loclist">
+      <div className="mapscene-loclist-head">
+        <SectionHead open={open} onToggle={onToggle}>Controls</SectionHead>
+      </div>
+      {open && (
+        <div className="mapscene-legend">
+          {CONTROLS_LEGEND.map(({ group, rows }) => (
+            <div key={group} className="mapscene-legend-group">
+              <span className="mapscene-legend-title">{group}</span>
+              {rows.map(([keys, does]) => (
+                <div key={keys} className="mapscene-legend-row">
+                  <span className="mapscene-legend-keys">
+                    {keys.split('+').map((k, i) => (
+                      <span key={k}>
+                        {i > 0 && '+'}
+                        <kbd>{k}</kbd>
+                      </span>
+                    ))}
+                  </span>
+                  <span className="mapscene-legend-desc">{does}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
