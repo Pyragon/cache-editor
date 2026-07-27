@@ -21,8 +21,25 @@ const TABLE: Record<SymbolKind, { dir: string; label: string; plural: string }> 
 }
 
 /** Scan phase — listing the folder is its own wait on `areas` (73913 entries),
- *  so it reports separately instead of sitting on a bare "loading…". */
-type ScanProgress = { phase: 'listing' | 'reading'; done: number; total: number }
+ *  so it reports separately instead of sitting on a bare "loading…".
+ *  `startedAt` is stamped when the read phase begins, so the picker can turn
+ *  the rate into a time remaining. */
+type ScanProgress = { phase: 'listing' | 'reading'; done: number; total: number; startedAt: number }
+
+/** An in-flight or finished scan, shared by every picker that wants it.
+ *
+ *  Progress deliberately lives HERE rather than in the effect that started the
+ *  scan. Only the first mount creates it; later mounts reuse the promise, so a
+ *  callback owned by the first effect leaves everyone else with no updates at
+ *  all — which under StrictMode's mount/cleanup/mount is *every* render, since
+ *  the creating effect is cleaned up immediately. Publishing to a listener set
+ *  means whoever is on screen gets the counter, and `latest` lets a picker
+ *  reopened mid-scan catch up instead of restarting at nothing. */
+type ScanState = {
+  promise: Promise<SymbolEntry[]>
+  latest: ScanProgress | null
+  listeners: Set<(p: ScanProgress) => void>
+}
 
 /** Scanned lists, kept for the session and keyed by the cache root.
  *
@@ -31,7 +48,7 @@ type ScanProgress = { phase: 'listing' | 'reading'; done: number; total: number 
  *  so the scan is slow but its result is small. The object URLs it produces
  *  live as long as the entry does (≈132 distinct icon sprites plus 106 map
  *  sprites), which is why nothing revokes them. */
-const SCANS = new WeakMap<FileSystemDirectoryHandle, Partial<Record<SymbolKind, Promise<SymbolEntry[]>>>>()
+const SCANS = new WeakMap<FileSystemDirectoryHandle, Partial<Record<SymbolKind, ScanState>>>()
 
 async function spriteUrl(root: FileSystemDirectoryHandle, archive: number, cache: Map<number, string | null>): Promise<string | null> {
   if (cache.has(archive)) return cache.get(archive)!
@@ -52,18 +69,20 @@ async function scan(
 ): Promise<SymbolEntry[]> {
   const cfg = await root.getDirectoryHandle('config')
   const dir = await cfg.getDirectoryHandle(TABLE[kind].dir)
+  const listStart = Date.now()
   const ids: number[] = []
   for await (const handle of dir.values()) {
     if (handle.kind !== 'file' || !handle.name.endsWith('.json')) continue
     const id = parseInt(handle.name.slice(0, -5), 10)
     if (!isNaN(id)) ids.push(id)
     // no total to divide by yet — the count IS the progress here
-    if ((ids.length & 0x3ff) === 0) onProgress({ phase: 'listing', done: ids.length, total: 0 })
+    if ((ids.length & 0x3ff) === 0) onProgress({ phase: 'listing', done: ids.length, total: 0, startedAt: listStart })
   }
   ids.sort((a, b) => a - b)
 
   const urls = new Map<number, string | null>()
   const out: SymbolEntry[] = []
+  const readStart = Date.now()
   const CHUNK = 250
   for (let i = 0; i < ids.length; i += CHUNK) {
     const rows = await Promise.all(ids.slice(i, i + CHUNK).map(async (id): Promise<SymbolEntry | null> => {
@@ -109,7 +128,7 @@ async function scan(
       }
     }))
     for (const r of rows) if (r) out.push(r)
-    onProgress({ phase: 'reading', done: Math.min(i + CHUNK, ids.length), total: ids.length })
+    onProgress({ phase: 'reading', done: Math.min(i + CHUNK, ids.length), total: ids.length, startedAt: readStart })
   }
   return out
 }
@@ -134,15 +153,26 @@ export default function MapSymbolPicker({ root, kind, selectedId, onPick, onCanc
     let cancelled = false
     let byKind = SCANS.get(root)
     if (!byKind) SCANS.set(root, byKind = {})
-    let pending = byKind[kind]
-    if (!pending) {
-      byKind[kind] = pending = scan(root, kind, (p) => {
-        if (!cancelled) setProgress(p)
+    let state = byKind[kind]
+    if (!state) {
+      const created: ScanState = { promise: null!, latest: null, listeners: new Set() }
+      // publish to the shared state, never to this effect's closure — see
+      // ScanState for why the creating effect must not own the callback
+      created.promise = scan(root, kind, (p) => {
+        created.latest = p
+        for (const listener of created.listeners) listener(p)
       })
+      byKind[kind] = state = created
     }
-    void pending.then((rows) => { if (!cancelled) { setEntries(rows); setProgress(null) } })
+    const active = state
+    active.listeners.add(setProgress)
+    if (active.latest) setProgress(active.latest) // joined mid-scan: catch up now
+    void active.promise.then((rows) => { if (!cancelled) { setEntries(rows); setProgress(null) } })
       .catch(() => { if (!cancelled) setEntries([]) })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      active.listeners.delete(setProgress)
+    }
   }, [root, kind])
 
   const rows = useMemo(() => {
@@ -156,6 +186,19 @@ export default function MapSymbolPicker({ root, kind, selectedId, onPick, onCanc
   const pct = progress && progress.phase === 'reading' && progress.total > 0
     ? Math.floor((progress.done / progress.total) * 100)
     : null
+
+  /** Time left at the rate so far. Only meaningful once enough of the read has
+   *  happened for the rate to settle, so the first chunk doesn't quote a wild
+   *  number off one sample. */
+  const eta = useMemo(() => {
+    if (!progress || progress.phase !== 'reading' || progress.total <= 0) return null
+    const elapsed = Date.now() - progress.startedAt
+    if (progress.done < 500 || elapsed < 1000) return null
+    const remaining = ((progress.total - progress.done) / progress.done) * elapsed
+    const secs = Math.ceil(remaining / 1000)
+    if (secs < 60) return `~${secs}s left`
+    return `~${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s left`
+  }, [progress])
 
   return (
     <dialog ref={dialogRef} className="sprite-browser-dialog" onCancel={onCancel} onClose={onCancel}>
@@ -171,9 +214,9 @@ export default function MapSymbolPicker({ root, kind, selectedId, onPick, onCanc
         <span className="sprite-browser-status">
           {entries === null
             ? progress?.phase === 'listing'
-              ? `listing ${TABLE[kind].dir}… ${progress.done.toLocaleString()} files`
+              ? `Listing ${TABLE[kind].dir}… ${progress.done.toLocaleString()} files found`
               : pct !== null
-                ? `reading ${plural.toLowerCase()}… ${pct}% (${progress!.done.toLocaleString()} / ${progress!.total.toLocaleString()})`
+                ? `Loaded ${progress!.done.toLocaleString()} / ${progress!.total.toLocaleString()} (${pct}%)${eta ? ` · ${eta}` : ''}`
                 : 'opening…'
             : `${rows.length}${filter ? ` of ${entries.length}` : ''} record${rows.length === 1 ? '' : 's'}`}
           {kind === 'mapicon' && entries !== null && ' · only records with an icon or a name are listed'}
