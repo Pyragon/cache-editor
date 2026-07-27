@@ -40,7 +40,7 @@ const REGION_UNITS = SIZE * 512
 type GfxStatus = 'applied' | 'partial' | 'no' | 'n/a'
 const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note: string }[] = [
   { name: 'Bloom', def: '0 (off)', status: 'applied', note: 'On, using the client’s own FilterBloom params: luminance threshold 1.0, additive strength 0.25 (client default is OFF).' },
-  { name: 'Fog', def: '1', status: 'applied', note: 'scene.fog from the region environment.' },
+  { name: 'Fog', def: '1', status: 'applied', note: 'Client formula: linear to the draw distance, region fogColour/fogDepth; water and sky handled. Live controls above.' },
   { name: 'Ground blending', def: '1', status: 'applied', note: 'Underlay/overlay corner blending + the crossfade splat pass.' },
   { name: 'Ground decoration', def: '1', status: 'applied', note: 'Ground-decor locs are built.' },
   { name: 'Idle animations', def: '1', status: 'applied', note: 'Loc idle sequences are posed each frame.' },
@@ -48,9 +48,9 @@ const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note:
   { name: 'Textures', def: '1', status: 'applied', note: 'Material textures on terrain and locs.' },
   { name: 'Water', def: '1', status: 'applied', note: 'Env-mapped water surface + underwater depth; colour not signed off.' },
   { name: 'Sky boxes', def: '1', status: 'applied', note: 'Skybox mesh from the region environment (toggleable).' },
-  { name: 'Light detail', def: '1', status: 'partial', note: 'HD Gouraud model lighting, but no point lights and not calibrated.' },
+  { name: 'Light detail', def: '1', status: 'partial', note: 'We render the LOW path, calibrated against the client (MeshRasterizer_Sub3 CPU bake + HardwareGround). The HIGH path — region sun, shader-lit ground, ground point lights — is not built.' },
   { name: 'Scenery shadows', def: '2', status: 'partial', note: 'Static shadow grid only — no projected/dynamic scenery shadows.' },
-  { name: 'Brightness', def: '3', status: 'partial', note: 'Only the minimap gamma slider; the 3D scene ignores it.' },
+  { name: 'Brightness', def: '3', status: 'applied', note: 'The slider above — ambient ×(0.7 + 0.1·b), exactly the client. The minimap has its own gamma slider.' },
   { name: 'Anti-aliasing', def: '0 (off)', status: 'applied', note: 'WebGL antialias is ON — deliberately differs from the client default.' },
   { name: 'Build area', def: '104 tiles', status: 'no', note: 'We render one 64×64 region; neighbours are decoded for seam-free lighting only.' },
   { name: 'Particles', def: '2 (0 on low RAM)', status: 'no', note: 'Model particle emitters are parsed but not simulated in the map view.' },
@@ -3405,38 +3405,46 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 the table is reference only.
               </div>
               <div className="mapscene-gfx-live">
-                <label className="mapscene-toggle">
+                <label
+                  className="mapscene-gfx-row"
+                  title="Client FilterBloom: luminance threshold 1.0, additive strength 0.25 (the client's own default is OFF). HDR overbright textures only load while bloom is on, exactly like the client."
+                >
+                  <span className="mapscene-gfx-name">Bloom</span>
                   <input type="checkbox" checked={bloomOn} onChange={(e) => setBloomOn(e.target.checked)} />
-                  Bloom <span className="mapscene-gfx-def">
-                    (client default: off — threshold 1.0, strength 0.25; HDR overbright
-                    textures only load while bloom is on, exactly like the client)
-                  </span>
+                  <span className="mapscene-gfx-hint">client default: off</span>
                 </label>
-                <label className="mapscene-toggle">
+                <label
+                  className="mapscene-gfx-row"
+                  title="Region fogColour/fogDepth, client formula: linear fog ending at the draw distance, fading over the last (fogDepth+256)·4 units — Lumbridge hazes its final ~6.7 tiles. The client applies fog at every lighting-detail setting."
+                >
+                  <span className="mapscene-gfx-name">Fog</span>
                   <input type="checkbox" checked={fogOn} onChange={(e) => setFogOn(e.target.checked)} />
-                  Fog <span className="mapscene-gfx-def">
-                    (region fogColour/fogDepth, client formula: linear, ending at the draw
-                    distance, fading over the last (fogDepth+256)·4 units — Lumbridge hazes
-                    its last ~6.7 tiles. Applies at every lighting-detail setting.)
-                  </span>
+                  <span className="mapscene-gfx-hint">region fogColour / fogDepth, client formula</span>
                 </label>
-                <label className="mapscene-toggle mapscene-fog-dist">
-                  Draw distance <input
+                <label
+                  className="mapscene-gfx-row"
+                  title="The fog's end point — the client's projection far plane, a graphics setting we can't read from the cache. ~24 tiles matches a client-like zoom; the editor default sits further out so the overhead view stays clear."
+                >
+                  <span className="mapscene-gfx-name">Draw distance</span>
+                  <input
                     type="range" min={8} max={96} step={1} value={fogTiles}
                     onChange={(e) => setFogTiles(Number(e.target.value))}
                     disabled={!fogOn}
-                  /> <span className="mapscene-gfx-def">{fogTiles} tiles — the client's is a
-                    graphics setting we can't read; ~24 matches a client-like zoom, the
-                    editor default sits further out so the overhead view stays clear</span>
+                  />
+                  <span className="mapscene-gfx-hint">{fogTiles} tiles · ~24 ≈ client zoom</span>
                 </label>
-                <label className="mapscene-toggle mapscene-fog-dist">
-                  Brightness <input
+                <label
+                  className="mapscene-gfx-row"
+                  title="The client's Brightness setting (default 3): scene ambient ×(0.7 + 0.1·b), exactly Class239's IA(). Baked into vertex colours, so changing it rebuilds the scene — match your client's setting when comparing."
+                >
+                  <span className="mapscene-gfx-name">Brightness</span>
+                  <input
                     type="range" min={1} max={4} step={1} value={brightnessPref}
                     onChange={(e) => setBrightnessPref(Number(e.target.value))}
-                  /> <span className="mapscene-gfx-def">{brightnessPref} — the client's
-                    Brightness setting (default 3): scene ambient ×{(0.7 + 0.1 * brightnessPref).toFixed(1)},
-                    exactly Class239's (0.7 + 0.1·b). Baked into vertex colours, so changing
-                    it rebuilds the scene — match your client's setting when comparing.</span>
+                  />
+                  <span className="mapscene-gfx-hint">
+                    {brightnessPref} · ambient ×{(0.7 + 0.1 * brightnessPref).toFixed(1)} · rebuilds the scene
+                  </span>
                 </label>
               </div>
               <table className="mapscene-gfx-table">

@@ -902,18 +902,23 @@ span.mapscene-loclist-thumb.empty {
 .mapscene-gfx-btn:hover { background: #222b40; }
 .mapscene-gfx-panel {
   position: absolute; z-index: 30; top: calc(100% + 4px); left: 0;
-  width: min(760px, 78vw); max-height: 60vh; overflow: auto;
+  width: min(760px, 78vw); max-height: 60vh;
+  /* vertical scrolling only — content must wrap, never widen the panel */
+  overflow-y: auto; overflow-x: hidden;
   background: #11151f; border: 1px solid #2c364d; border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55); padding: 10px;
 }
 .mapscene-gfx-head { color: #8fa3c8; font-size: 11px; margin-bottom: 8px; }
-.mapscene-gfx-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.mapscene-gfx-table { width: 100%; border-collapse: collapse; font-size: 11.5px; table-layout: fixed; }
 .mapscene-gfx-table th {
   text-align: left; color: #7f93b8; font-weight: 600;
   border-bottom: 1px solid #2c364d; padding: 3px 6px;
 }
-.mapscene-gfx-table td { padding: 3px 6px; vertical-align: top; border-bottom: 1px solid #1b2130; }
-.mapscene-gfx-def { color: #9db0d0; white-space: nowrap; }
+.mapscene-gfx-table th:nth-child(1) { width: 17%; }
+.mapscene-gfx-table th:nth-child(2) { width: 15%; }
+.mapscene-gfx-table th:nth-child(3) { width: 13%; }
+.mapscene-gfx-table td { padding: 3px 6px; vertical-align: top; border-bottom: 1px solid #1b2130; overflow-wrap: break-word; }
+.mapscene-gfx-def { color: #9db0d0; }
 .mapscene-gfx-note { color: #8394ae; }
 .mapscene-gfx-badge {
   display: inline-block; padding: 0 6px; border-radius: 9px;
@@ -923,9 +928,25 @@ span.mapscene-loclist-thumb.empty {
 .mapscene-gfx-badge.is-partial { background: #3a3117; color: #f2c661; }
 .mapscene-gfx-badge.is-no { background: #3a1c1c; color: #f28b8b; }
 .mapscene-gfx-badge.is-na { background: #232a3a; color: #8fa3c8; }
+/* Live controls: one aligned row per setting — name | control | short hint.
+   The full explanation lives in the row's title tooltip, so nothing here has
+   to wrap or widen the panel. */
 .mapscene-gfx-live {
-  display: flex; flex-direction: column; gap: 3px;
+  display: flex; flex-direction: column; gap: 4px;
   padding: 6px 4px 9px; margin-bottom: 8px; border-bottom: 1px solid #2c364d;
 }
+.mapscene-gfx-row {
+  display: grid;
+  grid-template-columns: 105px 150px 1fr;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+.mapscene-gfx-name { color: #cfe0ff; font-size: 12px; }
+.mapscene-gfx-row input[type=checkbox] { justify-self: start; margin: 0; }
+.mapscene-gfx-row input[type=range] { width: 100%; margin: 0; }
+.mapscene-gfx-hint {
+  color: #8394ae; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .mapscene-gfx-live .mapscene-gamma { gap: 6px; }
-.mapscene-gfx-live input[type=range] { width: 150px; }
