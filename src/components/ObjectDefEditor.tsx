@@ -157,7 +157,7 @@ function TexSwatch({ root, id }: { root: FileSystemDirectoryHandle | null; id: n
  *  Labels use cryogen's dumped field names (what you'd search the JSON for);
  *  the client's own names and the opcodes are in the tooltips, since the two
  *  disagree on most of the sound fields. `EDITOR.md` has the full mapping. */
-export default function ObjectDefEditor({ draft, canEdit, onChange, sections, root, loadSprite, loadArea, placementType }: {
+export default function ObjectDefEditor({ draft, canEdit, onChange, sections, root, loadSprite, loadArea, placementType, onNavigate, morphPreviewIndex, onMorphPreview }: {
   draft: ObjectDefJson
   canEdit: boolean
   onChange: (next: ObjectDefJson) => void
@@ -170,6 +170,13 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
    *  off the map-sprite fields where the client would ignore them; omit it and
    *  everything stays editable. */
   placementType?: number
+  /** jump to another entry's item (View links); omit to hide the links */
+  onNavigate?: (entryName: string, itemId: number) => void
+  /** Transform-to row currently previewed in the 3D scene (highlighted). */
+  morphPreviewIndex?: number | null
+  /** Toggle the scene preview of a Transform-to row: (index, objectId) starts
+   *  one, (null) restores the real object. Omit to hide the Preview buttons. */
+  onMorphPreview?: (index: number | null, objectId?: number) => void
 }) {
   const set = <K extends keyof ObjectDefJson>(key: K, value: ObjectDefJson[K]) =>
     onChange({ ...draft, [key]: value })
@@ -296,6 +303,7 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
       <div className="item-field is-wide" title={title}>
         <span className="item-field-label">{label}</span>
         {origs.length > 0 && (
+          <div className="quest-table-wrap mapscene-def-table-wrap">
           <table className="quest-table mapscene-pair-table">
             <thead><tr><th>Original</th><th>{dstLabel}</th>{canEdit && <th />}</tr></thead>
             <tbody>
@@ -312,6 +320,7 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
               ))}
             </tbody>
           </table>
+          </div>
         )}
         {origs.length === 0 && !canEdit && <span className="mapscene-field-value">—</span>}
         {canEdit && (
@@ -504,6 +513,7 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
               <div className="item-field is-wide" title="Model ids per shape entry (opcode 1): each row is one loc shape and the models the client draws for it. Shape numbers match the placement Type (0–22).">
                 <span className="item-field-label">Models</span>
                 {rows > 0 && (
+                  <div className="quest-table-wrap mapscene-def-table-wrap">
                   <table className="quest-table mapscene-pair-table">
                     <thead><tr><th className="mapscene-models-shape">Shape</th><th>Model IDs</th>{canEdit && <th />}</tr></thead>
                     <tbody>
@@ -528,6 +538,7 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 )}
                 {rows === 0 && !canEdit && <span className="mapscene-field-value">—</span>}
                 {canEdit && (
@@ -546,12 +557,73 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
           </label>
           {num('Varbit', 'Opcodes 77/92 — the varbit whose value picks the morph target. -1 = none.', draft.varpBit ?? -1, (v) => set('varpBit', v))}
           {num('Varp', 'Opcodes 77/92 — the varp whose value picks the morph target. -1 = none.', draft.varp ?? -1, (v) => set('varp', v))}
-          <label className="item-field is-wide" title="Multiloc targets: the client swaps this def for transformTo[var]. The LAST entry is the out-of-range fallback (often -1 = invisible). Comma-separated.">
-            <span className="item-field-label">Transform to</span>
-            {canEdit
-              ? <ListInput value={draft.transformTo ?? []} onCommit={(ids) => set('transformTo', ids.length > 0 ? ids : undefined)} />
-              : <span className="mapscene-field-value">{(draft.transformTo ?? []).join(', ') || '—'}</span>}
-          </label>
+          {(() => {
+            // positional like the objects entry's table: transformTo[var value]
+            // is the object shown for that value, last slot = fallback
+            const transforms = draft.transformTo ?? []
+            // editing the list shifts indices, so any active scene preview is
+            // dropped rather than left pointing at the wrong row
+            const commit = (next: number[]) => {
+              onMorphPreview?.(null)
+              set('transformTo', next.length > 0 ? next : undefined)
+            }
+            return (
+              <div className="item-field is-wide" title="Multiloc targets (opcodes 77/92): the client swaps this def for transformTo[var value]. The LAST entry is the out-of-range fallback (often -1 = invisible).">
+                <span className="item-field-label">Transform to</span>
+                {transforms.length > 0 && (
+                  <div className="quest-table-wrap mapscene-def-table-wrap">
+                  <table className="quest-table mapscene-pair-table">
+                    <thead><tr><th className="mapscene-var-col">Var value</th><th className="mapscene-obj-col">Object</th>{onMorphPreview && <th />}<th />{canEdit && <th />}</tr></thead>
+                    <tbody>
+                      {transforms.map((objectId, i) => (
+                        <tr key={i} className={morphPreviewIndex === i ? 'mapscene-preview-row' : undefined}>
+                          <td className="mapscene-var-col">
+                            <span className="mapscene-field-value">{i === transforms.length - 1 ? `${i} / fallback` : i}</span>
+                          </td>
+                          <td className="mapscene-obj-col">
+                            {canEdit
+                              ? <NumberInput className="cell-input" value={objectId} onChange={(v) => { const next = transforms.slice(); next[i] = v; commit(next) }} min={-1} max={131071} />
+                              : <span className="mapscene-field-value">{objectId}</span>}
+                          </td>
+                          {onMorphPreview && (
+                            <td className="mapscene-view-col">
+                              <button
+                                type="button"
+                                className={`field-link-btn${morphPreviewIndex === i ? ' is-previewing' : ''}`}
+                                title={objectId >= 0
+                                  ? 'Show this placement as this object in the 3D view — preview only, nothing is saved. Click again to restore.'
+                                  : 'Preview the invisible state (the placement disappears). Click again to restore.'}
+                                onClick={() => (morphPreviewIndex === i ? onMorphPreview(null) : onMorphPreview(i, objectId))}
+                              >
+                                {morphPreviewIndex === i ? 'Restore' : 'Preview'}
+                              </button>
+                            </td>
+                          )}
+                          <td className="mapscene-view-col">
+                            {onNavigate && objectId >= 0 && (
+                              <button type="button" className="field-link-btn" title={`Open object ${objectId}`} onClick={() => onNavigate('objects', objectId)}>
+                                View
+                              </button>
+                            )}
+                          </td>
+                          {canEdit && (
+                            <td className="mapscene-pair-remove">
+                              <button type="button" className="row-remove-btn" title="Remove this slot (later var values shift down)" onClick={() => commit(transforms.filter((_, k) => k !== i))}>×</button>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  </div>
+                )}
+                {transforms.length === 0 && !canEdit && <span className="mapscene-field-value">—</span>}
+                {canEdit && (
+                  <button type="button" className="add-row-btn" onClick={() => commit([...transforms, -1])}>+ Add transform</button>
+                )}
+              </div>
+            )
+          })()}
           {pairTable('Recolours', 'Colour swaps applied to the model (opcode 40): each original HSL16 is replaced by the recoloured one. The swatch shows the colour the id encodes — click it to pick a colour (snapped to the nearest HSL16).',
             'Recoloured', 'originalColors', 'modifiedColors',
             (v, commit) => <HslSwatch value={v} onPick={canEdit ? commit : undefined} />)}

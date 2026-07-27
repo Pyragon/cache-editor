@@ -994,6 +994,47 @@ span.mapscene-loclist-thumb.empty {
   width: 96px;
 }
 
+/* Def-editor tables (Models / Transform to / Recolours / Retextures): framed like the
+   quest tables. overflow: hidden clips the header/row backgrounds to the
+   rounded corners (safe here — no dropdowns escape these tables), the
+   table's usual 4px top offset moves to the wrap so the header sits flush
+   against the border, and the bottom margin keeps the "+ Add" button from
+   hugging the frame */
+.mapscene-def-table-wrap {
+  margin: 4px 0 6px;
+  overflow: hidden;
+}
+
+.mapscene-def-table-wrap .mapscene-pair-table {
+  margin-top: 0;
+}
+
+/* Transform-to table: proportional columns so the slack is shared instead
+   of pooling as one big gap; the × column stays snug on the right */
+.mapscene-pair-table .mapscene-var-col {
+  width: 26%;
+  white-space: nowrap;
+}
+
+.mapscene-pair-table .mapscene-obj-col {
+  width: 30%;
+}
+
+.mapscene-pair-table .mapscene-view-col {
+  white-space: nowrap;
+}
+
+/* the Transform-to row whose object is currently previewed in the scene */
+.mapscene-pair-table tr.mapscene-preview-row td {
+  background: rgba(47, 143, 255, 0.12);
+}
+
+.field-link-btn.is-previewing {
+  color: #7eb8ff;
+  border-color: rgba(126, 184, 255, 0.5);
+  background: rgba(0, 102, 255, 0.15);
+}
+
 /* clickable recolour swatch — the native colour input hides underneath the
    swatch itself, so clicking the colour opens the picker */
 .mapscene-swatch-pick {

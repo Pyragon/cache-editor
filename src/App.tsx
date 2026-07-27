@@ -1368,7 +1368,7 @@ function App() {
                 : selectedEntry?.name === 'native_libraries'
                 ? <NativeLibrariesViewer data={activeContent as NativeLibrariesData} />
                 : selectedEntry?.name === 'maps'
-                ? <MapViewer world={activeContent as WorldMapData} onDirtyChange={setIsContentDirty} />
+                ? <MapViewer world={activeContent as WorldMapData} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : <pre className="content-json">{JSON.stringify(activeContent, null, 2)}</pre>
             ) : selectedItemContent != null ? (
               <>

@@ -285,7 +285,7 @@ type StampClipboard = {
   objects: LocEntry[]
 }
 
-export default function MapSceneViewer({ data, focus, objects, terrain, lights, objectDefs, onEdit, gfxSlot }: {
+export default function MapSceneViewer({ data, focus, objects, terrain, lights, objectDefs, onEdit, gfxSlot, onNavigate }: {
   data: MapData
   focus?: { x: number; y: number; plane: number } | null
   /** draft of the centre region's placements (edits not yet saved) — kept
@@ -307,6 +307,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   /** header element the Client graphics settings dropdown portals into, so it
    *  sits beside the Regions button while its state stays here */
   gfxSlot?: HTMLElement | null
+  /** jump to another entry's item (the def editor's View links) */
+  onNavigate?: (entryName: string, itemId: number) => void
 }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const minimapRef = useRef<HTMLCanvasElement>(null)
@@ -725,6 +727,21 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // `objectDefs` — the applied drafts — when the overrides are handed to
   // LocAssets, so an in-flight edit wins over an applied one for that object.
   const [previewDef, setPreviewDef] = useState<{ id: number; def: ObjectDefJson } | null>(null)
+  // Transform-to preview: draw ONE centre placement as a different object,
+  // without touching the draft (no dirty, no undo entry). The swapped array
+  // goes through the same rebuild/patch effect real edits use, so toggling
+  // the preview off patches the original model straight back. A -1 target
+  // previews the morph's invisible state by dropping the placement.
+  const [previewMorph, setPreviewMorph] = useState<{ index: number; objectId: number } | null>(null)
+  const sceneObjects = useMemo(() => {
+    if (!previewMorph) return objects
+    const base = objects ?? data.def.objects
+    if (previewMorph.index < 0 || previewMorph.index >= base.length) return objects
+    const next = base.map((o) => [...o] as LocEntry)
+    if (previewMorph.objectId < 0) next.splice(previewMorph.index, 1)
+    else next[previewMorph.index][0] = previewMorph.objectId
+    return next
+  }, [objects, previewMorph, data])
   // View-tab section collapse state (objects/lights/markers) — only the
   // objects list starts open; lights and markers are occasional-use
   const [openLists, setOpenLists] = useState({ objects: true, lights: false, markers: false })
@@ -2918,11 +2935,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     }
   }, [data])
 
-  // placement draft changed (Apply/Delete/place/move): unified centre rebuild
-  // — loc shadows feed the terrain lighting, so terrain rebuilds too.
-  // `status` is a dep so an edit made mid-build is caught up when it finishes.
+  // placement draft changed (Apply/Delete/place/move) — or a transform-to
+  // preview toggled: unified centre rebuild — loc shadows feed the terrain
+  // lighting, so terrain rebuilds too. `status` is a dep so an edit made
+  // mid-build is caught up when it finishes.
   useEffect(() => {
-    if (!objects || objects === lastBuiltObjectsRef.current) return
+    if (!sceneObjects || sceneObjects === lastBuiltObjectsRef.current) return
     const rebuild = rebuildCenterRef.current
     if (!rebuild) return
     const prevObjects = lastBuiltObjectsRef.current
@@ -2931,15 +2949,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     const terrainUnchanged = lastBuiltTerrainRef.current === terrainPropRef.current
     // the unified rebuild consumes BOTH drafts — mark both as built so a
     // combined commit (e.g. a stamp paste) doesn't rebuild twice
-    lastBuiltObjectsRef.current = objects
+    lastBuiltObjectsRef.current = sceneObjects
     lastBuiltTerrainRef.current = terrainPropRef.current
     void (async () => {
       const patch = patchLocsRef.current
-      if (patch && prevObjects && terrainUnchanged && await patch(prevObjects, objects)) return
-      await rebuild(terrainPropRef.current ?? data.terrain, objects)
+      if (patch && prevObjects && terrainUnchanged && await patch(prevObjects, sceneObjects)) return
+      await rebuild(terrainPropRef.current ?? data.terrain, sceneObjects)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [objects, status])
+  }, [sceneObjects, status])
 
   // terrain draft changed (brush): same unified rebuild
   useEffect(() => {
@@ -3657,6 +3675,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               key={`marker-${selection.objectId}`}
               sel={selection}
               canEdit={!!onEdit}
+              onNavigate={onNavigate}
               placements={listEntries.filter((o) => o[0] === selection.objectId).length}
               root={data.rootHandle ?? null}
               loadSprite={loadMapSpriteInfo}
@@ -3700,11 +3719,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               key={`${selection.regionX},${selection.regionY},${selection.index},${selection.objectId},${selection.x},${selection.y}`}
               sel={selection}
               canEdit={!!onEdit}
+              onNavigate={onNavigate}
               root={data.rootHandle ?? null}
               loadSprite={loadMapSpriteInfo}
               loadArea={loadAreaInfo}
-              onClose={() => { setPreviewDef(null); setSelection(null) }}
+              onClose={() => { setPreviewDef(null); setPreviewMorph(null); setSelection(null) }}
               onPreviewDef={(def) => setPreviewDef(def ? { id: selection.objectId, def } : null)}
+              onPreviewMorph={selection.inCenter ? (objectId) => {
+                setPreviewMorph(objectId == null ? null : { index: selection.index, objectId })
+              } : undefined}
               onApplyDef={(def) => {
                 const next = new Map(objectDefs ?? [])
                 next.set(selection.objectId, def)
@@ -3716,6 +3739,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 const base = objects ?? data.def.objects
                 const next = base.map((o) => [...o] as LocEntry)
                 next[selection.index] = entry
+                setPreviewMorph(null)
                 setSelection(null)
                 onEdit({ objects: next })
               } : undefined}
@@ -3724,6 +3748,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 const next = base
                   .filter((_, i) => i !== selection.index)
                   .map((o) => [...o] as LocEntry)
+                setPreviewMorph(null)
                 setSelection(null)
                 onEdit({ objects: next })
               } : undefined}
@@ -4714,9 +4739,10 @@ const LIGHT_PHASES = [0, 256, 512, 768, 1024, 1280, 1536, 1792]
  *  The fields themselves are `ObjectDefEditor`, shared with the object panel:
  *  a marker IS an object, so the only difference is which sections are worth
  *  showing (a marker has no models, name or footprint worth speaking of). */
-function MarkerPanel({ sel, canEdit, placements, root, loadSprite, loadArea, onPreview, onApply, onClose }: {
+function MarkerPanel({ sel, canEdit, placements, root, loadSprite, loadArea, onPreview, onApply, onClose, onNavigate }: {
   sel: MarkerSelection
   canEdit: boolean
+  onNavigate?: (entryName: string, itemId: number) => void
   /** placements of this object in the region being edited — context for how
    *  wide the blast radius of an edit is locally (it's global regardless) */
   placements: number
@@ -4788,6 +4814,7 @@ function MarkerPanel({ sel, canEdit, placements, root, loadSprite, loadArea, onP
         loadSprite={loadSprite}
         loadArea={loadArea}
         placementType={sel.type}
+        onNavigate={onNavigate}
       />
 
       <div className="mapscene-side-actions">
@@ -5026,8 +5053,12 @@ const ROTATION_LABELS = [
  *  this region's map file and to this instance alone, while everything under
  *  `ObjectDefEditor` is the object DEFINITION, shared by every placement of
  *  that object in the game. Apply commits whichever of the two changed. */
-function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClose, onPreviewDef, onApplyDef, onApply, onDelete }: {
+function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClose, onPreviewDef, onPreviewMorph, onApplyDef, onApply, onDelete, onNavigate }: {
   sel: LocSelection
+  onNavigate?: (entryName: string, itemId: number) => void
+  /** transform-to preview: draw this placement as the given object in the
+   *  scene (null restores). Absent for neighbour-region placements. */
+  onPreviewMorph?: (objectId: number | null) => void
   /** def edits are global, so they don't need the placement to be editable — a
    *  neighbour region's object definition is as editable as the centre's */
   canEdit: boolean
@@ -5061,6 +5092,13 @@ function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClos
   previewRef.current = onPreviewDef
   useEffect(() => { previewRef.current(defChanged && defDraft ? defDraft : null) }, [defChanged, defDraft])
   useEffect(() => () => previewRef.current(null), [])
+
+  // which Transform-to row is being previewed in the scene (highlights the
+  // row); the preview itself is scene state, dropped when the panel goes
+  const [morphPreviewIndex, setMorphPreviewIndex] = useState<number | null>(null)
+  const morphPreviewRef = useRef(onPreviewMorph)
+  morphPreviewRef.current = onPreviewMorph
+  useEffect(() => () => morphPreviewRef.current?.(null), [])
 
   const field = (label: string, key: keyof typeof draft, max: number) => (
     <label className="item-field">
@@ -5201,6 +5239,12 @@ function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClos
             loadSprite={loadSprite}
             loadArea={loadArea}
             placementType={draft.type}
+            onNavigate={onNavigate}
+            morphPreviewIndex={morphPreviewIndex}
+            onMorphPreview={onPreviewMorph ? (index, objectId) => {
+              setMorphPreviewIndex(index)
+              onPreviewMorph(index == null ? null : (objectId ?? -1))
+            } : undefined}
           />
         </>
       ) : (

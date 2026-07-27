@@ -41,9 +41,11 @@ const regionIdOf = (c: WorldCoords) => ((c.x >> 6) << 8) | (c.y >> 6)
 // The maps entry's single world viewer: no per-region item list — it owns the
 // current position, loads the region containing it (the 3D view adds the 8
 // neighbours itself), and saves edits back to that region's own file.
-export default function MapViewer({ world, onDirtyChange }: {
+export default function MapViewer({ world, onDirtyChange, onNavigate }: {
   world: WorldMapData
   onDirtyChange?: (dirty: boolean) => void
+  /** jump to another entry's item (the 3D panel's View links) */
+  onNavigate?: (entryName: string, itemId: number) => void
 }) {
   const [coords, setCoords] = useState<WorldCoords>(HOME)
   const [data, setData] = useState<MapData | null>(null)
@@ -769,6 +771,7 @@ export default function MapViewer({ world, onDirtyChange }: {
           objectDefs={objectDefs}
           onEdit={(patch) => applyEditRef.current(patch)}
           gfxSlot={gfxSlot}
+          onNavigate={onNavigate}
         />
       )}
 
