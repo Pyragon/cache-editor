@@ -675,6 +675,7 @@ function floTileHsl(flo: FloJson | undefined): number {
 // ---------------------------------------------------------------------------
 
 const VERTS = SIZE + 1 // 65 vertices per axis
+const CHUNK = 8 // tiles per chunk — 8×8 chunks per region axis
 
 /** Per-plane 65×65 vertex heights in RS units (negative = up). MapLoader.decodeTile. */
 export function computeHeights(terrain: MapTerrain, regionX: number, regionY: number): Int32Array[] {
@@ -3603,21 +3604,35 @@ export async function buildSkyboxMesh(
   }
 }
 
-/** A terrain-following outline around one region's perimeter (plane-0
- *  heights), floated slightly above ground — shows where regions meet. */
-export function buildRegionOutline(heights: Int32Array, color = 0x2f8fff): THREE.Line {
+/** A terrain-following 8×8 chunk grid over one region (plane-0 heights),
+ *  floated slightly above ground. Chunks are the unit the maps index packs
+ *  loc coordinates in (`x<<6 | y<<3 | plane`), so the grid shows where a
+ *  placement's chunk-relative coords roll over. The outermost lines are the
+ *  region boundary and are drawn in the brighter colour.
+ *
+ *  Each line is subdivided per tile so it follows the ground contour instead
+ *  of cutting through hills. */
+export function buildChunkGrid(heights: Int32Array, edgeColor = 0x2f8fff, chunkColor = 0x1d5c96): THREE.LineSegments {
   const LIFT = 24
   const points: number[] = []
-  const push = (tx: number, ty: number) => {
+  const colors: number[] = []
+  const edge = new THREE.Color(edgeColor)
+  const inner = new THREE.Color(chunkColor)
+  const push = (tx: number, ty: number, c: THREE.Color) => {
     points.push(tx * 512, -heights[tx * VERTS + ty] + LIFT, -(ty * 512))
+    colors.push(c.r, c.g, c.b)
   }
-  for (let x = 0; x <= SIZE; x++) push(x, 0)
-  for (let y = 1; y <= SIZE; y++) push(SIZE, y)
-  for (let x = SIZE - 1; x >= 0; x--) push(x, SIZE)
-  for (let y = SIZE - 1; y >= 0; y--) push(0, y)
+  for (let i = 0; i <= SIZE; i += CHUNK) {
+    const c = i === 0 || i === SIZE ? edge : inner
+    for (let j = 0; j < SIZE; j++) {
+      push(i, j, c); push(i, j + 1, c) // the line at x = i
+      push(j, i, c); push(j + 1, i, c) // the line at y = i
+    }
+  }
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(points), 3))
-  return new THREE.Line(geometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 }))
+  geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3))
+  return new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85 }))
 }
 
 /** All placed locs of one plane merged into one textured mesh. */

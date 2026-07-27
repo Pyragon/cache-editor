@@ -11,7 +11,7 @@ import type { LocEntry, MapData, MapRegionDef, MapTerrain } from '../loaders/map
 import { SIZE, decodeTerrain, decodeUnderwaterTerrain, tileIndex, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS, LOC_TYPE_LABELS } from '../loaders/maps'
 import { rgbToRenderedHex, DEFAULT_MODEL_SUN } from '../loaders/models'
 import { NumberInput } from './defFields'
-import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildRegionOutline, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef } from './mapScene'
+import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildChunkGrid, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef } from './mapScene'
 import { LocAnimator } from './locAnimator'
 import type { AnimationDef } from '../loaders/animations'
 import type { ModelData } from '../loaders/models'
@@ -23,7 +23,7 @@ import './MapSceneViewer.css'
 
 // 3D scene preview of a map region and its 8 neighbours (the client always
 // builds a 3×3 block — buildings that straddle a region boundary only look
-// right with the neighbours present). Region outlines and floating markers
+// right with the neighbours present). The chunk grid and floating markers
 // (sound emitters / map-icon anchors) are editor aids on top.
 // See mapScene.ts for the ported client pipeline.
 
@@ -183,7 +183,7 @@ type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'river
  *  world geometry only. `applyTint` OVERWRITES `material.color` (world materials
  *  keep their colour in vertex colours, so there's nothing to preserve), which
  *  erases the colour of any overlay that carries it in the material instead —
- *  light gizmos, marker diamonds, region outlines. */
+ *  light gizmos, marker diamonds, the chunk grid. */
 const TINTED_KINDS: Tagged['kind'][] = ['terrain', 'riverbed', 'loc']
 
 type MarkerSelection = {
@@ -590,7 +590,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const [multiSel, setMultiSel] = useState<number[]>([])
   const setMultiSelRef = useRef(setMultiSel)
   setMultiSelRef.current = setMultiSel
-  // Defaults tuned for perf/clarity: only plane 0, no region outlines (all
+  // Defaults tuned for perf/clarity: only plane 0, no chunk grid (all
   // still toggleable in the controls).
   const [visiblePlanes, setVisiblePlanes] = useState([true, false, false, false])
   const [showLocs, setShowLocs] = useState(true)
@@ -1908,7 +1908,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         refreshTintRef.current = () => {
           // Same allowlist as the initial pass below. This used to be "anything
           // that isn't a light gizmo", which quietly whitened every marker
-          // diamond and region outline — and since the effect that calls this
+          // diamond and the chunk grid — and since the effect that calls this
           // depends on `status`, it ran after EVERY build, so markers were
           // never seen in their own colour at all.
           for (const t of taggedRef.current) if (TINTED_KINDS.includes(t.kind)) applyTint(t.obj)
@@ -2111,8 +2111,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             }
           }
 
-          // outline every region's perimeter; centre gets the bright colour
-          const outline = buildRegionOutline(heights[0], isCenter ? 0x2f8fff : 0x9a5cff)
+          // the region's 8×8 chunk grid; its outer lines are the region border
+          const outline = buildChunkGrid(heights[0])
           outline.position.set(offsetX, 0, offsetZ)
           track(outline)
           outlines.add(outline)
@@ -2532,7 +2532,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             }
             animLocsRef.current.push(...rebuiltAnim)
           }
-          const outline = buildRegionOutline(centerHeights[0], 0x2f8fff)
+          const outline = buildChunkGrid(centerHeights[0])
           track(outline)
           outlines.add(outline)
           taggedRef.current.push({ obj: outline, neighbor: false, kind: 'outline' })
@@ -3017,7 +3017,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         </label>
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showOutlines} onChange={(e) => setShowOutlines(e.target.checked)} />
-          Region outlines
+          Chunk grid
         </label>
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showSky} onChange={(e) => setShowSky(e.target.checked)} />
