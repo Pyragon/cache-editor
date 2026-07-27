@@ -164,6 +164,23 @@ mode, specular/env-map mode, HDR multiplier, scroll speed.
 (`1 + hdrOp*31/4096`, up to 32×), or `textureSpeedU/V` is editable. All of them
 visibly change rendering.
 
+**`alpha` is a MISNOMER — it is the client's `TextureDetails.shadowFactor`
+(TRACED 2026-07-26).** Verified by decode order in the client's texture-details
+loader (`ImageIndexLoader`: …skipTriangles, brightness, **shadowFactor**,
+effectId… — cryogen dumps that slot as `alpha`). It is the textured-face
+grey-mix factor of `MeshRasterizer_Sub3.method14282`: 0..255 of the face colour
+replaced with ambient-grey (`ambient·0x020202`, mid-grey 128 at ambient 64)
+before lighting. Self-coloured textures (leaf sprites 951/956/952…) carry 255
+(dumped `-1`) so the sprite's own colour stands; detail maps (bark 923) carry 0
+and take the full face tint. Skipping it double-tinted every tree canopy
+green-on-green — the "leaves look drastically different" bug. Ported as
+`texturedBaseRgb` in `mapScene.ts`; the def's `brightness` byte is the same
+method's post-mix `(256+b)/256` boost. **Cryogen's field should be renamed
+`shadowFactor`** (with a re-dump) if the decoder ever gets its audit pass.
+Similarly suspect: `detailsOnly` sits in the decode slot of the client's
+`isGroundMesh` (== byte 0) — semantics happen to align for terrain detail
+maps, but the name is the dumper's, not the client's.
+
 ---
 
 ## Region environment

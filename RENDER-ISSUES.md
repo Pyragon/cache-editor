@@ -15,7 +15,37 @@ own — so it gets a document instead of bullets here.
 ## Terrain / water
 - **The river still looks off** (separate from the un-signed-off water colour
   already tracked in `TODO.md`).
-- **Willow transparency** — better than it was, but still not matching in-game.
+- **Willows — FIXED 2026-07-26 (pending Cody's sign-off); the residual is
+  fog.** It was never transparency: the loc bake used the wrong shader family's
+  formula (`1_31.vert`'s half-Lambert instead of the scene shader
+  `1_12.vert`'s two-sided sun/anti-sun) with invented constants, leaving every
+  loc ~2.2× darker than the client at the same lighting-detail setting. Fixed
+  in `computeModelLitRgb`/`DEFAULT_MODEL_SUN`, verified with the render rig
+  (`scripts/render-rig/`) against the client screenshot pair: willow fronds
+  now match within 6% with correct hue (78,79,48 vs 74,74,48). The ground was
+  deliberately left alone — it already matched. Full story in
+  **`docs/lighting.md`**.
+
+  The remaining measured difference — distant foliage hazing toward pale
+  blue-grey (~15-18% mix) — was **distance fog, implemented 2026-07-26**:
+  client-formula linear fog from the region's fogColour/fogDepth, live Fog
+  toggle + Draw distance slider in the gfx panel (the client's far plane is a
+  graphics setting we can't read; ~24 tiles matches a client-like zoom).
+  Details in `docs/lighting.md`.
+
+  **And the leaf COLOUR itself was a third, separate bug, also fixed
+  2026-07-26: the textured-face grey-mix (`shadowFactor`).** Leaf sprites are
+  self-coloured textures; the client replaces the face colour with
+  ambient-grey for them (`method14282`, factor = texture def's misnamed
+  `alpha` field — see EDITOR.md) so the sprite's green stands alone. We
+  multiplied green texture × green face colour — leaves dark and oversaturated
+  (canopy 52,63,17 vs client 71,76,40) even with lighting and fog right.
+  With the mix ported: canopy 76,80,43 — within 5%, correct hue.
+
+  While comparing, discount our marker diamonds (cyan = map-sprite anchors,
+  which every tree carries) — toggle markers off for a fair side-by-side.
+  Tree canopies are separate locs on **plane 1** — enable it or every tree is
+  a bare trunk.
 - **Walkways bleed into the grass** — all three mechanisms now ported; kept on
   the list because Cody's verdict was "looking okay", which is not a sign-off.
   The original note here guessed the walkway was simply *bigger* in-game; that

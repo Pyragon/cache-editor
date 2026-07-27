@@ -103,10 +103,135 @@ Off is flat and ambient-dominated: the backlight (1.2) *exceeds* the directional
 term (0.699), so everything is filled from both sides, peaking around 1.85×. On
 is strongly directional and peaks around 2.75×.
 
-**We currently render the OFF mode.** `DEFAULT_MODEL_SUN` is
-`sunColour [0.7, 0.7, 0.7]` — literally the off-mode `sunLight` of 0.699 — which
-is why the scene reads flat, and why porting the ON values without compression
-blew out.
+**We render the OFF mode, and as of 2026-07-26 we render it CORRECTLY — the
+flat-mode fix below is DONE.** What was wrong, in two parts:
+
+1. **The bake copied the wrong shader family's formula.** Both formulas exist
+   in the dumped GLSL: `1_31.vert` (lowercase uniforms — a different family)
+   has the half-Lambert `hl·(sun + amb·0.5) + amb·0.5` the bake used;
+   `1_12.vert` (uppercase uniforms — the one `MeshRasterizer_Sub3` actually
+   feeds) is two-sided: `Ambient + max(0,N·L)·Sun − max(0,−N·L)·AntiSun`.
+2. **The constants were invented.** `Class239:142` is the client's flat call:
+
+```java
+renderer.m(anInt2935, 0.69921875F, 1.2F, -200f, -240f, -200f); // anInt2935 = 16777215, white
+renderer.IA((0.7F + brightness*0.1F) * 1.1523438F);            // BrightnessPreference default = 3
+```
+
+| | client, low | old `DEFAULT_MODEL_SUN` | fixed |
+|---|---|---|---|
+| sun light | 0.69921875 | 0.7 | 0.69921875 |
+| ambient | **1.1523438** | **0.6** | 1.1523438 |
+| backlight (subtractive) | **1.2** | none | 1.2 |
+| direction | (−200, −240, −200) | same | same |
+
+Both are in `computeModelLitRgb` / `DEFAULT_MODEL_SUN` (`models.ts`). Verified
+with the render rig (`scripts/render-rig/`) against the client screenshot pair:
+**willow fronds went from ~2.2× too dark to matching within 6% with correct
+hue** (client 78,79,48 vs ours 74,74,48). No unclamp or bloom retune was needed
+after all — flat-mode values only exceed 1.0 on bright sunward faces, and the
+client's own framebuffer clips those identically (whitePoint 1.0 = identity
+tone map).
+
+Two deliberate scope cuts, both load-bearing:
+
+- ~~**The GROUND was left alone.**~~ **SUPERSEDED the same day — the ground was
+  GroundSM-derived after all, and got its own hardware port.** Cody's suspicion
+  was right twice: the file header literally said "GroundSM in
+  darkan-bot-refactor", and the light grid was a half-Lambert. It had *appeared*
+  to match because on flat unshadowed ground the two pipelines numerically
+  coincide (0.578^0.7·1.604 ≈ 1.123 — a genuine coincidence that stalled the
+  diagnosis). The real hardware ground (`HardwareGround.java:907-965`, low
+  lighting detail — the path the reference client runs):
+
+  ```
+  strength  = 74 − staticShadow                    (byte b_51 = 74)
+  lightness'= (hsl & 0x7f)·strength >> 7, clamp 2..126   ← shadow cuts the BASE
+  f_53      = 1.152 + N·L·(N·L>0 ? 0.699 : 1.2)          ← full range, two-sided
+  colour    = palette[hsl&0xff80 | lightness'] · f_53
+  ```
+
+  Ported 2026-07-26 (`computeVertexLightGrid` + the emitTile colour stage;
+  textured tiles take the display-space equivalent of the strength cut since
+  they have no lightness to scale). What changed visibly: the SHADOW CURVE
+  (shadows deepen the base colour rather than scaling light — wall-shadowed
+  areas like the castle courtyard get properly dark) and SLOPE CONTRAST (full
+  ±N·L instead of half-Lambert compression — river banks now shade down toward
+  the water like the client). Riverside reference: grass 62 vs client 63.
+  At lighting detail HIGH the client instead sets ground flags 0x7 and lights
+  in the shader — that variant belongs with the lighting-detail toggle work.
+- **`ModelViewer`'s standalone previewer keeps its own inline copy of the old
+  half-Lambert** — a separate page with its own calibration item (the contrast
+  base, below). Changing every previewer's look is its own decision.
+
+**Residual, now the biggest visible gap: FOG.** Post-fix, distant foliage still
+reads darker/more saturated than the client (canopy 50,69,14 vs 76,85,38) —
+mixing ours ~15-18% toward a pale fog colour reproduces the client values
+almost exactly, and the client applies distance fog (`DistanceFogPlane` in
+`1_12.vert`, region fogColour/fogDepth) that we don't render at all. Close-up
+surfaces match without it.
+
+**Second residual, found chasing "the leaves look drastically different"
+(FIXED 2026-07-26): the textured-face grey-mix.** Leaf sprites (951/956/952 —
+green leaf clusters with real PNG alpha) are SELF-COLOURED textures, and the
+client's `MeshRasterizer_Sub3.method14282` replaces a textured face's colour
+with ambient-grey (`ambient·0x020202`) by the texture's `shadowFactor` —
+dumped by cryogen under the misnomer **`alpha`** (decode-order proof in
+EDITOR.md). 255 = the texture's own colour stands (leaves); 0 = full face tint
+(bark/detail maps). We multiplied leaf-green texture × leaf-green face colour:
+double green, dark and oversaturated, at any lighting. Ported as
+`texturedBaseRgb` (mapScene.ts) feeding `computeModelLitRgb`'s `baseOf`
+override, including the def `brightness` byte's `(256+b)/256` post-mix boost.
+Rig-verified: canopy 52,63,17 → **76,80,43** vs client 71,76,40; willow hue
+R/G 1.01 vs client 0.98.
+
+**Fourth finding, found via the fern (FIXED 2026-07-26): static locs are
+CPU-LIT with per-def ambient AND contrast — the 1_12 uniforms path was never
+the right model for them.** `MeshRasterizer_Sub3:3254` is the actual static-loc
+lighting, a CPU bake into vertex colours (the mesh uploads with ShaderMode 3,
+`DiffuseColour = 1`):
+
+```
+cos   = dot(sunDir, summedVertexNormal) / faceCount     ← AVERAGE normal
+light = ambient(1.152) + cos · (cos<0 ? backlight : sunLight) · 768/contrast
+out   = clamp(method14282(hsl, tex, 64+def.ambient) · sunColour · light)
+```
+
+Three consequences ported into `computeModelLitRgb`:
+- **`768/contrast` scales both directional terms** — `contrast = 850 +
+  def.contrast·5` (cryogen dumps the RAW byte; darkan pre-multiplies at
+  decode). Higher contrast = flatter light; the name is backwards.
+- **Per-def ambient and contrast are wired end to end** (addModel `light`
+  param, `AnimatedLoc` records). The fern's `ambient 25 / contrast 15` and the
+  willow's `35/50` were the remaining foliage darkness: ambient raises both the
+  base lightness (`×(64+a)/128`) and the textured grey (`(64+a)·2`).
+- **The cosine divides by the face COUNT, not the normal's length.** Where
+  faces disagree (foliage), |average| < 1 and the directional response
+  softens; renormalising over-lights curved silhouettes.
+
+Rig-verified against the client screenshot pair at the willow base:
+fern fronds 65,67,35 vs client 58,57,32 · rock 75,69,55 vs 73,65,56 ·
+willow fronds 80,81,45 vs 80,82,57 (R/G exact; B is the fog-distance knob).
+
+One knowingly-unported nuance: meshes with scale/mirror flags (`anInt8896 &
+0x37`) skip the CPU bake and take the real shader path (1_12 uniforms — no
+contrast divide) because their baked normals are stale. ~9% of placements are
+mirrored; we CPU-bake everything. Revisit only if mirrored locs measurably
+diverge.
+
+**Third residual, found via the shoreline rocks (FIXED 2026-07-26): the
+ambient lightness scale.** The client's vertex colour for EVERY loc face is
+`palette[method14290(hsl, ambient)]` — lightness × ambient/128 (×0.5 at the
+default 64, clamp 2..126) — and the shader's diffuse multiplies that. Baking
+the full-lightness palette left every UNTEXTURED loc ~2× bright once the real
+sun landed ("every pebble blew white" — the exact symptom that sank the
+2026-07-25 port, now explained). Textured faces masked it: their grey-mix
+already sits at the ambient-scaled grey (`64·2 = 128`). Fixed with the
+existing `adjustLuminance` (=method14290) in `computeModelLitRgb`, and the
+partial grey-mix base uses the scaled palette too, as method14282 does.
+Rig-verified: shoreline pebbles dropped from white dots to the client's
+grey-violet; the same-frame canopy moved 76,80,43 → 64,70,34, bracketing the
+client's 71,76,40 (branches are sf=0 and correctly darkened).
 
 ### 2. Ground point lights
 
@@ -291,16 +416,56 @@ environment blending (one env per region is used), and the static lighting grid
 
 ---
 
+## Source audit — is each piece from the hardware renderer? (2026-07-26)
+
+Cody's standing suspicion was that early work ported Software-Mode code.
+Audited piece by piece against darkan-game-client:
+
+| piece | ported from | hardware path? |
+|---|---|---|
+| loc/model lighting | `MeshRasterizer_Sub3:3254` CPU bake | ✅ Sub3 IS the DX mesh class. **Was ❌ until today** — the old bake copied `1_31.vert`'s half-Lambert, a different shader family, with invented constants |
+| textured-face base (grey-mix, ambient scale) | `method14282` / `method14290` | ✅ Sub3 |
+| palette | `Class540.anIntArray7136` (HSL triangle, pow 0.7) | ✅ shared — `HardwareRenderer.anIntArray8803` points at it (`anIntArray5379` is its BGR swizzle) |
+| transparency split + draw order | Sub3 ctor test + `SceneObjectManager.method3441` | ✅ |
+| per-material blend modes | — | n/a: `Class73`/`method13904` turned out to be the 2D blitter (see TODO correction) |
+| texture load / gamma 0.7 | `Class66.renderTexturePixels` | ✅ hardware texture cache (per-texture gamma-skip verify still open) |
+| fog | `Class239.method4075` → `renderer.c` → `glFog(GL_LINEAR)` | ✅ hardware renderers |
+| sun/env flat values | `Class239:141-142` | ✅ |
+| ground | own pipeline calibrated against client screenshots | ✅ empirically (HardwareGround analog; deliberately frozen) |
+| specular (effectId 1) | `1_12.vert` ShaderMode 1 | ✅ |
+| ModelViewer standalone page | ModelGL-style inline copy | ⚠ separate page, own item |
+
+The one piece that WAS software-derived is exactly the one that caused a week
+of mismatches: the lighting formula. Everything found today lives in the same
+class (`MeshRasterizer_Sub3`), which is why fixing one surface kept exposing
+the next — formula, grey-mix, ambient scale, contrast were all layers of the
+same CPU bake.
+
 ## A suggested order
 
-1. **Calibration harness first.** Everything here changes global brightness, and
-   both reverts happened because there was no way to judge the result except
-   "looks too bright". A side-by-side against a real client screenshot at a
-   known region — Lumbridge 12850 — is the thing that makes the rest safe.
-2. **Unclamp the bake + retune the bloom threshold together**, in one commit,
-   measured against (1).
-3. **The environment sun** behind a lighting-detail toggle: on = region values,
-   off = the client's flat constants, which is roughly what we render now.
-4. **Point lights into the shader** (the agreed plan above) — unblocks flicker.
-5. **Ground point lights** — the largest single missing path, and the one most
-   likely to account for "the client just looks better".
+1. ~~**Calibration harness first.**~~ **DONE 2026-07-26** — `scripts/render-rig/`
+   (headless Edge + dump server + patch sampler). Its README carries the
+   reference numbers from the client screenshot pair.
+2. ~~**Fix the flat mode.**~~ **DONE 2026-07-26** — the 1_12.vert formula and
+   the client's real flat constants, verified against (1). No unclamp/bloom
+   retune was needed for the flat mode; see above.
+3. ~~**Distance fog**~~ **DONE 2026-07-26.** Client formula traced end to end:
+   `Class239.method4075` → `renderer.c(fogColour, (fogDepth+256)<<2, 0)` →
+   LINEAR fog ending at the projection far plane, fading over the last
+   `(fogDepth+256)·4` units (`method14013`, `glFogf(GL_LINEAR)`). Lumbridge:
+   colour 0x8DA4C2, depth 600 → a 6.7-tile fade. **Fog is NOT gated on lighting
+   detail** — `Atmosphere` reads fogColour/fogDepth outside that branch — which
+   is why the client hazed distant foliage at LOW while we didn't; it was the
+   whole residual after the flat-mode fix (measured f ≈ 0 near / 0.12 mid /
+   0.19 far, monotone with distance, per-channel consistent with 0x8DA4C2).
+   Implemented as `scene.fog` + matching uniforms in the water shader (alpha
+   rises with fog so distant water is a wall of fog, not a window); the skybox
+   keeps `fog:false`; the old approximate horizon fade was removed. The one
+   unknowable is the client's far plane (a graphics setting), so it's the
+   exposed knob: a **Draw distance** slider in the gfx panel (default 40 tiles
+   for editor use; ~24 matches a client-like zoom).
+4. **The environment sun** behind a lighting-detail toggle: on = region values,
+   off = the flat constants we now render correctly. The ON values (peak ~2.75×)
+   are where the unclamp + bloom-threshold retune conversation comes back.
+5. **Point lights into the shader** (the agreed plan above) — unblocks flicker.
+6. **Ground point lights** — the largest single missing path.
