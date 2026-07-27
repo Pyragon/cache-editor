@@ -2558,7 +2558,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
          *  both catch up on the next full rebuild (a terrain edit, a region
          *  change, or Save). Returns false when the edit is too broad to
          *  patch, and the caller falls back to the full rebuild. */
-        patchLocsRef.current = async (prev, next) => {
+        const patchLocsImpl = async (prev: LocEntry[], next: LocEntry[]): Promise<boolean> => {
           if (disposed) return false
           const key = (e: LocEntry) => e.join(',')
           const before = new Map<string, LocEntry>()
@@ -2674,7 +2674,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // the terrain lighting), minimap, terrain and outline. Neighbour
         // meshes keep their old boundary values; only visible when brushing
         // the outermost tiles.
-        rebuildCenterRef.current = async (nextTerrain, nextObjects, nextLights) => {
+        const rebuildCenterImpl = async (nextTerrain: MapTerrain, nextObjects: LocEntry[], nextLights?: RegionLight[]) => {
           if (disposed) return
           currentTerrain = nextTerrain
           if (nextLights) {
@@ -2844,6 +2844,33 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           }
           setStatus('')
         }
+
+        // Builds are SERIALIZED. Rebuilds and patches from rapid successive
+        // edits — or a transform-to preview toggled while the previous
+        // preview's rebuild was still in flight — used to run concurrently:
+        // each disposed the meshes it could see and added its own, so the
+        // earlier build's late-added meshes survived as ghosts (an animated
+        // loc kept playing after its placement was previewed away). Queued
+        // rebuilds coalesce latest-wins, so mid-build edits don't stack a
+        // backlog of stale multi-second rebuilds.
+        let buildChain: Promise<unknown> = Promise.resolve()
+        const enqueueBuild = <T,>(fn: () => Promise<T>): Promise<T> => {
+          const run = buildChain.then(fn)
+          buildChain = run.then(() => undefined, () => undefined)
+          return run
+        }
+        let queuedRebuild: { t: MapTerrain; o: LocEntry[]; l?: RegionLight[] } | null = null
+        rebuildCenterRef.current = (t, o, l) => {
+          const idle = queuedRebuild === null
+          queuedRebuild = { t, o, l }
+          if (!idle) return buildChain.then(() => undefined) // an already-queued rebuild will pick this payload up
+          return enqueueBuild(async () => {
+            const job = queuedRebuild!
+            queuedRebuild = null
+            await rebuildCenterImpl(job.t, job.o, job.l)
+          })
+        }
+        patchLocsRef.current = (prev, next) => enqueueBuild(() => patchLocsImpl(prev, next))
         setStatus('')
       } catch (e) {
         setStatus(`scene build failed: ${e}`)
