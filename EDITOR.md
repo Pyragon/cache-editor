@@ -623,3 +623,54 @@ extending what that brush can apply rather than new interaction plumbing.
 Worth doing alongside the per-tile overlay shape/rotation painting described in
 the ground-blending entry — same interaction, and together they'd cover most of
 what hand-authoring terrain needs.
+
+---
+
+# Parked 2026-07-27 — map-scene punch list
+
+Dumped here on Cody's ask while switching off maps for a while. Open issues
+first, then future features.
+
+## Open issues
+
+- **cryogen CacheBuilder freezes at 100%.** With the ManifestBackedDefinition
+  rework, a build runs its actions for quite a while and then hangs at 100%
+  rather than exiting. Cryogen-side bug, not this repo — reproduce there.
+- **Water is close but under-animated.** Current surface reads like the client
+  with *water detail off* — colour and reflection are in the right place, but
+  the real client at full detail animates far more. See
+  `reference_water_shader` / `docs/` for where the procedural-sky water stands;
+  the missing piece may need the `um` underwater-map dump we don't have.
+- **Minimap brightness slider should die.** Figure out the client's actual
+  minimap brightness (suspicion: another software-mode difference, same family
+  as the `window.__gpu` gotcha) and bake the correct value in, then remove the
+  "Map brightness" slider (`mmGamma`, `cache-editor:minimap-gamma-v2`).
+- **Cursor "no option" needs clarification.** The map-scene def editor's cursor
+  picker (`cursorPick` in ObjectDefEditor, `CURSOR_SLOTS`) lets you choose
+  which right-click option a cursor applies to, including "no option" — but
+  the objects entry's editor has nothing like it, and its cursors seem to ride
+  the options directly. If the index is genuinely selectable, the objects
+  editor should get the same control; if it isn't, the map-scene picker is
+  wrong. Reconcile the two against the client's decode before touching either.
+
+## Future features
+
+- **Skybox — what do we actually have?** The graphics settings panel claims
+  "applied", yet it's been said repeatedly that we lack the skycube needed for
+  correct lighting. Do we have skyboxes and a sun or not? The viewer looks
+  like we don't. And given all that: what does the "Sky" checkbox actually do
+  today? Answer those questions first, then build whatever's missing.
+- **Idle animations.** Gather more info — what drives them, what we render
+  today, what's missing.
+- **NPC spawns.** A way to see what the map looks like populated:
+  - Parse a matrix-style spawn list from a text file, filtered to the current
+    region; honour the extras (facing direction, does-it-walk, …).
+  - Use cryogen's code for deciding the random walk.
+  - Show the NPC list as a View-tab section on the right, like objects.
+- **Copy/paste → prefabs.** Shift+drag marquee already sort-of selects an
+  area, but it drags in ground layers and possibly other planes. Wanted:
+  - Selection copies just the actual objects in the area, saved to a tab on
+    the right.
+  - Save with a name, persist across refreshes, delete/clone.
+  - Point is placing pre-made structures — a bank, a hut, a whole building —
+    into an area you're building. Prefabs, basically.
