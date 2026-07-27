@@ -16,7 +16,9 @@ import type { PosedVertices } from '../loaders/skeletalAnimation'
 //   Trig's 16384-amplitude table)
 // - underlay colours via the client's 11×11 HSL box blur (calculateUnderlayPalette)
 // - the 13 overlay tile shapes with rotation (SHAPE_VERTEX_* + tileSizeDeltas)
-// - slope-directional vertex lighting (GroundSM init) baked into vertex colours
+// - vertex lighting per HardwareGround (the DX ground, low-detail path):
+//   palette[lightness·(74−shadow)/128] × (ambient + N·L·(sun|backlight)) —
+//   NOT GroundSM's software bake, which this originally copied (2026-07-26)
 // - locs placed per SceneGraph.addObject (average height over the loc footprint,
 //   rotation-swapped sizes), models merged into one geometry per plane.
 // RS scene space → three: x stays, y (down) → -y, tile "north" y-axis → -z.
@@ -783,15 +785,28 @@ export type SunConfig = {
 
 export const DEFAULT_SUN: SunConfig = { x: -50, y: -60, z: -50, ambient: 1.1523438 }
 
-// HD ground lighting — the client (OpenGLGround) uploads a per-vertex surface
-// NORMAL (from the height gradient) and lights it with the SAME scene shader as
-// models: the half-Lambert of the dumped "Model" GLSL. So the ground light is a
-// float multiplier per vertex, `hl·(sunColour + 0.5·ambient) + 0.5·ambient`, with
-// `hl = clamp(dot(groundNormal, sunDir)·0.5 + 0.5, 0, 1)`. Static shadows are a
-// separate multiply (baked into the client's ground vertex colour). Gray sun/
-// ambient (DEFAULT_MODEL_SUN) so a single scalar multiplier suffices for terrain.
-const GROUND_SUN_GRAY = (DEFAULT_MODEL_SUN.sunColour[0] + DEFAULT_MODEL_SUN.sunColour[1] + DEFAULT_MODEL_SUN.sunColour[2]) / 3
-const GROUND_AMB_GRAY = (DEFAULT_MODEL_SUN.ambientColour[0] + DEFAULT_MODEL_SUN.ambientColour[1] + DEFAULT_MODEL_SUN.ambientColour[2]) / 3
+// Ground light grid — per-vertex f_53 from the height-gradient normal, the
+// client formula below (two-sided, full range). The old half-Lambert grid this
+// replaced was described as "OpenGLGround/the Model GLSL", i.e. neither the
+// hardware ground nor the low-detail path the reference client runs.
+// Client HardwareGround vertex lighting (the DX/hardware ground, low lighting
+// detail — the path Cody's client runs). HardwareGround.java:907-965:
+//   strength  = 74 − staticShadow                       (byte b_51 = 74)
+//   lightness'= (hsl & 0x7f) · strength >> 7, clamp 2..126   ← INSIDE the HSL
+//   f_53      = ambient + N·L · (N·L > 0 ? sunLight : backlight)
+//   colour    = palette[hsl&0xff80 | lightness'] · f_53, clamped per channel
+// This replaced a GroundSM/half-Lambert hybrid on 2026-07-26 — the old grid
+// was `hl·1.0 + 0.3` with the shadow as a separate RGB multiply, which matched
+// on flat unshadowed ground by numeric coincidence (0.578^0.7·1.604 ≈ 1.123)
+// but had the wrong shadow curve and compressed slope contrast.
+const GROUND_STRENGTH_BASE = 74
+const GROUND_AMBIENT = DEFAULT_MODEL_SUN.ambientColour[0] // 1.1523438
+const GROUND_SUN = DEFAULT_MODEL_SUN.sunColour[0] // 0.69921875
+const GROUND_BACKLIGHT = DEFAULT_MODEL_SUN.antiSunColour[0] // 1.2
+// display-space factor a full-strength lightness cut works out to through the
+// palette's pow-0.7 — the textured (neutral-tint) path has no lightness to
+// scale, so it takes the equivalent multiplier instead
+const GROUND_CUT_DISPLAY = Math.pow(GROUND_STRENGTH_BASE / 128, 0.7) // ≈0.681
 function computeVertexLightGrid(heights: Int32Array, verts: number, _sun: SunConfig = DEFAULT_SUN): Float32Array {
   const sl = Math.hypot(DEFAULT_MODEL_SUN.dir[0], DEFAULT_MODEL_SUN.dir[1], DEFAULT_MODEL_SUN.dir[2]) || 1
   const sdx = DEFAULT_MODEL_SUN.dir[0] / sl, sdy = DEFAULT_MODEL_SUN.dir[1] / sl, sdz = DEFAULT_MODEL_SUN.dir[2] / sl
@@ -807,8 +822,9 @@ function computeVertexLightGrid(heights: Int32Array, verts: number, _sun: SunCon
       // n = normalize(dhx, 1024, −dhy) → flat ground points +y (up).
       const len = Math.hypot(dhx, 1024, dhy) || 1
       const nx = dhx / len, ny = 1024 / len, nz = -dhy / len
-      const hl = Math.min(1, Math.max(0, (sdx * nx + sdy * ny + sdz * nz) * 0.5 + 0.5))
-      light[x * verts + y] = hl * (GROUND_SUN_GRAY + GROUND_AMB_GRAY * 0.5) + GROUND_AMB_GRAY * 0.5
+      // client f_53 — two-sided, full range, no half-Lambert compression
+      const ndl = sdx * nx + sdy * ny + sdz * nz
+      light[x * verts + y] = GROUND_AMBIENT + ndl * (ndl > 0 ? GROUND_SUN : GROUND_BACKLIGHT)
     }
   }
   return light
@@ -1845,12 +1861,13 @@ export async function buildTerrainMesh(
           if (isWater) {
             bucket.depths.push(waterDepthAll ? averageHeight(waterDepthAll[plane], sceneX, sceneY) : 0)
           }
-          // Scene-shader half-Lambert light (from the ground normal) × the static
-          // shadow (baked into the client's ground vertex colour). One multiplier.
-          const sceneLight = Math.max(0, lightAt(light, sceneX, sceneY))
+          // Client HardwareGround (low lighting detail): the directional term
+          // f_53 multiplies a palette colour whose LIGHTNESS was already cut
+          // to (74 − staticShadow)/128 — shadows deepen the base colour, they
+          // don't scale the light.
+          const f53 = Math.max(0, lightAt(light, sceneX, sceneY))
           const shadowVal = shadow ? lightAt(shadow, sceneX, sceneY) : 0
-          const shadowFactor = Math.max(0, 1 - shadowVal / 128)
-          const mul = sceneLight * shadowFactor
+          const strength = Math.max(0, GROUND_STRENGTH_BASE - shadowVal)
           const forced = vertHsl?.[vi]
           const vHsl = forced !== undefined && forced !== null ? forced
             : hsl === -1 ? hsl
@@ -1858,8 +1875,10 @@ export async function buildTerrainMesh(
             : mode === 2 ? overlayVertexHsl(px, py, hsl, ids?.[vi])
             : hsl
           let rgb: [number, number, number]
-          if (useTint && vHsl !== -1) rgb = litColor(vHsl, mul)
-          else rgb = neutral(mul)
+          if (useTint && vHsl !== -1) rgb = litColor(adjustLuminance(vHsl, strength), f53)
+          // textured tiles have no lightness to cut, so they take the
+          // display-space equivalent of the same strength scale
+          else rgb = neutral(f53 * GROUND_CUT_DISPLAY * Math.pow(strength / GROUND_STRENGTH_BASE, 0.7))
           bucket.colors.push(rgb[0] * boost, rgb[1] * boost, rgb[2] * boost)
           if (alphas) bucket.alphas.push(alphas[vi])
           // world-planar UVs: one repeat per `texScale` scene units
