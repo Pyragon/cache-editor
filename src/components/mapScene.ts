@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import type { MapTerrain } from '../loaders/maps'
 import { SIZE, tileIndex } from '../loaders/maps'
 import type { ModelData } from '../loaders/models'
-import { hslToRgb, parseModel, applyRecolor, computeModelLitRgb, modelUpscale, upscaleModel, DEFAULT_MODEL_SUN, type ModelSun, type PointLight } from '../loaders/models'
+import { hslToRgb, adjustLuminance, AMBIENT_DEFAULT, CONTRAST_DEFAULT, parseModel, applyRecolor, computeModelLitRgb, modelUpscale, upscaleModel, DEFAULT_MODEL_SUN, type ModelSun, type PointLight } from '../loaders/models'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { makeUVWriter } from './modelUVs'
 import type { UVWriter } from './modelUVs'
@@ -2176,10 +2176,50 @@ export type MaterialMeta = {
    *  picks them up. Our 8-bit PNG can't hold that, so the scalar is applied to the
    *  material instead. 1 = not HDR / not recoverable. */
   hdrMultiplier: number
+  /** Client `TextureDetails.shadowFactor` — dumped as `alpha` by cryogen (the
+   *  decode-order field between `brightness` and `effectId`; the name is a
+   *  misnomer). 0..255: how much of the face colour a textured face REPLACES
+   *  with ambient-grey before lighting (`MeshRasterizer_Sub3.method14282`).
+   *  Self-coloured textures (leaf sprites, 951/956/952 et al) carry 255, so
+   *  the sprite's own colour stands instead of being tinted green-on-green —
+   *  skipping this is what made every tree canopy dark and oversaturated. */
+  shadowFactor: number
+  /** Client `TextureDetails.brightness` — post-mix multiplier (256+b)/256. */
+  texBrightness: number
 }
 
 /** distinct texture ids per model — a model is reused across many placements */
 const modelTextureIds = new WeakMap<ModelData, number[]>()
+
+/** Client `MeshRasterizer_Sub3.method14282`: a textured face's base colour
+ *  after the texture's shadowFactor grey-mix and brightness boost, before the
+ *  shader's diffuse multiplies it.
+ *
+ *  shadowFactor mixes the face colour toward `ambient·0x020202` — mid-grey
+ *  (128) at the default ambient of 64 — so a self-coloured texture (leaf
+ *  sprites: green pixels IN the texture) isn't tinted by a green face colour
+ *  on top of its own green. At 255 (dumped as `alpha: -1`) the face colour is
+ *  all but replaced: the texture's own colour is the colour. Detail maps
+ *  (bark, texture 923) carry 0 and keep the face tint entirely. */
+function texturedBaseRgb(paletteRgb: number, shade: number, ambient = 64): number {
+  const sf = shade & 0xff
+  const bright = (shade >> 8) & 0xff
+  let r = (paletteRgb >> 16) & 0xff, g = (paletteRgb >> 8) & 0xff, b = paletteRgb & 0xff
+  if (sf !== 0) {
+    const grey = ambient * 2
+    const keep = 256 - sf
+    r = (grey * sf + r * keep) >> 8
+    g = (grey * sf + g * keep) >> 8
+    b = (grey * sf + b * keep) >> 8
+  }
+  if (bright !== 0) {
+    const m = 256 + bright
+    r = Math.min(65535, r * m) >> 8
+    g = Math.min(65535, g * m) >> 8
+    b = Math.min(65535, b * m) >> 8
+  }
+  return (r << 16) | (g << 8) | b
+}
 
 export class LocAssets {
   private root: FileSystemDirectoryHandle
@@ -2192,6 +2232,9 @@ export class LocAssets {
   private blendTypes = new Map<number, number>()
   /** overbright multiplier per texture, filled as metas resolve */
   private hdrMults = new Map<number, number>()
+  /** shadowFactor | brightness<<8 per texture (method14282 params), filled as
+   *  metas resolve — the face loop's grey-mix needs them synchronously. */
+  private shadeParams = new Map<number, number>()
   /** Phong exponent per texture (0 = no specular), filled as metas resolve */
   private specExponents = new Map<number, number>()
   // single-flight directory resolution: cache the PROMISE, not the result —
@@ -2242,6 +2285,12 @@ export class LocAssets {
   /** Cached HDR overbright multiplier (1 = not HDR). Sync — needs primeBlendTypes. */
   hdrMultiplierOf(id: number): number {
     return this.hdrMults.get(id) ?? 1
+  }
+
+  /** Cached `shadowFactor | brightness<<8` (method14282's texture params).
+   *  Sync — needs primeBlendTypes. 0 = no grey-mix, no brightness boost. */
+  shadeParamsOf(id: number): number {
+    return this.shadeParams.get(id) ?? 0
   }
 
   /** Cached specular exponent (0 = the material takes no specular, which is the
@@ -2330,6 +2379,8 @@ export class LocAssets {
           let effectParam1 = 0
           let isHdr = false
           let hdrMultiplier = 1
+          let shadowFactor = 0
+          let texBrightness = 0
           try {
             const defsDir = await this.textureDefsDir()
             if (!defsDir) throw new Error('no texture_definitions')
@@ -2343,6 +2394,8 @@ export class LocAssets {
             effectId = def.effectId ?? 0
             effectParam1 = def.effectParam1 ?? 0
             isHdr = def.hdr === true
+            shadowFactor = (def.alpha ?? 0) & 0xff
+            texBrightness = (def.brightness ?? 0) & 0xff
           } catch { /* definition missing — treat as self-coloured */ }
           if (isHdr) {
             // The overbright factor lives in the material op graph, not the
@@ -2397,10 +2450,11 @@ export class LocAssets {
           } catch { /* keep default */ }
           const meta: MaterialMeta = {
             detailsOnly, avgLuma: Math.max(32, avgLuma), avgRgb, speedU, speedV, colorHsl,
-            effectCombiner, effectId, effectParam1, hdrMultiplier,
+            effectCombiner, effectId, effectParam1, hdrMultiplier, shadowFactor, texBrightness,
           }
           this.blendTypes.set(id, effectCombiner)
           this.hdrMults.set(id, hdrMultiplier)
+          this.shadeParams.set(id, shadowFactor | (texBrightness << 8))
           this.specExponents.set(id, specularExponent(meta))
           return meta
         } catch {
@@ -2624,7 +2678,7 @@ class ModelAccumulator {
     model: ModelData,
     matrix: THREE.Matrix4,
     owner = -1,
-    light?: { sun?: ModelSun; points?: PointLight[] },
+    light?: { sun?: ModelSun; points?: PointLight[]; ambient?: number; contrast?: number },
     blendTypeOf?: (texId: number) => number,
     hdrOf?: (texId: number) => number,
     // Transparent faces go here instead of the shared buckets — the client
@@ -2634,6 +2688,9 @@ class ModelAccumulator {
     // Phong exponent per texture (0 = none). Only buckets whose material takes
     // a specular carry vertex normals, so a scene with none costs nothing.
     specularOf?: (texId: number) => number,
+    // shadowFactor | brightness<<8 per texture (LocAssets.shadeParamsOf) — the
+    // client's textured-face grey-mix. See texturedBaseRgb.
+    shadeOf?: (texId: number) => number,
   ) {
     const upscale = modelUpscale(model)
     // A mirrored placement reflects the mesh, which flips its triangle winding
@@ -2656,7 +2713,19 @@ class ModelAccumulator {
     // Model-local normals, only when some texture on this model is specular.
     const wantsNormals = specularOf !== undefined && modelHasSpecular(model, specularOf)
     const localNormals = wantsNormals ? new Float32Array(model.faceCount * 9) : undefined
-    const lit = computeModelLitRgb(model, normalMat, light?.sun, points, localNormals)
+    const ambient = light?.ambient ?? AMBIENT_DEFAULT
+    const contrast = light?.contrast ?? CONTRAST_DEFAULT
+    const texArr = model.faceTextures
+    const baseOf = shadeOf && texArr
+      ? (f: number) => {
+          const t = texArr[f]
+          if (t < 0) return null
+          const shade = shadeOf(t)
+          if (shade === 0) return null
+          return texturedBaseRgb(hslToRgb(adjustLuminance(model.faceColor[f] & 0xffff, ambient)), shade, ambient)
+        }
+      : undefined
+    const lit = computeModelLitRgb(model, normalMat, light?.sun, points, localNormals, baseOf, ambient, contrast)
     if (hdrOf) unlitHdrFaces(model, lit, hdrOf)
     for (let f = 0; f < model.faceCount; f++) {
       if (model.faceAlpha[f] === -1) continue
@@ -2778,6 +2847,9 @@ export type AnimatedLoc = {
   owner: LocRef
   /** the region point lights this placement is lit by (already picked, ≤4) */
   points?: PointLight[]
+  /** the def's TOTAL ambient / contrast (64+ambient, 850+contrast·5) */
+  ambient: number
+  contrast: number
 }
 
 /** A built animatable loc: its three.js mesh (geometry in model-local space —
@@ -2802,6 +2874,9 @@ export async function buildAnimatedLocMesh(
   sun?: ModelSun,
   owner?: LocRef,
   pointLights?: PointLight[],
+  /** the def's TOTAL ambient / contrast — see AnimatedLoc */
+  ambient = AMBIENT_DEFAULT,
+  contrast = CONTRAST_DEFAULT,
 ): Promise<AnimatedLocMesh | null> {
   const upscale = modelUpscale(model)
   const uvWriter = makeUVWriter(model)
@@ -2813,9 +2888,20 @@ export async function buildAnimatedLocMesh(
   // model space with the placement on mesh.matrix, so the shader's
   // mat3(modelMatrix) applies the rotation itself.
   const localNormals = modelHasSpecular(model, specularOf) ? new Float32Array(model.faceCount * 9) : undefined
+  const texFaceArr = model.faceTextures
   const lit = computeModelLitRgb(model, normalMat, sun,
     pointLights?.length ? { lights: pointLights, matrix: matrix.elements, upscale } : undefined,
-    localNormals)
+    localNormals,
+    texFaceArr
+      ? (f) => {
+          const t = texFaceArr[f]
+          if (t < 0) return null
+          const shade = assets.shadeParamsOf(t)
+          if (shade === 0) return null
+          return texturedBaseRgb(hslToRgb(adjustLuminance(model.faceColor[f] & 0xffff, ambient)), shade, ambient)
+        }
+      : undefined,
+    ambient, contrast)
   unlitHdrFaces(model, lit, (t) => assets.hdrMultiplierOf(t))
 
   // bucket faces by texture id (skip fully-transparent / degenerate faces)
@@ -3871,12 +3957,16 @@ export async function buildLocsMesh(
             animationId: def.animations![0],
             owner: { objectId, shape, rotation, x, y, plane: decodedPlane },
             points,
+            ambient: 64 + (def.ambient ?? 0),
+            contrast: 850 + (def.contrast ?? 0) * 5,
           })
         } else {
           // resolve this model's texture blendTypes so addModel can split
           // opaque vs transparent faces synchronously
           await assets.primeBlendTypes(m)
-          acc.addModel(m, matrix, locRefs.length, points ? { points } : undefined, (t) => assets.blendTypeOf(t), (t) => assets.hdrMultiplierOf(t), locTrans, (t) => assets.specularExponentOf(t))
+          acc.addModel(m, matrix, locRefs.length,
+            { points, ambient: 64 + (def.ambient ?? 0), contrast: 850 + (def.contrast ?? 0) * 5 },
+            (t) => assets.blendTypeOf(t), (t) => assets.hdrMultiplierOf(t), locTrans, (t) => assets.specularExponentOf(t), (t) => assets.shadeParamsOf(t))
         }
       }
     }

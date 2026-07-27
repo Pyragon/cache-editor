@@ -79,8 +79,18 @@ function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
 }
 
-/** ModelGL.adjustLuminance — ambient-scale a HSL16's 7-bit lightness (2..126). */
-function adjustLuminance(hsl: number, factor: number): number {
+/** The client's default model ambient — `64 + def.ambient` at def.ambient 0.
+ *  64/128 halves the lightness. */
+export const AMBIENT_DEFAULT = 64
+
+/** The client's default model contrast — `850 + def.contrast·5` at 0. The
+ *  directional light scales by `768/contrast`, so the default softens the sun
+ *  terms to ×0.9035 and per-def contrast softens them further. */
+export const CONTRAST_DEFAULT = 850
+
+/** ModelGL.adjustLuminance — ambient-scale a HSL16's 7-bit lightness (2..126).
+ *  Identical to the DX path's `MeshRasterizer_Sub3.method14290`. */
+export function adjustLuminance(hsl: number, factor: number): number {
   let l = ((hsl & 0x7f) * factor) >> 7
   if (l < 2) l = 2
   else if (l > 126) l = 126
@@ -164,22 +174,39 @@ export function computeLitFaceRgb(
   return out
 }
 
-// --- Client "Model" shader lighting (dumped GLSL, shaders index 31, 1_31.vert) -
-// Per-VERTEX (Gouraud) half-Lambert, in WORLD space:
-//   hl       = clamp(dot(worldNormal, sunDirection)*0.5 + 0.5, 0, 1)
-//   lighting = hl*(sunColour + ambientColour*0.5) + ambientColour*0.5
+// --- Client "Model" shader lighting (dumped GLSL, shaders index 31, 1_12.vert) -
+// Per-VERTEX (Gouraud), in WORLD space, TWO-SIDED:
+//   NdotL    = dot(worldNormal, sunDirection)
+//   lighting = ambient + max(0,NdotL)·sunColour − max(0,−NdotL)·antiSunColour
 //   colour   = faceColour.rgb * lighting
+// The anti-sun term DARKENS faces turned away from the sun — the client uploads
+// AntiSunColour negated (MeshRasterizer_Sub3:3047) and HardwareGround.java:964
+// runs the same formula on the CPU, confirming the sign.
+//
+// NOTE the shader this bake used to copy — 1_31.vert's half-Lambert
+// `hl·(sun + amb·0.5) + amb·0.5` — is a DIFFERENT shader family (lowercase
+// uniforms; not the one MeshRasterizer_Sub3 feeds). Baking that formula with
+// made-up constants is what had every loc ~2.2x darker than the client
+// (tree canopy lum 37 vs 80 on the 2026-07-26 screenshot pair).
+//
 // worldNormal = the loc's normal matrix × the RS-local vertex normal (RS→GL flips
 // y,z, so we negate those before the transform). sunDirection is in GL space.
 export type ModelSun = {
   dir: [number, number, number]
   sunColour: [number, number, number]
   ambientColour: [number, number, number]
+  /** the back term, SUBTRACTED where NdotL < 0 */
+  antiSunColour: [number, number, number]
 }
+// The client's lighting-detail-LOW values, which are also what a default
+// region gets with the preference on: Class239:142 —
+//   renderer.m(0xffffff /*white*/, 0.69921875, 1.2, -200, -240, -200)
+//   renderer.IA((0.7 + brightness·0.1) · 1.1523438)   // brightness pref default 3 → ×1.0
 export const DEFAULT_MODEL_SUN: ModelSun = {
   dir: [-0.5, 0.6, 0.5], // sun (−200,−240,−200) → GL (x,−y,−z), normalised in-fn
-  sunColour: [0.7, 0.7, 0.7], // white · sunLight(0.699)
-  ambientColour: [0.6, 0.6, 0.6],
+  sunColour: [0.69921875, 0.69921875, 0.69921875],
+  ambientColour: [1.1523438, 1.1523438, 1.1523438],
+  antiSunColour: [1.2, 1.2, 1.2],
 }
 
 /**
@@ -225,11 +252,25 @@ export function computeModelLitRgb(
    *  placements in and applies `normalMat` itself, while an animated loc keeps
    *  its placement on the mesh transform and lets the shader do it. */
   outNormals?: Float32Array,
+  /** Per-face base-colour override (packed 0xRRGGBB), or undefined/null to use
+   *  the palette colour of `faceColor[f]`. Carries the client's textured-face
+   *  grey-mix — see the loop below. */
+  baseOf?: (f: number) => number | null,
+  /** The def's TOTAL ambient (`64 + def.ambient`) — scales the base colour's
+   *  lightness before the palette lookup (method14290). */
+  ambient = AMBIENT_DEFAULT,
+  /** The def's TOTAL contrast (`850 + def.contrast·5`) — divides into the
+   *  directional terms as `768/contrast` (MeshRasterizer_Sub3:3254). Higher
+   *  contrast = FLATTER lighting, counter to the name. */
+  contrast = CONTRAST_DEFAULT,
 ): Float32Array {
   const sl = Math.hypot(sun.dir[0], sun.dir[1], sun.dir[2]) || 1
   const sdx = sun.dir[0] / sl, sdy = sun.dir[1] / sl, sdz = sun.dir[2] / sl
   const [sr, sg, sb] = sun.sunColour
   const [ar, ag, ab] = sun.ambientColour
+  const [xr, xg, xb] = sun.antiSunColour
+  // MeshRasterizer_Sub3:3254: both directional terms scale by 768/contrast
+  const contrastScale = 768 / (contrast > 0 ? contrast : CONTRAST_DEFAULT)
   const m = normalMat
 
   const { faceCount, vertexCount, vertexX, vertexY, vertexZ, triangleX, triangleY, triangleZ, faceColor } = model
@@ -238,6 +279,9 @@ export function computeModelLitRgb(
   const nsx = new Float64Array(vertexCount)
   const nsy = new Float64Array(vertexCount)
   const nsz = new Float64Array(vertexCount)
+  // how many faces contributed — the client divides the summed normal by the
+  // COUNT (magnitude byte), not by its length. See the cosine note below.
+  const nsn = new Int32Array(vertexCount)
   for (let f = 0; f < faceCount; f++) {
     const a = triangleX[f], b = triangleY[f], c = triangleZ[f]
     if (a < 0 || b < 0 || c < 0 || a >= vertexCount || b >= vertexCount || c >= vertexCount) continue
@@ -249,6 +293,7 @@ export function computeModelLitRgb(
     nsx[a] += dx; nsy[a] += dy; nsz[a] += dz
     nsx[b] += dx; nsy[b] += dy; nsz[b] += dz
     nsx[c] += dx; nsy[c] += dy; nsz[c] += dz
+    nsn[a]++; nsn[b]++; nsn[c]++
   }
 
   // Point lights are evaluated against the vertex's SCENE position. The client
@@ -278,7 +323,20 @@ export function computeModelLitRgb(
   const out = new Float32Array(faceCount * 9)
   const idx = [0, 0, 0]
   for (let f = 0; f < faceCount; f++) {
-    const rgb = hslToRgb(faceColor[f] & 0xffff)
+    // The client's vertex colour is the palette colour of the AMBIENT-SCALED
+    // HSL — MeshRasterizer_Sub3.method14290 halves the lightness at the
+    // default ambient of 64 (clamp 2..126) before the palette lookup, and the
+    // shader's diffuse (ambient 1.152 + sun terms) multiplies that. Baking the
+    // full-lightness palette here left every UNTEXTURED loc ~2x too bright
+    // once the real sun terms landed — the shoreline-rocks symptom; textured
+    // faces hid it because their grey-mix (baseOf below) already sits at the
+    // ambient-scaled grey of 128.
+    //
+    // `baseOf` overrides the palette colour per face — the textured-face
+    // grey-mix (client MeshRasterizer_Sub3.method14282), where a texture's
+    // shadowFactor replaces the face colour with ambient-grey so self-coloured
+    // textures (leaf sprites) aren't tinted by their own colour twice.
+    const rgb = baseOf?.(f) ?? hslToRgb(adjustLuminance(faceColor[f] & 0xffff, ambient))
     const baseR = ((rgb >> 16) & 0xff) / 255
     const baseG = ((rgb >> 8) & 0xff) / 255
     const baseB = (rgb & 0xff) / 255
@@ -292,32 +350,44 @@ export function computeModelLitRgb(
         const nb = (f * 3 + k) * 3
         outNormals[nb] = lx / ll; outNormals[nb + 1] = ly / ll; outNormals[nb + 2] = lz / ll
       }
-      let wx = m[0] * lx + m[3] * ly + m[6] * lz
-      let wy = m[1] * lx + m[4] * ly + m[7] * lz
-      let wz = m[2] * lx + m[5] * ly + m[8] * lz
-      const wl = Math.hypot(wx, wy, wz) || 1
-      wx /= wl; wy /= wl; wz /= wl
-      // NOTE: not the client's formula. `glsl/1_12.vert` is
-      //   AmbientColour + max(0,min(1,N·L))·SunColour + max(0,min(1,-N·L))·AntiSunColour
-      // (AntiSunColour uploaded negated, so the back term darkens). Porting it
-      // verbatim was tried on 2026-07-25 and reverted — see the TODO note; it
-      // needs tone mapping first, because the client's real environment values
-      // run well past 1.0 and we clamp instead of compressing.
-      const hl = Math.min(1, Math.max(0, (sdx * wx + sdy * wy + sdz * wz) * 0.5 + 0.5))
-      let dr = hl * (sr + ar * 0.5) + ar * 0.5
-      let dg = hl * (sg + ag * 0.5) + ag * 0.5
-      let db = hl * (sb + ab * 0.5) + ab * 0.5
+      const wx = m[0] * lx + m[3] * ly + m[6] * lz
+      const wy = m[1] * lx + m[4] * ly + m[7] * lz
+      const wz = m[2] * lx + m[5] * ly + m[8] * lz
+      // The client's STATIC-loc lighting is a CPU bake, not the 1_12.vert
+      // uniforms path (MeshRasterizer_Sub3:3254 — static geometry uploads with
+      // ShaderMode 3, DiffuseColour = 1):
+      //   cos   = dot(sunDir, summedNormal) / count        ← AVERAGE normal
+      //   light = ambient + cos · (cos<0 ? anti : sun) · 768/contrast
+      //   out   = clamp(base · sunColour · light)
+      // Two things matter here beyond the obvious:
+      //  - The divide is by the face COUNT (the magnitude byte), NOT the
+      //    summed normal's length. Where faces disagree (foliage, anything
+      //    curved) |average| < 1, which SOFTENS the directional response —
+      //    renormalising instead over-lights convex silhouettes.
+      //  - 768/contrast scales both directional terms: 0.9035 at the default
+      //    850, less for every def that carries contrast (the fern's 925 →
+      //    0.83). The name is backwards — more contrast = flatter.
+      // The placement matrix is rotation ± mirror (orthonormal), so the
+      // transform preserves the average's length and the division below stays
+      // valid in world space.
+      const cnt = nsn[v] || 1
+      const cos = (sdx * wx + sdy * wy + sdz * wz) / cnt
+      const t = cos * contrastScale
+      let dr = ar + (cos < 0 ? xr : sr) * t
+      let dg = ag + (cos < 0 ? xg : sg) * t
+      let db = ab + (cos < 0 ? xb : sb) * t
       // glsl/1_12.vert: attenuation is radius²/dist² gated by N·L, summed into
       // the SAME diffuse term as the sun before the base colour multiplies it.
       if (nLights > 0 && psx && psy && psz) {
         const px = psx[v], py = psy[v], pz = psz[v]
+        const wl = Math.hypot(wx, wy, wz) || 1
         for (let li = 0; li < nLights; li++) {
           const L = lights![li]
           const vx2 = L.x - px, vy2 = L.y - py, vz2 = L.z - pz
           const d2 = vx2 * vx2 + vy2 * vy2 + vz2 * vz2
           if (d2 <= 0) continue
           const inv = 1 / Math.sqrt(d2)
-          const ndotl = Math.min(1, Math.max(0, (wx * vx2 + wy * vy2 + wz * vz2) * inv))
+          const ndotl = Math.min(1, Math.max(0, ((wx * vx2 + wy * vy2 + wz * vz2) / wl) * inv))
           if (ndotl <= 0) continue
           const it = (L.radiusSq / d2) * ndotl
           dr += L.r * it
@@ -326,9 +396,10 @@ export function computeModelLitRgb(
         }
       }
       const base = (f * 3 + k) * 3
-      out[base] = srgbToLinear(Math.min(1, baseR * dr))
-      out[base + 1] = srgbToLinear(Math.min(1, baseG * dg))
-      out[base + 2] = srgbToLinear(Math.min(1, baseB * db))
+      // low clamp too: a fully back-facing vertex is ambient − anti = −0.05
+      out[base] = srgbToLinear(Math.min(1, Math.max(0, baseR * dr)))
+      out[base + 1] = srgbToLinear(Math.min(1, Math.max(0, baseG * dg)))
+      out[base + 2] = srgbToLinear(Math.min(1, Math.max(0, baseB * db)))
     }
   }
   return out

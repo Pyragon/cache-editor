@@ -2102,7 +2102,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             // Animated locs (waving flags etc.): a separate posable mesh each,
             // placed with the region offset baked into the mesh transform.
             for (const al of built.animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points, al.ambient, al.contrast)
               if (disposed) return
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
@@ -2230,7 +2230,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             if (mesh) parts.push(mesh)
             for (const lm of transparentLocs) parts.push(lm)
             for (const al of animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points, al.ambient, al.contrast)
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
               anim.mesh.matrix.copy(al.matrix)
@@ -2533,7 +2533,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                   // no loaded animator means nothing in the scene uses this
                   // animation yet — the rebuild reads and preloads it
                   if (!animator) return bail(`object ${entry[0]} animation ${al.animationId} is not loaded yet`)
-                  const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points)
+                  const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points, al.ambient, al.contrast)
                   if (disposed) return false
                   if (!anim) continue
                   anim.mesh.matrixAutoUpdate = false
@@ -2693,7 +2693,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               taggedRef.current.push({ obj: lm, neighbor: false, kind: 'loc' })
             }
             for (const al of built.animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points, al.ambient, al.contrast)
               if (disposed) return
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
