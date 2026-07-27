@@ -613,6 +613,25 @@
   border-color: var(--electric-blue-bright, #2f8fff);
 }
 
+/* filter box + sort picker on one row; the filter takes the slack */
+.mapscene-loclist-tools {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mapscene-loclist-tools .mapscene-loclist-filter {
+  flex: 1;
+  min-width: 0;
+}
+
+/* visuals come from the shared .item-stackable-select; only the layout in this
+   row is local (the filter takes the slack, the picker keeps its content width) */
+.mapscene-loclist-sort {
+  flex-shrink: 0;
+  max-width: 42%;
+}
+
 .mapscene-loclist-scroll {
   height: 340px;
   overflow-y: auto;
@@ -726,6 +745,33 @@
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
   opacity: 0.75;
+}
+
+/* Map icon / map sprite thumbnails on a list row. Sprites are tiny pixel art
+   (the client stamps them 1:1 on the minimap), so scale them nearest-neighbour
+   rather than letting the browser smudge them. */
+.mapscene-loclist-thumbs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.mapscene-loclist-thumb {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  flex-shrink: 0;
+}
+
+span.mapscene-loclist-thumb.empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  line-height: 1;
+  opacity: 0.4;
 }
 
 .mapscene-info-title {

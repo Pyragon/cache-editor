@@ -2843,6 +2843,52 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     return () => { cancelled = true }
   }, [objCats])
 
+  // Row thumbnails for the View-tab lists: mapCategoryId → icon URL and
+  // mapSpriteId → sprite URL. Both go through the same ref-cached loaders the
+  // Edit panel uses, so a list that's already been opened costs no extra reads.
+  //
+  // Deliberately NOT gated on `displayedOnMinimap` the way `areaBitmaps` above
+  // is: that gate is correct for the minimap DRAW, but these lists exist to
+  // answer "which object carries this icon?", and an area that never shows on
+  // the minimap still has one.
+  const [iconUrls, setIconUrls] = useState<Map<number, string>>(new Map())
+  useEffect(() => {
+    const cats = [...new Set(objCats.values())]
+    if (cats.length === 0) { setIconUrls(new Map()); return }
+    let cancelled = false
+    void (async () => {
+      const out = new Map<number, string>()
+      await Promise.all(cats.map(async (cat) => {
+        const info = await loadAreaInfoRef.current(cat)
+        if (info?.spriteUrl) out.set(cat, info.spriteUrl)
+      }))
+      if (!cancelled) setIconUrls(out)
+    })()
+    return () => { cancelled = true }
+  }, [objCats])
+
+  const [spriteUrls, setSpriteUrls] = useState<Map<number, string>>(new Map())
+  useEffect(() => {
+    const ids = [...new Set(objSprites.values())]
+    if (ids.length === 0) { setSpriteUrls(new Map()); return }
+    let cancelled = false
+    void (async () => {
+      const out = new Map<number, string>()
+      await Promise.all(ids.map(async (id) => {
+        const info = await loadMapSpriteInfoRef.current(id)
+        if (info?.url) out.set(id, info.url)
+      }))
+      if (!cancelled) setSpriteUrls(out)
+    })()
+    return () => { cancelled = true }
+  }, [objSprites])
+
+  // one object so the lists' sort memos have a single stable dependency
+  const mapSymbols = useMemo<MapSymbols>(
+    () => ({ cats: objCats, sprites: objSprites, iconUrls, spriteUrls }),
+    [objCats, objSprites, iconUrls, spriteUrls],
+  )
+
   // minimap: client-style — the mosaic's blurred+lit ground colours (from the
   // scene build), wall lines, mapscene sprites, and map function icons.
   useEffect(() => {
@@ -3305,6 +3351,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           <LocList
             entries={listEntries}
             names={locNames}
+            symbols={mapSymbols}
             regionX={data.def.regionX}
             regionY={data.def.regionY}
             selectedIndex={selection?.kind === 'loc' && selection.inCenter ? selection.index : -1}
@@ -3324,6 +3371,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           <MarkerList
             markers={sceneMarkers}
             names={locNames}
+            symbols={mapSymbols}
             regionX={data.def.regionX}
             regionY={data.def.regionY}
             selectedWorld={selection?.kind === 'marker' ? { x: selection.worldX, y: selection.worldY } : null}
@@ -3909,10 +3957,97 @@ function SectionHead({ open, onToggle, children }: {
   )
 }
 
-// All placed objects in the centre region: filterable, virtualized (regions
-// carry up to ~2000 placements), row click selects + flies the camera there.
-function LocList({ entries, names, regionX, regionY, selectedIndex, open, onToggle, onPick }: {
+/** The per-object symbol lookups the View-tab lists share: objectId → the def's
+ *  `mapCategoryId`/`mapSpriteId` (only ever populated when >= 0), and those ids
+ *  resolved to thumbnail URLs. */
+export type MapSymbols = {
+  cats: Map<number, number>
+  sprites: Map<number, number>
+  iconUrls: Map<number, string>
+  spriteUrls: Map<number, string>
+}
+
+/** A row's map icon (the areas record's `defaultIconArchive`) and/or its map
+ *  sprite (the map_sprites record's `spriteId`). Object URLs are owned by the
+ *  parent's caches, so this never loads anything itself — an id with no
+ *  resolvable sprite still gets a placeholder, since "this object carries a
+ *  category id whose area has no icon" is exactly what you want to see when
+ *  hunting for which object holds a symbol. */
+function MapThumbs({ objectId, symbols }: { objectId: number; symbols: MapSymbols }) {
+  const cat = symbols.cats.get(objectId)
+  const spr = symbols.sprites.get(objectId)
+  if (cat === undefined && spr === undefined) return null
+  const iconUrl = cat !== undefined ? symbols.iconUrls.get(cat) : undefined
+  const spriteUrl = spr !== undefined ? symbols.spriteUrls.get(spr) : undefined
+  return (
+    <span className="mapscene-loclist-thumbs">
+      {cat !== undefined && (iconUrl
+        ? <img className="mapscene-loclist-thumb" src={iconUrl} alt="" title={`map icon — area ${cat}`} />
+        : <span className="mapscene-loclist-thumb empty" title={`map icon — area ${cat}, no icon sprite`}>◆</span>)}
+      {spr !== undefined && (spriteUrl
+        ? <img className="mapscene-loclist-thumb" src={spriteUrl} alt="" title={`map sprite ${spr}`} />
+        : <span className="mapscene-loclist-thumb empty" title={`map sprite ${spr}, no sprite`}>▪</span>)}
+    </span>
+  )
+}
+
+type ListSort = 'order' | 'name' | 'id' | 'pos' | 'icon' | 'sprite'
+
+const LOC_SORTS: [ListSort, string][] = [
+  ['order', 'Placement order'],
+  ['name', 'Name'],
+  ['id', 'Object id'],
+  ['pos', 'Position'],
+  ['icon', 'Map icon first'],
+  ['sprite', 'Map sprite first'],
+]
+
+const MARKER_SORTS: [ListSort, string][] = [
+  ['order', 'Scene order'],
+  ['name', 'Kind'],
+  ['id', 'Object id'],
+  ['pos', 'Position'],
+  ['icon', 'Map icon first'],
+  ['sprite', 'Map sprite first'],
+]
+
+/** Rows carrying the symbol sort ahead of those without, then by the symbol's
+ *  own id. `Array.sort` is stable, so ties keep the list's natural order. */
+function bySymbol<T>(m: Map<number, number>, idOf: (row: T) => number): (a: T, b: T) => number {
+  return (a, b) => {
+    const ia = idOf(a)
+    const ib = idOf(b)
+    const va = m.get(ia) ?? -1
+    const vb = m.get(ib) ?? -1
+    if ((va >= 0) !== (vb >= 0)) return va >= 0 ? -1 : 1
+    return va - vb || ia - ib
+  }
+}
+
+/** Compact sort picker; sits beside a list's filter box. */
+function SortSelect({ value, onChange, options }: {
+  value: ListSort
+  onChange: (v: ListSort) => void
+  options: [ListSort, string][]
+}) {
+  return (
+    <select
+      className="item-stackable-select mapscene-loclist-sort"
+      value={value}
+      onChange={(e) => onChange(e.target.value as ListSort)}
+      title="Sort rows"
+    >
+      {options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+    </select>
+  )
+}
+
+// All placed objects in the centre region: filterable, sortable, virtualized
+// (regions carry up to ~2000 placements), row click selects + flies the camera
+// there.
+function LocList({ entries, names, symbols, regionX, regionY, selectedIndex, open, onToggle, onPick }: {
   entries: LocEntry[]
+  symbols: MapSymbols
   names: Map<number, string>
   regionX: number
   regionY: number
@@ -3922,20 +4057,30 @@ function LocList({ entries, names, regionX, regionY, selectedIndex, open, onTogg
   onPick: (entry: LocEntry, index: number) => void
 }) {
   const [filter, setFilter] = useState('')
+  const [sort, setSort] = useState<ListSort>('order')
   const scrollRef = useRef<HTMLDivElement>(null)
   // placement x/y are region-local; the list shows absolute world tile coords.
   const worldX = (e: LocEntry) => regionX * 64 + e[3]
   const worldY = (e: LocEntry) => regionY * 64 + e[4]
 
   const filtered = useMemo(() => {
-    const rows = entries.map((e, i) => ({ e, i }))
+    const all = entries.map((e, i) => ({ e, i }))
     const q = filter.trim().toLowerCase()
-    if (!q) return rows
-    return rows.filter(({ e }) =>
+    const rows = !q ? all : all.filter(({ e }) =>
       String(e[0]).includes(q)
       || (names.get(e[0])?.toLowerCase().includes(q) ?? false)
       || `${regionX * 64 + e[3]},${regionY * 64 + e[4]}`.includes(q))
-  }, [entries, names, filter, regionX, regionY])
+    // rows keep their original index `i`, so sorting never disturbs selection
+    if (sort === 'order') return rows
+    const objId = (r: { e: LocEntry }) => r.e[0]
+    const sorted = [...rows]
+    if (sort === 'name') sorted.sort((a, b) => (names.get(a.e[0]) ?? '').localeCompare(names.get(b.e[0]) ?? '') || a.e[0] - b.e[0])
+    else if (sort === 'id') sorted.sort((a, b) => a.e[0] - b.e[0])
+    else if (sort === 'pos') sorted.sort((a, b) => a.e[4] - b.e[4] || a.e[3] - b.e[3])
+    else if (sort === 'icon') sorted.sort(bySymbol(symbols.cats, objId))
+    else sorted.sort(bySymbol(symbols.sprites, objId))
+    return sorted
+  }, [entries, names, filter, regionX, regionY, sort, symbols])
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -3967,12 +4112,15 @@ function LocList({ entries, names, regionX, regionY, selectedIndex, open, onTogg
           <span className="mapscene-loclist-region"> · region {regionX}, {regionY}</span>
         </SectionHead>
         {open && (
-          <input
-            className="mapscene-loclist-filter"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="filter by name, id or world x,y"
-          />
+          <div className="mapscene-loclist-tools">
+            <input
+              className="mapscene-loclist-filter"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="filter by name, id or world x,y"
+            />
+            <SortSelect value={sort} onChange={setSort} options={LOC_SORTS} />
+          </div>
         )}
       </div>
       {open && <div ref={scrollRef} className="mapscene-loclist-scroll">
@@ -3990,6 +4138,7 @@ function LocList({ entries, names, regionX, regionY, selectedIndex, open, onTogg
               >
                 <span className="mapscene-loclist-dot" style={{ background: SLOT_COLORS[OBJECT_SLOTS[e[1]] ?? 2] }} />
                 <span className="mapscene-loclist-name">{names.get(e[0]) ?? 'Object'} ({e[0]})</span>
+                <MapThumbs objectId={e[0]} symbols={symbols} />
                 <span className="mapscene-loclist-pos">{worldX(e)}, {worldY(e)}, {e[5]}</span>
               </button>
             )
@@ -4069,9 +4218,10 @@ function LightList({ lights, regionX, regionY, selectedIndex, open, onToggle, on
  *  map-sprite anchors and barriers that render as floating diamonds. Same
  *  click-to-select as the object list; the diamonds are small targets in a busy
  *  scene, so the list is usually the easier way in. */
-function MarkerList({ markers, names, regionX, regionY, selectedWorld, open, onToggle, onPick }: {
+function MarkerList({ markers, names, symbols, regionX, regionY, selectedWorld, open, onToggle, onPick }: {
   markers: MarkerInfo[]
   names: Map<number, string>
+  symbols: MapSymbols
   regionX: number
   regionY: number
   /** world tile of the selected marker — the same object id can be placed many
@@ -4082,16 +4232,25 @@ function MarkerList({ markers, names, regionX, regionY, selectedWorld, open, onT
   onPick: (marker: MarkerInfo) => void
 }) {
   const [filter, setFilter] = useState('')
+  const [sort, setSort] = useState<ListSort>('order')
   const rows = useMemo(() => {
     const q = filter.trim().toLowerCase()
-    if (!q) return markers
-    return markers.filter((m) =>
+    const matched = !q ? markers : markers.filter((m) =>
       String(m.objectId).includes(q)
       || m.kind.includes(q)
       || MARKER_TITLES[m.kind].toLowerCase().includes(q)
       || (names.get(m.objectId)?.toLowerCase().includes(q) ?? false)
       || `${regionX * 64 + m.tileX},${regionY * 64 + m.tileY}`.includes(q))
-  }, [markers, names, filter, regionX, regionY])
+    if (sort === 'order') return matched
+    const objId = (m: MarkerInfo) => m.objectId
+    const sorted = [...matched]
+    if (sort === 'name') sorted.sort((a, b) => MARKER_TITLES[a.kind].localeCompare(MARKER_TITLES[b.kind]) || a.objectId - b.objectId)
+    else if (sort === 'id') sorted.sort((a, b) => a.objectId - b.objectId)
+    else if (sort === 'pos') sorted.sort((a, b) => a.tileY - b.tileY || a.tileX - b.tileX)
+    else if (sort === 'icon') sorted.sort(bySymbol(symbols.cats, objId))
+    else sorted.sort(bySymbol(symbols.sprites, objId))
+    return sorted
+  }, [markers, names, filter, regionX, regionY, sort, symbols])
 
   return (
     <div className="mapscene-loclist mapscene-lightlist">
@@ -4100,12 +4259,15 @@ function MarkerList({ markers, names, regionX, regionY, selectedWorld, open, onT
           Markers — {rows.length}{filter ? ` of ${markers.length}` : ''}
         </SectionHead>
         {open && markers.length > 8 && (
-          <input
-            className="mapscene-loclist-filter"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="filter by kind, object id or tile x,y"
-          />
+          <div className="mapscene-loclist-tools">
+            <input
+              className="mapscene-loclist-filter"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="filter by kind, object id or tile x,y"
+            />
+            <SortSelect value={sort} onChange={setSort} options={MARKER_SORTS} />
+          </div>
         )}
       </div>
       {open && <div className="mapscene-loclist-scroll mapscene-lightlist-scroll">
@@ -4122,6 +4284,7 @@ function MarkerList({ markers, names, regionX, regionY, selectedWorld, open, onT
             >
               <span className="mapscene-loclist-dot" style={{ background: `#${MARKER_COLORS[m.kind].toString(16).padStart(6, '0')}` }} />
               <span className="mapscene-loclist-name">{MARKER_TITLES[m.kind]} ({m.objectId})</span>
+              <MapThumbs objectId={m.objectId} symbols={symbols} />
               <span className="mapscene-loclist-pos">{wx}, {wy}, {m.plane}</span>
             </button>
           )
