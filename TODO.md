@@ -33,18 +33,14 @@ Open work only — completed passes live in git history and README.
 
 ## Maps
 
-### TEST: the object/marker editing pass (2026-07-25/26) — none of it has run in a browser
+### TEST: the object/marker editing pass (2026-07-25/26)
 
-Typecheck, lint and `npm run build` pass; the File System Access API means none
-of it has been exercised against a real cache. In rough risk order:
+Typecheck, lint and `npm run build` pass. **The def save path is verified
+(2026-07-26):** Cody edited an object's ambient sound id, confirmed the change on
+disk, repacked, and confirmed it in-game in both directions — removing the sound
+from one object and applying it to another. The rest is still untested against a
+real cache, in rough risk order:
 
-- **The def save path has never written a file.** `MapViewer.handleSave` now has
-  a third target — `objects/<id>.json` via `resolveEntryHandle` +
-  `writeJsonItem`. Edit a marker's sound id, Save, and diff the file on disk:
-  the whole record must come back with only that field changed (unmodelled
-  fields round-trip because the draft is the parsed file). Then re-open the
-  region and confirm the edit is still there, and repack + boot the client to be
-  sure the JSON is still loadable.
 - **Discard / undo / region-change with def edits pending.** `objectDefs` joined
   the Snapshot, `applyEdit`, undo/redo and the Discard button. Check: Apply a def
   edit → Discard restores the file values in the panel *and* the scene; Ctrl+Z
