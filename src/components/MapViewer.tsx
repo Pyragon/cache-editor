@@ -69,7 +69,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [plane, setPlane] = useState(0)
-  const [viewMode, setViewMode] = useState<'2d' | '3d'>('3d')
+  const [viewMode, setViewMode] = useState<'2d' | '3d' | 'pov'>('3d')
   const [zoom, setZoom] = useZoom('cache-editor:map-zoom', ZOOM_LEVELS, 8)
   const [selected, setSelected] = useState<SelectedTile | null>(null)
   const [hoverObj, setHoverObj] = useState<{ x: number; y: number; text: string } | null>(null)
@@ -697,6 +697,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
         <div className="map-mode-toggle">
           <button type="button" className={viewMode === '2d' ? 'selected' : ''} onClick={() => setViewMode('2d')}>2D</button>
           <button type="button" className={viewMode === '3d' ? 'selected' : ''} onClick={() => setViewMode('3d')}>3D</button>
+          <button type="button" className={viewMode === 'pov' ? 'selected' : ''} title="First-person walk: click the view to grab the cursor, WASD/arrows to move, mouse to look, Esc to release" onClick={() => setViewMode('pov')}>POV</button>
         </div>
       </div>
 
@@ -761,7 +762,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
         </div>
       )}
 
-      {viewMode === '3d' && sceneData && (
+      {(viewMode === '3d' || viewMode === 'pov') && sceneData && (
         <MapSceneViewer
           data={sceneData}
           focus={sceneFocus}
@@ -772,6 +773,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
           onEdit={(patch) => applyEditRef.current(patch)}
           gfxSlot={gfxSlot}
           onNavigate={onNavigate}
+          pov={viewMode === 'pov'}
         />
       )}
 

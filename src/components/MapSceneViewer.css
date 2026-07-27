@@ -1123,3 +1123,36 @@ span.mapscene-loclist-thumb.empty {
   color: var(--text-dim, #8a90a0);
   line-height: 1.45;
 }
+
+/* POV mode: "click to walk" overlay — informational only, clicks fall through
+   to the canvas underneath, which is what actually grabs the pointer lock */
+.mapscene-pov-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.mapscene-pov-hint-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 22px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(10, 12, 18, 0.78);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+}
+
+.mapscene-pov-hint-inner strong {
+  font-size: 15px;
+}
+
+.mapscene-pov-hint-inner span {
+  font-size: 12px;
+  color: var(--text-dim, #8a90a0);
+}

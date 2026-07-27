@@ -12,7 +12,7 @@ import type { LocEntry, MapData, MapRegionDef, MapTerrain } from '../loaders/map
 import { SIZE, decodeTerrain, decodeUnderwaterTerrain, tileIndex, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS, LOC_TYPE_LABELS } from '../loaders/maps'
 import { rgbToRenderedHex, DEFAULT_MODEL_SUN } from '../loaders/models'
 import { NumberInput } from './defFields'
-import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildChunkGrid, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef } from './mapScene'
+import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildChunkGrid, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef, averageHeight } from './mapScene'
 import { LocAnimator } from './locAnimator'
 import type { AnimationDef } from '../loaders/animations'
 import type { ModelData } from '../loaders/models'
@@ -285,7 +285,7 @@ type StampClipboard = {
   objects: LocEntry[]
 }
 
-export default function MapSceneViewer({ data, focus, objects, terrain, lights, objectDefs, onEdit, gfxSlot, onNavigate }: {
+export default function MapSceneViewer({ data, focus, objects, terrain, lights, objectDefs, onEdit, gfxSlot, onNavigate, pov = false }: {
   data: MapData
   focus?: { x: number; y: number; plane: number } | null
   /** draft of the centre region's placements (edits not yet saved) — kept
@@ -309,6 +309,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   gfxSlot?: HTMLElement | null
   /** jump to another entry's item (the def editor's View links) */
   onNavigate?: (entryName: string, itemId: number) => void
+  /** First-person walk mode: pointer-lock look, WASD/arrow movement, camera at
+   *  eye level following the terrain contour. Editing interactions pause. */
+  pov?: boolean
 }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const minimapRef = useRef<HTMLCanvasElement>(null)
@@ -627,6 +630,31 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // Defaults tuned for perf/clarity: only plane 0, no chunk grid (all
   // still toggleable in the controls).
   const [visiblePlanes, setVisiblePlanes] = useState([true, false, false, false])
+
+  // --- POV (first-person walk) mode ---------------------------------------
+  // Settings persist across sessions; the ref hands the live values to the
+  // render loop without a scene rebuild (the build effect deps stay [data]).
+  const [povSpeed, setPovSpeed] = useState(() => {
+    const v = parseFloat(localStorage.getItem('cache-editor:pov-speed') ?? '')
+    return Number.isFinite(v) ? v : 4
+  })
+  const [povSens, setPovSens] = useState(() => {
+    const v = parseFloat(localStorage.getItem('cache-editor:pov-sens') ?? '')
+    return Number.isFinite(v) ? v : 1
+  })
+  const [povLocked, setPovLocked] = useState(false)
+  // the plane the walker's eye height samples — Ctrl+scroll moves it up/down
+  const [povPlane, setPovPlane] = useState(0)
+  const povRef = useRef({ active: pov, speed: 6, sens: 1, plane: 0 })
+  povRef.current.active = pov
+  povRef.current.speed = povSpeed
+  povRef.current.sens = povSens
+  povRef.current.plane = povPlane
+  // entering POV starts on the lowest plane that's showing
+  useEffect(() => {
+    if (pov) setPovPlane(Math.max(0, visiblePlanes.findIndex(Boolean)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pov])
   const [showLocs, setShowLocs] = useState(true)
   // the patch path attaches meshes without the visibility effect re-running
   // (it keys off `status`, which a patch never changes), so it sets their
@@ -1416,6 +1444,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       suppressClick = false
       bumpActivity()
       if (e.button !== 0) return
+      // POV mode: the press is only ever a lock request (handled on release) —
+      // no eyedropper, marquee, drag-to-move or painting
+      if (povRef.current.active) return
 
       // eyedropper: Alt+click samples instead of acting
       if (e.altKey) {
@@ -1532,6 +1563,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
 
       if (suppressClick) { suppressClick = false; return }
       if (Math.abs(e.clientX - downX) > DRAG_PX || Math.abs(e.clientY - downY) > DRAG_PX) return // drag, not a click
+
+      // POV mode: a click (re)grabs the cursor; Esc is the browser's own exit
+      if (povRef.current.active) {
+        if (document.pointerLockElement !== renderer.domElement) renderer.domElement.requestPointerLock()
+        return
+      }
 
       // armed paste: a click stamps the clipboard at the tile (SW anchor)
       if (pasteArmedRef.current) {
@@ -1669,6 +1706,87 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       lastHoverText = text
       setHoverText(text)
     }
+
+    // --- POV walk mode -----------------------------------------------------
+    // First-person camera: pointer-lock mouse look + WASD/arrow movement, eye
+    // level riding the terrain contour. Lives in the render loop so toggling
+    // the mode never rebuilds the scene; the async build below feeds it the
+    // centre region's computed heights via `povHeights`.
+    const POV_EYE = 788 // eye height above the ground, in 512-per-tile units
+    const POV_STEP = 256 // max ledge the walker steps up onto (half a tile)
+    let povHeights: Int32Array[] | null = null
+    let povWasActive = false
+    let povYaw = 0
+    let povPitch = 0
+    let povLastT = 0
+    let povFeet = 0
+    const povPos = new THREE.Vector3()
+    // downward surface probe — locs count as ground too (bridges, decks)
+    const povProbe = new THREE.Raycaster()
+    povProbe.firstHitOnly = true
+    povProbe.ray.direction.set(0, -1, 0)
+    const povSolids: THREE.Object3D[] = []
+    const povKeys = new Set<string>()
+    const povEuler = new THREE.Euler(0, 0, 0, 'YXZ')
+    const povSaved = { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), target: new THREE.Vector3() }
+    let povSkipMoves = 0
+    function onPovLockChange() {
+      const locked = document.pointerLockElement === renderer.domElement
+      // keyups are missed while the lock dissolves — a key held across Esc
+      // would otherwise walk forever
+      if (!locked) povKeys.clear()
+      // the first events after the lock engages can carry the cursor-to-centre
+      // jump as one giant delta — swallow them (see onPovMouseMove)
+      if (locked) povSkipMoves = 2
+      setPovLocked(locked)
+    }
+    function onPovMouseMove(e: MouseEvent) {
+      if (document.pointerLockElement !== renderer.domElement) return
+      if (povSkipMoves > 0) { povSkipMoves--; return }
+      // Chromium's pointer lock occasionally reports a bogus, enormous
+      // movement delta (raw-input re-sync) that would snap the view to a
+      // random direction. A real flick tops out well under 500px per
+      // coalesced event — drop anything bigger outright.
+      if (Math.abs(e.movementX) > 500 || Math.abs(e.movementY) > 500) return
+      const s = 0.0022 * povRef.current.sens
+      povYaw -= e.movementX * s
+      povPitch = Math.max(-1.45, Math.min(1.45, povPitch - e.movementY * s))
+      bumpActivity()
+    }
+    const POV_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']
+    function onPovKeyDown(e: KeyboardEvent) {
+      if (!povRef.current.active || !POV_KEYS.includes(e.code)) return
+      if (document.pointerLockElement === renderer.domElement) {
+        e.preventDefault() // arrows scroll the page otherwise
+        povKeys.add(e.code)
+      }
+    }
+    function onPovKeyUp(e: KeyboardEvent) {
+      povKeys.delete(e.code)
+    }
+    // Ctrl+scroll rides the eye height up/down a plane (0-3), and re-checks
+    // the plane checkboxes to match — your plane and everything below shows,
+    // everything above hides (the client's own you-and-below rule, and it
+    // keeps the roof out of your face). preventDefault matters twice over:
+    // ctrl+wheel is the browser's page-zoom gesture, and the listener must be
+    // non-passive for it to work at all.
+    function onPovWheel(e: WheelEvent) {
+      if (!povRef.current.active || !e.ctrlKey) return
+      e.preventDefault()
+      const dir = e.deltaY < 0 ? 1 : -1 // scroll up = a plane up
+      const next = Math.max(0, Math.min(3, povRef.current.plane + dir))
+      if (next !== povRef.current.plane) {
+        setPovPlane(next)
+        setVisiblePlanes([0, 1, 2, 3].map((i) => i <= next))
+      }
+      bumpActivity()
+    }
+    document.addEventListener('pointerlockchange', onPovLockChange)
+    document.addEventListener('mousemove', onPovMouseMove)
+    window.addEventListener('keydown', onPovKeyDown)
+    window.addEventListener('keyup', onPovKeyUp)
+    renderer.domElement.addEventListener('wheel', onPovWheel, { passive: false })
+
     function animate() {
       // idle throttle (~15fps) to stop hogging the compositor when nothing is
       // moving — but NOT while animated materials (water/scroll) are on screen,
@@ -1678,7 +1796,89 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         raf = requestAnimationFrame(animate)
         return
       }
-      controls.update()
+      // --- POV camera: replaces the orbit controls while the mode is on ---
+      const povOn = povRef.current.active
+      const povNow = performance.now()
+      const povDt = povLastT ? Math.min(0.1, (povNow - povLastT) / 1000) : 0
+      povLastT = povNow
+      if (povOn && !povWasActive) {
+        // entering: remember the orbit camera, drop to eye level at its target
+        povSaved.pos.copy(camera.position)
+        povSaved.quat.copy(camera.quaternion)
+        povSaved.target.copy(controls.target)
+        povPos.set(
+          Math.max(0, Math.min(REGION_UNITS - 1, controls.target.x)), 0,
+          Math.min(0, Math.max(-(REGION_UNITS - 1), controls.target.z)))
+        const dir = new THREE.Vector3().subVectors(controls.target, camera.position).normalize()
+        povYaw = Math.atan2(-dir.x, -dir.z)
+        povPitch = 0
+        // seed the feet height from the terrain so the first surface probe
+        // starts at ground level, not wherever the orbit camera was
+        const hs0 = povHeights?.[povRef.current.plane] ?? povHeights?.[0]
+        povFeet = hs0 ? -averageHeight(hs0, povPos.x, -povPos.z) : 0
+        controls.enabled = false
+        hoverOutline.visible = false
+        brushRing.visible = false
+        pushHoverText('')
+      } else if (!povOn && povWasActive) {
+        // leaving: hand the orbit camera back exactly where it was
+        camera.position.copy(povSaved.pos)
+        camera.quaternion.copy(povSaved.quat)
+        controls.target.copy(povSaved.target)
+        controls.enabled = true
+        if (document.pointerLockElement === renderer.domElement) document.exitPointerLock()
+      }
+      povWasActive = povOn
+      if (povOn) {
+        const fwd = (povKeys.has('KeyW') || povKeys.has('ArrowUp') ? 1 : 0)
+          - (povKeys.has('KeyS') || povKeys.has('ArrowDown') ? 1 : 0)
+        const strafe = (povKeys.has('KeyD') || povKeys.has('ArrowRight') ? 1 : 0)
+          - (povKeys.has('KeyA') || povKeys.has('ArrowLeft') ? 1 : 0)
+        if (fwd !== 0 || strafe !== 0) {
+          const step = povRef.current.speed * TILE * povDt
+          const sinY = Math.sin(povYaw), cosY = Math.cos(povYaw)
+          povPos.x += (-sinY * fwd + cosY * strafe) * step
+          povPos.z += (-cosY * fwd - sinY * strafe) * step
+          povPos.x = Math.max(0, Math.min(REGION_UNITS - 1, povPos.x))
+          povPos.z = Math.min(0, Math.max(-(REGION_UNITS - 1), povPos.z))
+          bumpActivity()
+        }
+        // eye level rides the contour — same bilinear the client's camera uses
+        const hs = povHeights?.[povRef.current.plane] ?? povHeights?.[0]
+        const ground = hs ? averageHeight(hs, povPos.x, -povPos.z) : 0
+        // Locs count as ground too (bridges, decks): probe straight down from
+        // a step's headroom above the last feet position, against every solid
+        // BVH'd mesh (terrain, riverbed, the merged loc meshes), and stand on
+        // the higher of the probe's surface and the terrain sample. Starting
+        // the probe only POV_STEP above the old feet is what makes a bridge
+        // deck carry you while a wall or fence top (a whole ledge above your
+        // feet) stays unclimbable — and it keeps you UNDER a bridge when you
+        // walk beneath it, since its deck sits above the probe's start.
+        let feet = -ground
+        povSolids.length = 0
+        scene.traverseVisible((o) => {
+          const m = o as THREE.Mesh
+          if (m.isMesh && (m.geometry as { boundsTree?: unknown }).boundsTree) povSolids.push(m)
+        })
+        if (povSolids.length > 0) {
+          povProbe.ray.origin.set(povPos.x, povFeet + POV_STEP, povPos.z)
+          const hit = povProbe.intersectObjects(povSolids, false)[0]
+          if (hit && hit.point.y > feet) feet = hit.point.y
+        }
+        povFeet = feet
+        povPos.y = feet + POV_EYE
+        camera.position.copy(povPos)
+        povEuler.set(povPitch, povYaw, 0)
+        camera.quaternion.setFromEuler(povEuler)
+        // park the orbit target one tile ahead so the minimap arrow (and any
+        // other controls.target reader) keeps tracking the walker
+        controls.target.set(
+          povPos.x - Math.sin(povYaw) * TILE,
+          povPos.y,
+          povPos.z - Math.cos(povYaw) * TILE)
+      } else {
+        controls.update()
+      }
       // minimap camera marker: position = orbit target, arrow = view heading
       if ((mmFrame++ & 7) === 0 && minimapCamRef.current) {
         const P = 4
@@ -1724,8 +1924,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           if (posed) { rec.update(posed); animVisible = true }
         }
       }
-      // hover raycast every other frame — but never mid-orbit (#5)
-      if (pointerInside && !orbiting && (frame++ & 1) === 0) {
+      // hover raycast every other frame — but never mid-orbit (#5), and never
+      // in POV mode (the cursor is locked; there is nothing to hover)
+      if (pointerInside && !orbiting && !povOn && (frame++ & 1) === 0) {
         const hit = pick()
         if (hit) {
           const { wx, wy, tx, ty } = worldTileOf(hit.point)
@@ -2277,6 +2478,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
 
 
         let centerHeights = mosaic.slicesFor(0, 0).heights
+        povHeights = centerHeights
 
         // --- Place-mode ghost: a translucent single-loc mesh under the cursor
         let ghost: { obj: THREE.Object3D; key: string } | null = null
@@ -2707,6 +2909,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           if (disposed) return
           const slices = nextMosaic.slicesFor(0, 0)
           centerHeights = slices.heights
+          povHeights = centerHeights
           // heights moved (a height brush) or the lights themselves changed —
           // either way the grid and the gizmos have to be rebuilt, since a
           // light's y is relative to its tile's ground
@@ -2904,6 +3107,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       renderer.domElement.removeEventListener('pointerleave', onPointerLeave)
       renderer.domElement.removeEventListener('pointerdown', onPointerDown)
       renderer.domElement.removeEventListener('pointerup', onPointerUp)
+      document.removeEventListener('pointerlockchange', onPovLockChange)
+      document.removeEventListener('mousemove', onPovMouseMove)
+      window.removeEventListener('keydown', onPovKeyDown)
+      window.removeEventListener('keyup', onPovKeyUp)
+      renderer.domElement.removeEventListener('wheel', onPovWheel)
+      if (document.pointerLockElement === renderer.domElement) document.exitPointerLock()
       controls.dispose()
       cameraRef.current = null
       controlsRef.current = null
@@ -3065,6 +3274,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return
       if (e.ctrlKey || e.metaKey || e.altKey) return
+      if (document.pointerLockElement) return // POV walking — keys belong to it
       const k = e.key.toLowerCase()
       if (k === 'v') setSideTab('view')
       else if (k === 'e') setSideTab('edit')
@@ -3547,6 +3757,47 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           />
           <span className="mapscene-gamma-value">{mmGamma.toFixed(2)}</span>
         </label>
+        {pov && (
+          <label className="mapscene-toggle mapscene-gamma" title="POV walking speed, in tiles per second">
+            Walk speed
+            <input
+              type="range"
+              min={1}
+              max={20}
+              step={0.5}
+              value={povSpeed}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value)
+                setPovSpeed(v)
+                localStorage.setItem('cache-editor:pov-speed', String(v))
+              }}
+            />
+            <span className="mapscene-gamma-value">{povSpeed.toFixed(1)}</span>
+          </label>
+        )}
+        {pov && (
+          <label className="mapscene-toggle mapscene-gamma" title="POV mouse-look sensitivity">
+            Sensitivity
+            <input
+              type="range"
+              min={0.2}
+              max={3}
+              step={0.1}
+              value={povSens}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value)
+                setPovSens(v)
+                localStorage.setItem('cache-editor:pov-sens', String(v))
+              }}
+            />
+            <span className="mapscene-gamma-value">{povSens.toFixed(1)}</span>
+          </label>
+        )}
+        {pov && (
+          <span className="mapscene-toggle" title="The plane the POV camera walks on — Ctrl+scroll in the view to go up/down">
+            Plane {povPlane}
+          </span>
+        )}
         {status && <span className="mapscene-status">{status}</span>}
         {!status && hoverText && <span className="mapscene-hover">{hoverText}</span>}
         <span ref={fpsRef} className="mapscene-fps" title="Render frames per second">–</span>
@@ -3554,6 +3805,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       <div className="mapscene-view">
         <div className="mapscene-canvas-wrap">
           <div ref={mountRef} className="mapscene-mount" />
+          {pov && !povLocked && !loadVisible && (
+            <div className="mapscene-pov-hint">
+              <div className="mapscene-pov-hint-inner">
+                <strong>Click to walk around</strong>
+                <span>WASD / arrow keys move · mouse looks · Ctrl+scroll changes plane · Esc releases the cursor</span>
+              </div>
+            </div>
+          )}
           {loadVisible && (
             <div className="rs-loading">
               <div className="rs-loading-inner">
@@ -4763,6 +5022,15 @@ const CONTROLS_LEGEND: { group: string; rows: [keys: string, does: string][] }[]
       ['Alt+click', 'sample the tile under the cursor into the brush'],
       ['Shift+drag', 'copy an area as a stamp — arm Paste, then click to stamp it'],
       ['[ / ]', 'shrink / grow the brush'],
+    ],
+  },
+  {
+    group: 'POV mode (header toggle)', rows: [
+      ['Click', 'grab the cursor and start walking'],
+      ['W A S D / arrows', 'walk — eye level follows the terrain'],
+      ['Mouse', 'look around'],
+      ['Ctrl+scroll', 'walk a plane up / down (0–3)'],
+      ['Esc', 'release the cursor'],
     ],
   },
   {
