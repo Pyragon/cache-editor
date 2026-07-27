@@ -3098,6 +3098,28 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   }, [objSprites])
 
   // one object so the lists' sort memos have a single stable dependency
+  // Would placing the drafted object force the slow path? Mirrors the one bail
+  // the placement patch still has: an animated object whose animation nothing
+  // on screen uses yet has no loaded animator to hand the new mesh, so it needs
+  // the rebuild to read and preload it. An animated object that IS already
+  // running somewhere patches in like any other, so this stays quiet for it.
+  const [placeNeedsRebuild, setPlaceNeedsRebuild] = useState(false)
+  useEffect(() => {
+    const assets = assetsRef.current
+    if (!assets || status !== '') return
+    let cancelled = false
+    void (async () => {
+      let animId = -1
+      try {
+        animId = (await assets.getDef(placeDraft.objectId))?.animations?.[0] ?? -1
+      } catch { /* def missing — nothing to warn about */ }
+      if (cancelled) return
+      setPlaceNeedsRebuild(animId >= 0
+        && !animLocsRef.current.some((r) => r.animator && r.animationId === animId))
+    })()
+    return () => { cancelled = true }
+  }, [placeDraft.objectId, status])
+
   const mapSymbols = useMemo<MapSymbols>(
     () => ({ cats: objCats, sprites: objSprites, iconUrls, spriteUrls }),
     [objCats, objSprites, iconUrls, spriteUrls],
@@ -3446,6 +3468,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               addingLight={addingLight}
               onAddLightToggle={() => setAddingLight((v) => !v)}
               canPlaceLight={canEditLights && status === ''}
+              needsRebuild={placeNeedsRebuild}
             />
           )}
           {/* Edit tab: whatever is selected. Selecting anything from the scene
@@ -3859,6 +3882,7 @@ const PLACE_KINDS: { kind: PlaceKind; label: string; title: string }[] = [
 function PlacePanel({
   kind, onKind, draft, onDraft, placing, canPlace, name, onToggle, placeMultiple, onPlaceMultiple,
   soundPicks, names, entries, lightDraft, onLightDraft, addingLight, onAddLightToggle, canPlaceLight,
+  needsRebuild,
 }: {
   kind: PlaceKind
   onKind: (next: PlaceKind) => void
@@ -3878,6 +3902,8 @@ function PlacePanel({
   addingLight: boolean
   onAddLightToggle: () => void
   canPlaceLight: boolean
+  /** the drafted object would force a full rebuild when placed */
+  needsRebuild: boolean
 }) {
   const slot = OBJECT_SLOTS[draft.type] ?? 2
   const [query, setQuery] = useState('')
@@ -4133,6 +4159,15 @@ function PlacePanel({
           </div>
         </div>
       </div>
+      {needsRebuild && (
+        <p className="mapscene-side-note">
+          <strong>This one rebuilds the scene.</strong> Object {draft.objectId} is
+          animated and nothing on screen uses its animation yet, so placing it has
+          to load the animation and re-merge the region — a few seconds behind the
+          loading bar. Ordinary placements are instant, and once one of these is
+          down, moving it (or placing another) is too.
+        </p>
+      )}
       <div className="mapscene-side-actions">
         <button
           type="button"
