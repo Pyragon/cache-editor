@@ -76,8 +76,11 @@
 }
 
 /* Sliders: a thin track with a round thumb. The platform default renders as a
-   white box with a square thumb here, which reads like a text input. */
-.mapscene input[type='range'] {
+   white box with a square thumb here, which reads like a text input.
+   .mapscene-gfx is listed separately because the graphics dropdown portals
+   into the page header, outside .mapscene. */
+.mapscene input[type='range'],
+.mapscene-gfx input[type='range'] {
   -webkit-appearance: none;
   appearance: none;
   height: 14px;
@@ -85,13 +88,15 @@
   cursor: pointer;
 }
 
-.mapscene input[type='range']::-webkit-slider-runnable-track {
+.mapscene input[type='range']::-webkit-slider-runnable-track,
+.mapscene-gfx input[type='range']::-webkit-slider-runnable-track {
   height: 3px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.16);
 }
 
-.mapscene input[type='range']::-webkit-slider-thumb {
+.mapscene input[type='range']::-webkit-slider-thumb,
+.mapscene-gfx input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 12px;
@@ -103,17 +108,21 @@
 }
 
 .mapscene input[type='range']:hover::-webkit-slider-thumb,
-.mapscene input[type='range']:focus-visible::-webkit-slider-thumb {
+.mapscene input[type='range']:focus-visible::-webkit-slider-thumb,
+.mapscene-gfx input[type='range']:hover::-webkit-slider-thumb,
+.mapscene-gfx input[type='range']:focus-visible::-webkit-slider-thumb {
   background: #6bb2ff;
 }
 
-.mapscene input[type='range']::-moz-range-track {
+.mapscene input[type='range']::-moz-range-track,
+.mapscene-gfx input[type='range']::-moz-range-track {
   height: 3px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.16);
 }
 
-.mapscene input[type='range']::-moz-range-thumb {
+.mapscene input[type='range']::-moz-range-thumb,
+.mapscene-gfx input[type='range']::-moz-range-thumb {
   width: 12px;
   height: 12px;
   border: none;
@@ -121,7 +130,8 @@
   background: var(--electric-blue-bright, #2f8fff);
 }
 
-.mapscene input[type='range']:focus {
+.mapscene input[type='range']:focus,
+.mapscene-gfx input[type='range']:focus {
   outline: none;
 }
 
@@ -895,11 +905,20 @@ span.mapscene-loclist-thumb.empty {
 
 /* Client graphics-settings reference panel (map controls) */
 .mapscene-gfx { position: relative; display: inline-block; }
+/* sits beside .map-regions-btn in the header now — same look */
 .mapscene-gfx-btn {
-  background: #1a2030; color: #cfe0ff; border: 1px solid #2c364d; border-radius: 4px;
-  padding: 2px 8px; font-size: 12px; cursor: pointer;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-dim, #8a90a0);
+  font-size: 12px;
+  cursor: pointer;
 }
-.mapscene-gfx-btn:hover { background: #222b40; }
+.mapscene-gfx-btn:hover {
+  color: var(--text);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
 .mapscene-gfx-panel {
   position: absolute; z-index: 30; top: calc(100% + 4px); left: 0;
   width: min(760px, 78vw); max-height: 60vh;
@@ -909,16 +928,21 @@ span.mapscene-loclist-thumb.empty {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55); padding: 10px;
 }
 .mapscene-gfx-head { color: #8fa3c8; font-size: 11px; margin-bottom: 8px; }
-.mapscene-gfx-table { width: 100%; border-collapse: collapse; font-size: 11.5px; table-layout: fixed; }
-.mapscene-gfx-table th {
-  text-align: left; color: #7f93b8; font-weight: 600;
-  border-bottom: 1px solid #2c364d; padding: 3px 6px;
-}
-.mapscene-gfx-table th:nth-child(1) { width: 17%; }
-.mapscene-gfx-table th:nth-child(2) { width: 15%; }
-.mapscene-gfx-table th:nth-child(3) { width: 13%; }
-.mapscene-gfx-table td { padding: 3px 6px; vertical-align: top; border-bottom: 1px solid #1b2130; overflow-wrap: break-word; }
-.mapscene-gfx-def { color: #9db0d0; }
+/* One unified list: each setting's control, status and description together.
+   Head line = name | control (pill/slider, live rows only) | default + badge
+   pushed right; the note sits directly beneath its own setting. */
+.mapscene-gfx-list { display: flex; flex-direction: column; }
+.mapscene-gfx-item { padding: 7px 2px; border-bottom: 1px solid #1b2130; }
+.mapscene-gfx-item:last-child { border-bottom: none; }
+.mapscene-gfx-itemhead { display: flex; align-items: center; gap: 10px; }
+.mapscene-gfx-name { color: #cfe0ff; font-size: 12px; font-weight: 600; min-width: 118px; }
+.mapscene-gfx-itemhead .btn-pill .zoom-btn { padding: 1px 10px; font-size: 11px; }
+.mapscene-gfx-slider { display: flex; align-items: center; gap: 8px; width: 250px; }
+.mapscene-gfx-slider input[type=range] { flex: 1; min-width: 0; margin: 0; }
+.mapscene-gfx-sliderval { color: #9db0d0; font-size: 11px; white-space: nowrap; }
+.mapscene-gfx-tail { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.mapscene-gfx-note { margin-top: 3px; color: #8394ae; font-size: 11px; line-height: 1.45; }
+.mapscene-gfx-def { color: #9db0d0; font-size: 11px; }
 .mapscene-gfx-note { color: #8394ae; }
 .mapscene-gfx-badge {
   display: inline-block; padding: 0 6px; border-radius: 9px;
@@ -928,28 +952,6 @@ span.mapscene-loclist-thumb.empty {
 .mapscene-gfx-badge.is-partial { background: #3a3117; color: #f2c661; }
 .mapscene-gfx-badge.is-no { background: #3a1c1c; color: #f28b8b; }
 .mapscene-gfx-badge.is-na { background: #232a3a; color: #8fa3c8; }
-/* Live controls: one aligned row per setting — name | control | short hint.
-   The full explanation lives in the row's title tooltip, so nothing here has
-   to wrap or widen the panel. */
-.mapscene-gfx-live {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 6px 4px 9px; margin-bottom: 8px; border-bottom: 1px solid #2c364d;
-}
-.mapscene-gfx-row {
-  display: grid;
-  grid-template-columns: 105px 150px 1fr;
-  align-items: center;
-  gap: 10px;
-  cursor: pointer;
-}
-.mapscene-gfx-name { color: #cfe0ff; font-size: 12px; }
-.mapscene-gfx-row input[type=checkbox] { justify-self: start; margin: 0; }
-.mapscene-gfx-row input[type=range] { width: 100%; margin: 0; }
-.mapscene-gfx-hint {
-  color: #8394ae; font-size: 11px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.mapscene-gfx-live .mapscene-gamma { gap: 6px; }
 
 /* yes/no pill for boolean def fields (ObjectDefEditor's flag rows) — the
    shared segmented pill at side-panel size, self-aligned so it doesn't

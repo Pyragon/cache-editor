@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
@@ -38,9 +39,14 @@ const REGION_UNITS = SIZE * 512
  *  exists so we can see at a glance which client behaviour we mirror. Defaults were
  *  read from each Preference's `getDefaultValue()`. */
 type GfxStatus = 'applied' | 'partial' | 'no' | 'n/a'
-const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note: string }[] = [
-  { name: 'Bloom', def: '0 (off)', status: 'applied', note: 'On, using the client’s own FilterBloom params: luminance threshold 1.0, additive strength 0.25 (client default is OFF).' },
-  { name: 'Fog', def: '1', status: 'applied', note: 'Client formula: linear to the draw distance, region fogColour/fogDepth; water and sky handled. Live controls above.' },
+/** `control` marks the rows that are live in the editor — they render their
+ *  pill/slider inline so each setting, its control and its description live
+ *  together in one place. */
+const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note: string; control?: 'bloom' | 'fog' | 'drawDistance' | 'brightness' }[] = [
+  { name: 'Bloom', def: '0 (off)', status: 'applied', control: 'bloom', note: 'Client FilterBloom: luminance threshold 1.0, additive strength 0.25. HDR overbright textures only load while bloom is on, exactly like the client.' },
+  { name: 'Fog', def: '1', status: 'applied', control: 'fog', note: 'Client formula: linear fog ending at the draw distance, fading over the last (fogDepth+256)·4 units, colour and depth from the region environment. Applies at every lighting-detail setting; water and sky handled.' },
+  { name: 'Draw distance', def: 'unknowable', status: 'n/a', control: 'drawDistance', note: 'The fog end point — the client’s projection far plane, a graphics setting the cache can’t tell us. ~24 tiles matches a client-like zoom; the editor default sits further out so the overhead view stays clear.' },
+  { name: 'Brightness', def: '3', status: 'applied', control: 'brightness', note: 'Scene ambient ×(0.7 + 0.1·b), exactly the client’s IA(). Baked into vertex colours, so changing it rebuilds the scene. Match your client’s setting when comparing. The minimap has its own gamma slider.' },
   { name: 'Ground blending', def: '1', status: 'applied', note: 'Underlay/overlay corner blending + the crossfade splat pass.' },
   { name: 'Ground decoration', def: '1', status: 'applied', note: 'Ground-decor locs are built.' },
   { name: 'Idle animations', def: '1', status: 'applied', note: 'Loc idle sequences are posed each frame.' },
@@ -50,7 +56,6 @@ const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note:
   { name: 'Sky boxes', def: '1', status: 'applied', note: 'Skybox mesh from the region environment (toggleable).' },
   { name: 'Light detail', def: '1', status: 'partial', note: 'We render the LOW path, calibrated against the client (MeshRasterizer_Sub3 CPU bake + HardwareGround). The HIGH path — region sun, shader-lit ground, ground point lights — is not built.' },
   { name: 'Scenery shadows', def: '2', status: 'partial', note: 'Static shadow grid only — no projected/dynamic scenery shadows.' },
-  { name: 'Brightness', def: '3', status: 'applied', note: 'The slider above — ambient ×(0.7 + 0.1·b), exactly the client. The minimap has its own gamma slider.' },
   { name: 'Anti-aliasing', def: '0 (off)', status: 'applied', note: 'WebGL antialias is ON — deliberately differs from the client default.' },
   { name: 'Build area', def: '104 tiles', status: 'no', note: 'We render one 64×64 region; neighbours are decoded for seam-free lighting only.' },
   { name: 'Particles', def: '2 (0 on low RAM)', status: 'no', note: 'Model particle emitters are parsed but not simulated in the map view.' },
@@ -280,7 +285,7 @@ type StampClipboard = {
   objects: LocEntry[]
 }
 
-export default function MapSceneViewer({ data, focus, objects, terrain, lights, objectDefs, onEdit }: {
+export default function MapSceneViewer({ data, focus, objects, terrain, lights, objectDefs, onEdit, gfxSlot }: {
   data: MapData
   focus?: { x: number; y: number; plane: number } | null
   /** draft of the centre region's placements (edits not yet saved) — kept
@@ -299,6 +304,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   objectDefs?: Map<number, ObjectDefJson>
   /** commit any edit — the parent owns the drafts, undo history, and save */
   onEdit?: (patch: EditPatch) => void
+  /** header element the Client graphics settings dropdown portals into, so it
+   *  sits beside the Regions button while its state stays here */
+  gfxSlot?: HTMLElement | null
 }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const minimapRef = useRef<HTMLCanvasElement>(null)
@@ -3370,8 +3378,74 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     if (!showLights) lightHighlightClearRef.current?.()
   }, [visiblePlanes, showLocs, showMarkers, showLights, showOutlines, status])
 
+  // The Client graphics settings dropdown. Rendered into the parent header
+  // beside the Regions button when a slot is provided (portal — state stays
+  // here); falls back to the controls bar otherwise.
+  const gfxDropdown = (
+    <div className="mapscene-gfx">
+      <button type="button" className="mapscene-gfx-btn" onClick={() => setShowGfxPanel((v) => !v)}>
+        Client graphics settings {showGfxPanel ? '▾' : '▸'}
+      </button>
+      {showGfxPanel && (
+        <div className="mapscene-gfx-panel">
+          <div className="mapscene-gfx-head">
+            The client’s graphics preferences and what we mirror — rows with a control are live.
+          </div>
+          <div className="mapscene-gfx-list">
+            {CLIENT_GFX_SETTINGS.map((g) => (
+              <div key={g.name} className="mapscene-gfx-item">
+                <div className="mapscene-gfx-itemhead">
+                  <span className="mapscene-gfx-name">{g.name}</span>
+                  {g.control === 'bloom' && (
+                    <span className="btn-pill">
+                      <button type="button" className={`zoom-btn${bloomOn ? ' active' : ''}`} onClick={() => setBloomOn(true)}>On</button>
+                      <button type="button" className={`zoom-btn${!bloomOn ? ' active' : ''}`} onClick={() => setBloomOn(false)}>Off</button>
+                    </span>
+                  )}
+                  {g.control === 'fog' && (
+                    <span className="btn-pill">
+                      <button type="button" className={`zoom-btn${fogOn ? ' active' : ''}`} onClick={() => setFogOn(true)}>On</button>
+                      <button type="button" className={`zoom-btn${!fogOn ? ' active' : ''}`} onClick={() => setFogOn(false)}>Off</button>
+                    </span>
+                  )}
+                  {g.control === 'drawDistance' && (
+                    <span className="mapscene-gfx-slider">
+                      <input
+                        type="range" min={8} max={96} step={1} value={fogTiles}
+                        onChange={(e) => setFogTiles(Number(e.target.value))}
+                        disabled={!fogOn}
+                      />
+                      <span className="mapscene-gfx-sliderval">{fogTiles} tiles</span>
+                    </span>
+                  )}
+                  {g.control === 'brightness' && (
+                    <span className="mapscene-gfx-slider">
+                      <input
+                        type="range" min={1} max={4} step={1} value={brightnessPref}
+                        onChange={(e) => setBrightnessPref(Number(e.target.value))}
+                      />
+                      <span className="mapscene-gfx-sliderval">{brightnessPref} · ambient ×{(0.7 + 0.1 * brightnessPref).toFixed(1)}</span>
+                    </span>
+                  )}
+                  <span className="mapscene-gfx-tail">
+                    <span className="mapscene-gfx-def">client default: {g.def}</span>
+                    <span className={`mapscene-gfx-badge is-${g.status.replace('/', '')}`}>{
+                      g.status === 'applied' ? 'applied' : g.status === 'partial' ? 'partial' : g.status === 'no' ? 'not applied' : 'n/a'
+                    }</span>
+                  </span>
+                </div>
+                <div className="mapscene-gfx-note">{g.note}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+
   return (
     <div className="mapscene">
+      {gfxSlot && createPortal(gfxDropdown, gfxSlot)}
       <div className="mapscene-controls">
         {[0, 1, 2, 3].map((plane) => (
           <label key={plane} className="mapscene-toggle">
@@ -3395,79 +3469,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           <input type="checkbox" checked={showSky} onChange={(e) => setShowSky(e.target.checked)} />
           Sky
         </label>
-        <div className="mapscene-gfx">
-          <button type="button" className="mapscene-gfx-btn" onClick={() => setShowGfxPanel((v) => !v)}>
-            Client graphics settings {showGfxPanel ? '▾' : '▸'}
-          </button>
-          {showGfxPanel && (
-            <div className="mapscene-gfx-panel">
-              <div className="mapscene-gfx-head">
-                The client’s graphics preferences and what we mirror. The bloom controls below are live;
-                the table is reference only.
-              </div>
-              <div className="mapscene-gfx-live">
-                <label
-                  className="mapscene-gfx-row"
-                  title="Client FilterBloom: luminance threshold 1.0, additive strength 0.25 (the client's own default is OFF). HDR overbright textures only load while bloom is on, exactly like the client."
-                >
-                  <span className="mapscene-gfx-name">Bloom</span>
-                  <input type="checkbox" checked={bloomOn} onChange={(e) => setBloomOn(e.target.checked)} />
-                  <span className="mapscene-gfx-hint">client default: off</span>
-                </label>
-                <label
-                  className="mapscene-gfx-row"
-                  title="Region fogColour/fogDepth, client formula: linear fog ending at the draw distance, fading over the last (fogDepth+256)·4 units — Lumbridge hazes its final ~6.7 tiles. The client applies fog at every lighting-detail setting."
-                >
-                  <span className="mapscene-gfx-name">Fog</span>
-                  <input type="checkbox" checked={fogOn} onChange={(e) => setFogOn(e.target.checked)} />
-                  <span className="mapscene-gfx-hint">region fogColour / fogDepth, client formula</span>
-                </label>
-                <label
-                  className="mapscene-gfx-row"
-                  title="The fog's end point — the client's projection far plane, a graphics setting we can't read from the cache. ~24 tiles matches a client-like zoom; the editor default sits further out so the overhead view stays clear."
-                >
-                  <span className="mapscene-gfx-name">Draw distance</span>
-                  <input
-                    type="range" min={8} max={96} step={1} value={fogTiles}
-                    onChange={(e) => setFogTiles(Number(e.target.value))}
-                    disabled={!fogOn}
-                  />
-                  <span className="mapscene-gfx-hint">{fogTiles} tiles · ~24 ≈ client zoom</span>
-                </label>
-                <label
-                  className="mapscene-gfx-row"
-                  title="The client's Brightness setting (default 3): scene ambient ×(0.7 + 0.1·b), exactly Class239's IA(). Baked into vertex colours, so changing it rebuilds the scene — match your client's setting when comparing."
-                >
-                  <span className="mapscene-gfx-name">Brightness</span>
-                  <input
-                    type="range" min={1} max={4} step={1} value={brightnessPref}
-                    onChange={(e) => setBrightnessPref(Number(e.target.value))}
-                  />
-                  <span className="mapscene-gfx-hint">
-                    {brightnessPref} · ambient ×{(0.7 + 0.1 * brightnessPref).toFixed(1)} · rebuilds the scene
-                  </span>
-                </label>
-              </div>
-              <table className="mapscene-gfx-table">
-                <thead>
-                  <tr><th>Setting</th><th>Client default</th><th>Us</th><th>Notes</th></tr>
-                </thead>
-                <tbody>
-                  {CLIENT_GFX_SETTINGS.map((g) => (
-                    <tr key={g.name}>
-                      <td>{g.name}</td>
-                      <td className="mapscene-gfx-def">{g.def}</td>
-                      <td><span className={`mapscene-gfx-badge is-${g.status.replace('/', '')}`}>{
-                        g.status === 'applied' ? 'applied' : g.status === 'partial' ? 'partial' : g.status === 'no' ? 'not applied' : 'n/a'
-                      }</span></td>
-                      <td className="mapscene-gfx-note">{g.note}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+        {!gfxSlot && gfxDropdown}
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showMarkers} onChange={(e) => setShowMarkers(e.target.checked)} />
           <span className="mapscene-marker-key">

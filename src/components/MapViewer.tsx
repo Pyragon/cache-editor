@@ -83,6 +83,8 @@ export default function MapViewer({ world, onDirtyChange }: {
   // world-grid region picker: shows every existing region, click to visit or
   // click a free cell to start creating there
   const [pickerOpen, setPickerOpen] = useState(false)
+  // header slot the 3D view portals its graphics-settings dropdown into
+  const [gfxSlot, setGfxSlot] = useState<HTMLElement | null>(null)
   const [usedRegions, setUsedRegions] = useState<Set<number> | null>(null)
   const [pickerHover, setPickerHover] = useState<{ rx: number; ry: number; used: boolean } | null>(null)
   const [pickerView, setPickerView] = useState(() => clampPickerView(2, 0, 0))
@@ -675,6 +677,9 @@ export default function MapViewer({ world, onDirtyChange }: {
           <button type="button" className="map-regions-btn" onClick={openRegionPicker} title="World region map — visit a region or pick a free slot to create">
             Regions
           </button>
+          {/* the 3D view's Client graphics settings dropdown portals in here so
+              it sits beside Regions while its state stays in MapSceneViewer */}
+          <span className="map-header-gfx" ref={(el) => setGfxSlot(el)} />
         </div>
         <form className="map-coord-search" onSubmit={handleSearchSubmit}>
           {searchMsg && <span className="map-coord-msg">{searchMsg}</span>}
@@ -763,6 +768,7 @@ export default function MapViewer({ world, onDirtyChange }: {
           lights={lights ?? undefined}
           objectDefs={objectDefs}
           onEdit={(patch) => applyEditRef.current(patch)}
+          gfxSlot={gfxSlot}
         />
       )}
 

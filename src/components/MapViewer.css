@@ -86,7 +86,8 @@
   color: var(--text-dim, #8a90a0);
   font-size: 12px;
   cursor: pointer;
-  margin-left: auto;
+  /* sits in the badge row now — a little air between it and the badges */
+  margin-left: 8px;
 }
 
 .map-regions-btn:hover {
