@@ -74,3 +74,20 @@ own — so it gets a document instead of bullets here.
   reads as too *wide* rather than too hard, the suspect is the `hasOverlay`
   stand-in for the client's discard test, not the coverage table. Remaining
   approximations are listed under Maps in `TODO.md`.
+
+## Locs / transparency
+- **Static locs don't priority-interleave opaque and transparent faces.**
+  The client bakes ONE face order per model — priority →
+  opaque-before-transparent → effectId → texture (`MeshRasterizer_Sub3` ctor,
+  flag 0x100 puts opaque faces into the priority sort too) — and draws it in a
+  single pass with z-write always on, so a transparent face occludes anything
+  sorted after it (Lumbridge fountain: priority-5 basin water hides the
+  priority-6 submerged interior outright). The **animated** loc builder now
+  reproduces this (2026-07-27, the fountain fix). Static locs still split
+  differently: opaque faces go to the global merged opaque mesh (drawn before
+  the ground pass) and only transparent faces reach the per-loc sortable mesh
+  (depthWrite off), so a static loc with the fountain's pattern would show its
+  interior through the water. Fixing it means routing a whole qualifying loc —
+  opaque faces included — into its own client-ordered mesh with z-write on,
+  like the animated path. No known victim loc yet; find one before building
+  the fix so it can be verified.

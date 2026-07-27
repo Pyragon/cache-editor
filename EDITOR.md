@@ -248,8 +248,14 @@ UI**, not after.
 
 ## Face-level data
 
-**What the renderer does.** `facePriorities` sets transparent draw order; per-face
-alpha feeds the transparency rules traced in `TODO.md`.
+**What the renderer does.** `facePriorities` sets the model's baked draw order —
+and not just for transparent faces: the client sorts **every** face by
+priority → opaque-before-transparent → texture effectId → texture id
+(`MeshRasterizer_Sub3` ctor, flag 0x100) and draws the lot in one pass with
+z-write always on, so a transparent face *occludes* any face sorted after it
+(TRACED 2026-07-27: Lumbridge fountain's priority-5 basin water hides its
+priority-6 submerged interior outright — that's a design tool, not an
+accident). Per-face alpha feeds the transparency rules traced in `TODO.md`.
 
 **Not surfaced.** Neither is editable, and both visibly change rendering.
 

@@ -2253,6 +2253,8 @@ export class LocAssets {
   /** blendType (= texture-def effectCombiner) per texture, filled as metas
    *  resolve — lets the synchronous face loop classify transparency. */
   private blendTypes = new Map<number, number>()
+  /** texture-def effectId per texture, filled alongside blendTypes */
+  private effectIds = new Map<number, number>()
   /** overbright multiplier per texture, filled as metas resolve */
   private hdrMults = new Map<number, number>()
   /** shadowFactor | brightness<<8 per texture (method14282 params), filled as
@@ -2309,6 +2311,12 @@ export class LocAssets {
    *  alpha). Synchronous — `primeBlendTypes` must have run for this id. */
   blendTypeOf(id: number): number {
     return this.blendTypes.get(id) ?? 0
+  }
+
+  /** Cached texture-def effectId — a tiebreak in the client's baked face sort
+   *  key. Sync — needs primeBlendTypes. */
+  effectIdOf(id: number): number {
+    return this.effectIds.get(id) ?? 0
   }
 
   /** Cached HDR overbright multiplier (1 = not HDR). Sync — needs primeBlendTypes. */
@@ -2482,6 +2490,7 @@ export class LocAssets {
             effectCombiner, effectId, effectParam1, hdrMultiplier, shadowFactor, texBrightness,
           }
           this.blendTypes.set(id, effectCombiner)
+          this.effectIds.set(id, effectId)
           this.hdrMults.set(id, hdrMultiplier)
           this.shadeParams.set(id, shadowFactor | (texBrightness << 8))
           this.specExponents.set(id, specularExponent(meta))
@@ -2942,19 +2951,38 @@ export async function buildAnimatedLocMesh(
     ambient, contrast)
   unlitHdrFaces(model, lit, (t) => assets.hdrMultiplierOf(t))
 
-  // bucket faces by texture id (skip fully-transparent / degenerate faces)
-  const buckets = new Map<number, number[]>()
+  // Buckets in the client's baked face order (the MeshRasterizer_Sub3 ctor's
+  // sort key): priority → opaque-before-transparent → effectId → texture id.
+  // The client draws the sorted faces in ONE pass with z-write always on, so
+  // a transparent face can OCCLUDE anything sorted after it — the fountain's
+  // basin water (texture 638, faceAlpha 150, priority 5) hides its submerged
+  // interior (opaque texture 72, priority 6) outright instead of blending
+  // over it. Each bucket becomes a material group; three.js draws groups in
+  // array order, and transparent groups keep z-write on (see below), which
+  // reproduces the client's occlusion. (Skips stay: fully-transparent faces,
+  // and textured faces whose mapping produces non-finite UVs — the client
+  // draws those as an invisible NaN smear.)
+  type LocBucket = { tex: number; faces: number[] }
+  const buckets = new Map<number, LocBucket>()
+  const scratch = new Float32Array(6)
   for (let f = 0; f < model.faceCount; f++) {
     if (model.faceAlpha[f] === -1) continue
     const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
     if (ia >= model.vertexCount || ib >= model.vertexCount || ic >= model.vertexCount) continue
     const tex = model.faceTextures?.[f] ?? -1
-    const arr = buckets.get(tex)
-    if (arr) arr.push(f)
-    else buckets.set(tex, [f])
+    if (tex >= 0 && !uvWriter(f, ia, ib, ic, scratch, 0)) continue
+    const trans = model.faceAlpha[f] !== 0 || (tex >= 0 && assets.blendTypeOf(tex) !== 0)
+    const prio = model.facePriorities?.[f] ?? model.priority
+    const effectId = tex >= 0 ? assets.effectIdOf(tex) : 0
+    // client: i_14 = prio<<17 | trans<<16 | effectId<<8 | effectParam, then
+    // texture, then face index (push order below) — effectParam omitted
+    const key = ((((prio & 0xff) * 2 + (trans ? 1 : 0)) * 256 + (effectId & 0xff)) * 4096) + tex + 1
+    const b = buckets.get(key)
+    if (b) b.faces.push(f)
+    else buckets.set(key, { tex, faces: [f] })
   }
-  const order = [...buckets.keys()].sort((a, b) => a - b)
-  const validFaces = order.reduce((n, t) => n + buckets.get(t)!.length, 0)
+  const order = [...buckets.entries()].sort(([a], [b]) => a - b).map(([, b]) => b)
+  const validFaces = order.reduce((n, b) => n + b.faces.length, 0)
   if (validFaces === 0) return null
 
   // Detail-map normalisation, per texture — the same 255/avgLuma the merged loc
@@ -2968,7 +2996,8 @@ export async function buildAnimatedLocMesh(
   // 206 (1.24x) — which is why the whole thing read as dark navy stone-grey
   // against the client's pale blue and tan.
   const boosts = new Map<number, number>()
-  for (const tex of order) {
+  for (const { tex } of order) {
+    if (boosts.has(tex)) continue
     const meta = tex >= 0 ? await assets.getMaterialMeta(tex) : null
     boosts.set(tex, meta?.detailsOnly ? 255 / meta.avgLuma : 1)
   }
@@ -2989,12 +3018,10 @@ export async function buildAnimatedLocMesh(
   // Does this material have any face the MODEL bakes as translucent? Separate
   // from the type-5 animation — that fades faces over time on top of this.
   const matBakedAlpha: boolean[] = []
-  const scratch = new Float32Array(6)
   const geometry = new THREE.BufferGeometry()
   const materials: THREE.Material[] = []
   let vert = 0
-  for (const tex of order) {
-    const faces = buckets.get(tex)!
+  for (const { tex, faces } of order) {
     const boost = boosts.get(tex) ?? 1
     geometry.addGroup(vert, faces.length * 3, materials.length)
     for (const f of faces) {
