@@ -453,6 +453,12 @@
   width: 48px;
 }
 
+/* rotation/plane pills at half-column width — smaller text so four segments fit */
+.mapscene-side-grid.is-compact .mapscene-btn-row .zoom-btn {
+  font-size: 11px;
+  padding: 3px 0;
+}
+
 .mapscene-field-value {
   padding: 4px 0;
   color: var(--text);
@@ -961,3 +967,64 @@ span.mapscene-loclist-thumb.empty {
   margin: 2px 0;
 }
 .mapscene-flag-pill .zoom-btn { padding: 4px 14px; font-size: 11px; }
+
+/* recolour/retexture pair tables in the def editor — the objects entry's
+   PairTable look, shrunk to side-panel width */
+.mapscene-pair-table {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.mapscene-pair-table .cell-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.mapscene-pair-table .pair-cell-inner {
+  gap: 5px;
+}
+
+.mapscene-pair-remove {
+  width: 26px;
+}
+
+/* the Models table's shape column — narrower than the model-id lists, but
+   with room for two digits plus the number-input arrows */
+.mapscene-pair-table .mapscene-models-shape {
+  width: 96px;
+}
+
+/* clickable recolour swatch — the native colour input hides underneath the
+   swatch itself, so clicking the colour opens the picker */
+.mapscene-swatch-pick {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  display: inline-block;
+}
+
+.mapscene-swatch-pick-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+}
+
+/* texture PNG thumbnail beside retexture ids */
+.mapscene-tex-swatch {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  object-fit: cover;
+  image-rendering: pixelated;
+  background: #12151d;
+}
+
+.mapscene-tex-swatch.is-empty {
+  display: inline-block;
+  background: repeating-linear-gradient(45deg, #23262f 0 4px, #171a21 4px 8px);
+}

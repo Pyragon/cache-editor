@@ -4229,9 +4229,10 @@ function PlacePanel({
       </>}
 
       {/* the loc fields: shared by objects and sound emitters, since an emitter
-          is a placement like any other — only the object it points at differs */}
+          is a placement like any other — only the object it points at differs.
+          Two-up rows: (id, type), (rotation, plane). */}
       {(kind === 'object' || kind === 'sound') && <>
-      <div className="mapscene-side-grid">
+      <div className="mapscene-side-grid is-compact">
         <label className="item-field">
           <span className="item-field-label">Object ID</span>
           <NumberInput value={draft.objectId} onChange={(v) => onDraft({ ...draft, objectId: v })} min={0} max={131071} />
@@ -5065,7 +5066,8 @@ function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClos
       )}
 
       <div className="mapscene-side-section">Placement — this instance only</div>
-      <div className="mapscene-side-grid">
+      {/* two-up rows: (id, type), (rotation, plane), (x, y) */}
+      <div className="mapscene-side-grid is-compact">
         {field('Object ID', 'objectId', 131071)}
         <div className="item-field">
           <span className="item-field-label">Type — {SLOT_LABELS[slot]} slot</span>
@@ -5107,8 +5109,6 @@ function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClos
             </span>
           )}
         </div>
-        {field('Local X (0–63)', 'x', 63)}
-        {field('Local Y (0–63)', 'y', 63)}
         <div className="item-field">
           <span className="item-field-label">Plane</span>
           {canEdit ? (
@@ -5128,6 +5128,32 @@ function LocPanel({ sel, canEdit: canEditDef, root, loadSprite, loadArea, onClos
             <span className="mapscene-field-value">{draft.plane}</span>
           )}
         </div>
+        {/* world and local coords are the same value in two spaces — editing
+            either rewrites draft.x/y, so the other follows automatically */}
+        <label className="item-field" title={`World tile coordinate — this region spans ${sel.regionX * 64}–${sel.regionX * 64 + 63}`}>
+          <span className="item-field-label">World X</span>
+          {canEdit
+            ? <NumberInput
+                value={sel.regionX * 64 + draft.x}
+                onChange={(v) => setDraft((d) => ({ ...d, x: Math.min(63, Math.max(0, v - sel.regionX * 64)) }))}
+                min={sel.regionX * 64}
+                max={sel.regionX * 64 + 63}
+              />
+            : <span className="mapscene-field-value">{sel.regionX * 64 + draft.x}</span>}
+        </label>
+        <label className="item-field" title={`World tile coordinate — this region spans ${sel.regionY * 64}–${sel.regionY * 64 + 63}`}>
+          <span className="item-field-label">World Y</span>
+          {canEdit
+            ? <NumberInput
+                value={sel.regionY * 64 + draft.y}
+                onChange={(v) => setDraft((d) => ({ ...d, y: Math.min(63, Math.max(0, v - sel.regionY * 64)) }))}
+                min={sel.regionY * 64}
+                max={sel.regionY * 64 + 63}
+              />
+            : <span className="mapscene-field-value">{sel.regionY * 64 + draft.y}</span>}
+        </label>
+        {field('Local X (0–63)', 'x', 63)}
+        {field('Local Y (0–63)', 'y', 63)}
       </div>
 
       {defDraft ? (

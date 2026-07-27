@@ -4,6 +4,7 @@ import MapSymbolPicker from './MapSymbolPicker'
 import type { SymbolKind } from './MapSymbolPicker'
 import type { ObjectDefJson } from './mapScene'
 import { OBJECT_SLOTS, LOC_TYPE_LABELS } from '../loaders/maps'
+import { hslToRgb, rgb24ToHsl16 } from '../loaders/models'
 
 /** The placement slot whose `mapSpriteId` the client never reads.
  *
@@ -58,6 +59,93 @@ function cursorSpriteUrl(root: FileSystemDirectoryHandle, id: number): Promise<s
     })())
   }
   return pending
+}
+
+/** texture id → its dumped PNG's object URL, per cache root — same
+ *  never-revoked session cache as the cursor sprites above. */
+const TEXTURE_URLS = new WeakMap<FileSystemDirectoryHandle, Map<number, Promise<string | null>>>()
+
+function textureThumbUrl(root: FileSystemDirectoryHandle, id: number): Promise<string | null> {
+  let cache = TEXTURE_URLS.get(root)
+  if (!cache) TEXTURE_URLS.set(root, cache = new Map())
+  let pending = cache.get(id)
+  if (!pending) {
+    cache.set(id, pending = (async () => {
+      try {
+        const dir = await root.getDirectoryHandle('textures')
+        const sub = await dir.getDirectoryHandle(String(id))
+        return URL.createObjectURL(await (await sub.getFileHandle(`${id}.png`)).getFile())
+      } catch {
+        return null
+      }
+    })())
+  }
+  return pending
+}
+
+/** Comma-separated int list. Free text while focused so half-typed lists
+ *  ("123, ") survive the keystroke — a plain controlled input re-normalizes
+ *  on every change, which eats the comma you just typed and makes multi-value
+ *  edits impossible. Commits the parsed ids on every valid keystroke; blur
+ *  snaps the text back to the canonical form. */
+function ListInput({ value, placeholder, onCommit, className = 'item-field-input' }: {
+  value: number[]
+  placeholder?: string
+  onCommit: (ids: number[]) => void
+  className?: string
+}) {
+  const [text, setText] = useState<string | null>(null)
+  const canonical = value.join(', ')
+  return (
+    <input
+      className={className}
+      type="text"
+      value={text ?? canonical}
+      placeholder={placeholder ?? '—'}
+      onFocus={() => setText(canonical)}
+      onBlur={() => setText(null)}
+      onChange={(e) => {
+        const raw = e.target.value
+        if (!/^[\d\s,-]*$/.test(raw)) return
+        setText(raw)
+        onCommit(raw.split(',').map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => Number.isInteger(n)))
+      }}
+    />
+  )
+}
+
+/** HSL16 colour swatch. With onPick it wraps a native colour picker — the
+ *  picked RGB snaps to the nearest representable HSL16, so the id and swatch
+ *  always agree after a pick. */
+function HslSwatch({ value, onPick }: { value: number; onPick?: (hsl16: number) => void }) {
+  const hex = `#${hslToRgb(value & 0xffff).toString(16).padStart(6, '0')}`
+  if (!onPick) return <span className="pair-swatch" title={`HSL16 ${value & 0xffff}`} style={{ background: hex }} />
+  return (
+    <label className="pair-swatch mapscene-swatch-pick" title={`HSL16 ${value & 0xffff} — click to pick a colour`} style={{ background: hex }}>
+      <input
+        type="color"
+        className="mapscene-swatch-pick-input"
+        value={hex}
+        onChange={(e) => onPick(rgb24ToHsl16(parseInt(e.target.value.slice(1), 16)) & 0xffff)}
+      />
+    </label>
+  )
+}
+
+/** Thumbnail of a texture's dumped PNG (textures/<id>/<id>.png); an empty
+ *  box when there's no root or the PNG isn't dumped. */
+function TexSwatch({ root, id }: { root: FileSystemDirectoryHandle | null; id: number }) {
+  const [url, setUrl] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setUrl(null)
+    if (!root || id < 0) return
+    void textureThumbUrl(root, id).then((u) => { if (!cancelled) setUrl(u) })
+    return () => { cancelled = true }
+  }, [root, id])
+  return url
+    ? <img className="mapscene-tex-swatch" src={url} alt="" title={`texture ${id}`} />
+    : <span className="mapscene-tex-swatch is-empty" title={root ? `texture ${id} — no PNG dumped` : 'no cache root'} />
 }
 
 /** Editor for the fields of an object DEFINITION (`objects/<id>.json`).
@@ -171,6 +259,70 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
         : <span className="mapscene-field-value">{value || '—'}</span>}
     </label>
   )
+  /** Paired original→modified table (recolours/retextures) — the objects
+   *  entry's PairTable, at side-panel size. Every cell edit writes BOTH
+   *  parallel draft arrays so they can never fall out of step. */
+  const pairTable = (
+    label: string, title: string, dstLabel: string,
+    origKey: 'originalColors' | 'originalTextures', modKey: 'modifiedColors' | 'modifiedTextures',
+    swatch: (v: number, commit: (nv: number) => void) => React.ReactNode,
+  ) => {
+    const origs = draft[origKey] ?? []
+    const mods = draft[modKey] ?? []
+    const commit = (nextO: number[], nextM: number[]) => onChange({
+      ...draft,
+      [origKey]: nextO.length ? nextO : undefined,
+      [modKey]: nextO.length ? nextM : undefined,
+    })
+    const setPair = (i: number, which: 0 | 1, v: number) => {
+      const nextO = origs.slice()
+      const nextM = mods.slice()
+      while (nextM.length < nextO.length) nextM.push(0)
+      if (which === 0) nextO[i] = v
+      else nextM[i] = v
+      commit(nextO, nextM)
+    }
+    const cell = (v: number, i: number, which: 0 | 1) => (
+      <td>
+        <span className="pair-cell-inner">
+          {canEdit
+            ? <NumberInput className="cell-input" value={v} onChange={(nv) => setPair(i, which, nv)} min={0} max={65535} />
+            : <span className="mapscene-field-value">{v}</span>}
+          {swatch(v, (nv) => setPair(i, which, nv))}
+        </span>
+      </td>
+    )
+    return (
+      <div className="item-field is-wide" title={title}>
+        <span className="item-field-label">{label}</span>
+        {origs.length > 0 && (
+          <table className="quest-table mapscene-pair-table">
+            <thead><tr><th>Original</th><th>{dstLabel}</th>{canEdit && <th />}</tr></thead>
+            <tbody>
+              {origs.map((o, i) => (
+                <tr key={i}>
+                  {cell(o, i, 0)}
+                  {cell(mods[i] ?? 0, i, 1)}
+                  {canEdit && (
+                    <td className="mapscene-pair-remove">
+                      <button type="button" className="row-remove-btn" title="Remove this pair" onClick={() => commit(origs.filter((_, k) => k !== i), mods.filter((_, k) => k !== i))}>×</button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {origs.length === 0 && !canEdit && <span className="mapscene-field-value">—</span>}
+        {canEdit && (
+          <button type="button" className="add-row-btn" onClick={() => commit([...origs, 0], [...mods.slice(0, origs.length), 0])}>
+            + Add pair
+          </button>
+        )}
+      </div>
+    )
+  }
+
   /** A cursor override: which option it applies to, the cursor id, its sprite,
    *  and a browser. The two halves are useless apart — a cursor with no action
    *  index never shows, and an index with no cursor is the default arrow. */
@@ -330,62 +482,82 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
       {show('morph') && <>
         <div className="mapscene-side-section">Models &amp; morphing</div>
         <div className="mapscene-side-grid is-compact">
-          <div className="item-field is-wide" title="Model ids per shape entry (opcode 1). Read-only here — swapping meshes belongs in the model tools.">
-            <span className="item-field-label">Models</span>
-            <span className="mapscene-field-value">{(draft.objectModelIds ?? []).flat().join(', ') || '—'}</span>
-          </div>
-          <div className="item-field is-wide" title="Which loc shape each model group is for, parallel to Models">
-            <span className="item-field-label">Shapes</span>
-            <span className="mapscene-field-value">{(draft.shapes ?? []).join(', ') || '—'}</span>
-          </div>
+          {(() => {
+            // one row per shape entry (opcode 1): the shape and its model ids
+            // are parallel arrays, so the table edits them in lockstep
+            const models = draft.objectModelIds ?? []
+            const shapes = draft.shapes ?? []
+            const rows = Math.max(models.length, shapes.length)
+            const filled = (len: number) => {
+              const nm = models.map((g) => g.slice())
+              while (nm.length < len) nm.push([])
+              const ns = shapes.slice()
+              while (ns.length < len) ns.push(10)
+              return { nm, ns }
+            }
+            const commit = (nm: number[][], ns: number[]) => onChange({
+              ...draft,
+              objectModelIds: nm.length ? nm : undefined,
+              shapes: nm.length ? ns : undefined,
+            })
+            return (
+              <div className="item-field is-wide" title="Model ids per shape entry (opcode 1): each row is one loc shape and the models the client draws for it. Shape numbers match the placement Type (0–22).">
+                <span className="item-field-label">Models</span>
+                {rows > 0 && (
+                  <table className="quest-table mapscene-pair-table">
+                    <thead><tr><th className="mapscene-models-shape">Shape</th><th>Model IDs</th>{canEdit && <th />}</tr></thead>
+                    <tbody>
+                      {Array.from({ length: rows }, (_, i) => (
+                        <tr key={i}>
+                          <td className="mapscene-models-shape" title={LOC_TYPE_LABELS[shapes[i] ?? -1] ?? ''}>
+                            {canEdit
+                              ? <NumberInput className="cell-input" value={shapes[i] ?? 10} onChange={(v) => { const { nm, ns } = filled(rows); ns[i] = v; commit(nm, ns) }} min={0} max={22} />
+                              : <span className="mapscene-field-value">{shapes[i] ?? '—'}</span>}
+                          </td>
+                          <td>
+                            {canEdit
+                              ? <ListInput className="cell-input" value={models[i] ?? []} onCommit={(ids) => { const { nm, ns } = filled(rows); nm[i] = ids; commit(nm, ns) }} />
+                              : <span className="mapscene-field-value">{(models[i] ?? []).join(', ') || '—'}</span>}
+                          </td>
+                          {canEdit && (
+                            <td className="mapscene-pair-remove">
+                              <button type="button" className="row-remove-btn" title="Remove this shape entry" onClick={() => { const { nm, ns } = filled(rows); commit(nm.filter((_, k) => k !== i), ns.filter((_, k) => k !== i)) }}>×</button>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {rows === 0 && !canEdit && <span className="mapscene-field-value">—</span>}
+                {canEdit && (
+                  <button type="button" className="add-row-btn" onClick={() => { const { nm, ns } = filled(rows); commit([...nm, []], [...ns, 10]) }}>
+                    + Add shape entry
+                  </button>
+                )}
+              </div>
+            )
+          })()}
           <label className="item-field is-wide" title="Idle sequence ids the object cycles through (opcodes 24/106) — waving flags, turning windmills. Comma-separated.">
             <span className="item-field-label">Animations</span>
-            {canEdit ? (
-              <input
-                className="item-field-input"
-                type="text"
-                value={(draft.animations ?? []).join(', ')}
-                placeholder="—"
-                onChange={(e) => {
-                  const ids = e.target.value.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n))
-                  set('animations', ids.length > 0 ? ids : undefined)
-                }}
-              />
-            ) : <span className="mapscene-field-value">{(draft.animations ?? []).join(', ') || '—'}</span>}
+            {canEdit
+              ? <ListInput value={draft.animations ?? []} onCommit={(ids) => set('animations', ids.length > 0 ? ids : undefined)} />
+              : <span className="mapscene-field-value">{(draft.animations ?? []).join(', ') || '—'}</span>}
           </label>
           {num('Varbit', 'Opcodes 77/92 — the varbit whose value picks the morph target. -1 = none.', draft.varpBit ?? -1, (v) => set('varpBit', v))}
           {num('Varp', 'Opcodes 77/92 — the varp whose value picks the morph target. -1 = none.', draft.varp ?? -1, (v) => set('varp', v))}
           <label className="item-field is-wide" title="Multiloc targets: the client swaps this def for transformTo[var]. The LAST entry is the out-of-range fallback (often -1 = invisible). Comma-separated.">
             <span className="item-field-label">Transform to</span>
-            {canEdit ? (
-              <input
-                className="item-field-input"
-                type="text"
-                value={(draft.transformTo ?? []).join(', ')}
-                placeholder="—"
-                onChange={(e) => {
-                  const ids = e.target.value.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n))
-                  set('transformTo', ids.length > 0 ? ids : undefined)
-                }}
-              />
-            ) : <span className="mapscene-field-value">{(draft.transformTo ?? []).join(', ') || '—'}</span>}
+            {canEdit
+              ? <ListInput value={draft.transformTo ?? []} onCommit={(ids) => set('transformTo', ids.length > 0 ? ids : undefined)} />
+              : <span className="mapscene-field-value">{(draft.transformTo ?? []).join(', ') || '—'}</span>}
           </label>
-          <div className="item-field is-wide" title="Colour swaps applied to the model (opcode 40): each original HSL16 is replaced by the modified one at the same index.">
-            <span className="item-field-label">Recolours</span>
-            <span className="mapscene-field-value">
-              {(draft.originalColors ?? []).length
-                ? (draft.originalColors ?? []).map((c, i) => `${c}→${draft.modifiedColors?.[i] ?? '?'}`).join(', ')
-                : '—'}
-            </span>
-          </div>
-          <div className="item-field is-wide" title="Texture swaps applied to the model (opcode 41)">
-            <span className="item-field-label">Retextures</span>
-            <span className="mapscene-field-value">
-              {(draft.originalTextures ?? []).length
-                ? (draft.originalTextures ?? []).map((t, i) => `${t}→${draft.modifiedTextures?.[i] ?? '?'}`).join(', ')
-                : '—'}
-            </span>
-          </div>
+          {pairTable('Recolours', 'Colour swaps applied to the model (opcode 40): each original HSL16 is replaced by the recoloured one. The swatch shows the colour the id encodes — click it to pick a colour (snapped to the nearest HSL16).',
+            'Recoloured', 'originalColors', 'modifiedColors',
+            (v, commit) => <HslSwatch value={v} onPick={canEdit ? commit : undefined} />)}
+          {pairTable('Retextures', 'Texture swaps applied to the model (opcode 41): each original texture id is replaced by the retextured one. The thumbnail is the texture’s dumped PNG.',
+            'Retextured', 'originalTextures', 'modifiedTextures',
+            (v) => <TexSwatch root={root} id={v} />)}
         </div>
       </>}
 
@@ -459,18 +631,9 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
           {flag('Instrument amb.', 'Client instrumentAmbientSound, opcode 169', draft.instrumentAmbientSound ?? false, (v) => set('instrumentAmbientSound', v))}
           <label className="item-field is-wide" title="Sound ids picked from at random each play (opcode 79). Comma-separated; empty = none.">
             <span className="item-field-label">Sound group</span>
-            {canEdit ? (
-              <input
-                className="item-field-input"
-                type="text"
-                value={(draft.soundGroupIds ?? []).join(', ')}
-                placeholder="e.g. 3896, 3892"
-                onChange={(e) => {
-                  const ids = e.target.value.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n))
-                  set('soundGroupIds', ids.length > 0 ? ids : undefined)
-                }}
-              />
-            ) : <span className="mapscene-field-value">{(draft.soundGroupIds ?? []).join(', ') || '—'}</span>}
+            {canEdit
+              ? <ListInput value={draft.soundGroupIds ?? []} placeholder="e.g. 3896, 3892" onCommit={(ids) => set('soundGroupIds', ids.length > 0 ? ids : undefined)} />
+              : <span className="mapscene-field-value">{(draft.soundGroupIds ?? []).join(', ') || '—'}</span>}
           </label>
         </div>
       </>}
