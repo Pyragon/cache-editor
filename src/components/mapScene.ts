@@ -807,7 +807,7 @@ const GROUND_BACKLIGHT = DEFAULT_MODEL_SUN.antiSunColour[0] // 1.2
 // palette's pow-0.7 — the textured (neutral-tint) path has no lightness to
 // scale, so it takes the equivalent multiplier instead
 const GROUND_CUT_DISPLAY = Math.pow(GROUND_STRENGTH_BASE / 128, 0.7) // ≈0.681
-function computeVertexLightGrid(heights: Int32Array, verts: number, _sun: SunConfig = DEFAULT_SUN): Float32Array {
+function computeVertexLightGrid(heights: Int32Array, verts: number, brightness = 1): Float32Array {
   const sl = Math.hypot(DEFAULT_MODEL_SUN.dir[0], DEFAULT_MODEL_SUN.dir[1], DEFAULT_MODEL_SUN.dir[2]) || 1
   const sdx = DEFAULT_MODEL_SUN.dir[0] / sl, sdy = DEFAULT_MODEL_SUN.dir[1] / sl, sdz = DEFAULT_MODEL_SUN.dir[2] / sl
   const light = new Float32Array(verts * verts)
@@ -823,15 +823,17 @@ function computeVertexLightGrid(heights: Int32Array, verts: number, _sun: SunCon
       const len = Math.hypot(dhx, 1024, dhy) || 1
       const nx = dhx / len, ny = 1024 / len, nz = -dhy / len
       // client f_53 — two-sided, full range, no half-Lambert compression
+      // The client Brightness preference scales ONLY the ambient term:
+      // Class239:141 — IA((0.7 + brightness·0.1) · 1.1523438). Default 3 → ×1.
       const ndl = sdx * nx + sdy * ny + sdz * nz
-      light[x * verts + y] = GROUND_AMBIENT + ndl * (ndl > 0 ? GROUND_SUN : GROUND_BACKLIGHT)
+      light[x * verts + y] = GROUND_AMBIENT * brightness + ndl * (ndl > 0 ? GROUND_SUN : GROUND_BACKLIGHT)
     }
   }
   return light
 }
 
-function computeVertexLight(heights: Int32Array): Float32Array {
-  return computeVertexLightGrid(heights, VERTS)
+function computeVertexLight(heights: Int32Array, brightness = 1): Float32Array {
+  return computeVertexLightGrid(heights, VERTS, brightness)
 }
 
 /** Bilinear brightness multiplier at 512-scale coords (GL ground vertex light). */
@@ -869,7 +871,9 @@ export class SceneMosaic {
     regionX: number,
     regionY: number,
     configs: SceneConfigs,
-    sun: SunConfig = DEFAULT_SUN,
+    _sun: SunConfig = DEFAULT_SUN,
+    /** client Brightness preference factor (0.7 + 0.1·pref); ambient only */
+    brightness = 1,
   ) {
     this.regions = regions
     this.regionX = regionX
@@ -907,7 +911,7 @@ export class SceneMosaic {
         }
       }
       this.heights.push(h)
-      this.lights.push(computeVertexLightGrid(h, MVERTS, sun))
+      this.lights.push(computeVertexLightGrid(h, MVERTS, brightness))
     }
   }
 
@@ -1589,7 +1593,7 @@ export async function buildTerrainMesh(
   const cornerCache: (Int32Array | null)[] = [null, null, null, null]
   const fluCornerCache: (Int32Array | null)[] = [null, null, null, null]
   const lightOf = (dp: number) =>
-    (lightCache[dp] ??= pre?.lights?.[dp] ?? computeVertexLight(heightsAll[dp]))
+    (lightCache[dp] ??= pre?.lights?.[dp] ?? computeVertexLight(heightsAll[dp], assets.brightness))
   // Blurred static-shadow grid per plane (0 = no shadow). Subtracted from the
   // GroundGL base strength; empty when no locs have been built yet.
   const shadowOf = (dp: number): Float32Array | null => pre?.shadows?.[dp] ?? null
@@ -2254,6 +2258,12 @@ export class LocAssets {
   /** shadowFactor | brightness<<8 per texture (method14282 params), filled as
    *  metas resolve — the face loop's grey-mix needs them synchronously. */
   private shadeParams = new Map<number, number>()
+  /** The client Brightness preference as its ambient factor `0.7 + 0.1·pref`
+   *  (default pref 3 → ×1.0). Scales ONLY the ambient term of the loc bake and
+   *  the ground light grid, exactly like `Class239:141`'s `IA(...)` — never the
+   *  sun/backlight terms or the per-def base ambient. Baked into vertex
+   *  colours, so a change needs a scene rebuild. */
+  brightness = 1
   /** Phong exponent per texture (0 = no specular), filled as metas resolve */
   private specExponents = new Map<number, number>()
   // single-flight directory resolution: cache the PROMISE, not the result —
@@ -2907,8 +2917,13 @@ export async function buildAnimatedLocMesh(
   // model space with the placement on mesh.matrix, so the shader's
   // mat3(modelMatrix) applies the rotation itself.
   const localNormals = modelHasSpecular(model, specularOf) ? new Float32Array(model.faceCount * 9) : undefined
+  // Brightness preference scales the ambient, same as the merged-mesh path
+  const effSun: ModelSun | undefined = sun ?? (assets.brightness === 1 ? undefined : {
+    ...DEFAULT_MODEL_SUN,
+    ambientColour: DEFAULT_MODEL_SUN.ambientColour.map((c) => c * assets.brightness) as [number, number, number],
+  })
   const texFaceArr = model.faceTextures
-  const lit = computeModelLitRgb(model, normalMat, sun,
+  const lit = computeModelLitRgb(model, normalMat, effSun,
     pointLights?.length ? { lights: pointLights, matrix: matrix.elements, upscale } : undefined,
     localNormals,
     texFaceArr
@@ -3753,6 +3768,12 @@ export async function buildLocsMesh(
   onProgress?: (done: number, total: number) => void,
   lightGrid?: LightGrid,
 ): Promise<{ mesh: THREE.Mesh | null; transparentLocs: THREE.Mesh[]; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[] }> {
+  // the Brightness preference scales the scene ambient — bake it into the sun
+  // handed to every placement rather than special-casing computeModelLitRgb
+  const bakeSun: ModelSun | undefined = assets.brightness === 1 ? undefined : {
+    ...DEFAULT_MODEL_SUN,
+    ambientColour: DEFAULT_MODEL_SUN.ambientColour.map((c) => c * assets.brightness) as [number, number, number],
+  }
   const acc = new ModelAccumulator()
   const markers: MarkerInfo[] = []
   const locRefs: LocRef[] = []
@@ -3984,7 +4005,7 @@ export async function buildLocsMesh(
           // opaque vs transparent faces synchronously
           await assets.primeBlendTypes(m)
           acc.addModel(m, matrix, locRefs.length,
-            { points, ambient: 64 + (def.ambient ?? 0), contrast: 850 + (def.contrast ?? 0) * 5 },
+            { sun: bakeSun, points, ambient: 64 + (def.ambient ?? 0), contrast: 850 + (def.contrast ?? 0) * 5 },
             (t) => assets.blendTypeOf(t), (t) => assets.hdrMultiplierOf(t), locTrans, (t) => assets.specularExponentOf(t), (t) => assets.shadeParamsOf(t))
         }
       }

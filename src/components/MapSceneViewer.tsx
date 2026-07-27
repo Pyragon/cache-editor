@@ -642,6 +642,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // know, so it's the one exposed knob: at client-like zooms ~24 tiles matches;
   // the editor default sits further out so the overhead view isn't a wall of
   // fog.
+  // The client's Brightness setting (1-4, default 3): ambient × (0.7 + 0.1·b),
+  // Class239:141. Baked into vertex colours, so changing it triggers the
+  // partial rebuild — a few seconds, unlike the live bloom/fog knobs.
+  const [brightnessPref, setBrightnessPref] = useState(3)
+  const brightnessMulRef = useRef(1)
+  brightnessMulRef.current = 0.7 + 0.1 * brightnessPref
   const [fogOn, setFogOn] = useState(true)
   const [fogTiles, setFogTiles] = useState(40)
   // refs so the build effect can apply the current values without depending on
@@ -650,6 +656,19 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const fogTilesRef = useRef(fogTiles); fogTilesRef.current = fogTiles
   const fogApplyRef = useRef<((on: boolean, tiles: number) => void) | null>(null)
   useEffect(() => { fogApplyRef.current?.(fogOn, fogTiles) }, [fogOn, fogTiles])
+  // Brightness is baked into vertex colours, so a change re-runs the partial
+  // rebuild with the new factor (skipping the initial mount).
+  const brightnessAppliedRef = useRef(brightnessPref)
+  useEffect(() => {
+    if (brightnessAppliedRef.current === brightnessPref) return
+    brightnessAppliedRef.current = brightnessPref
+    const assets = assetsRef.current
+    const rebuild = rebuildCenterRef.current
+    if (!assets || !rebuild) return
+    assets.brightness = 0.7 + 0.1 * brightnessPref
+    void rebuild(terrainPropRef.current ?? data.terrain, objectsPropRef.current ?? data.def.objects)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brightnessPref])
   /** re-applies the sun tint (and the HDR overbright factor) to every built mesh */
   const refreshTintRef = useRef<(() => void) | null>(null)
   const [showOutlines, setShowOutlines] = useState(false)
@@ -1771,6 +1790,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         if (disposed) return
 
         const assets = new LocAssets(data.rootHandle)
+        assets.brightness = brightnessMulRef.current
         assetsRef.current = assets
         animLocsRef.current = []
         sortCentreRef.current = []
@@ -1864,7 +1884,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         }
 
         setStatus('computing mosaic…')
-        const mosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun)
+        const mosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun, assets.brightness)
         if (disposed) return
 
         // region point lights (map-environment `lights[]`), baked per placement.
@@ -2656,7 +2676,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           setStatus('recomputing…')
           await new Promise((resolve) => setTimeout(resolve, 0)) // let the status paint
           regionGrid[1][1] = nextTerrain
-          const nextMosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun)
+          const nextMosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun, assets.brightness)
           if (disposed) return
           const slices = nextMosaic.slicesFor(0, 0)
           centerHeights = slices.heights
@@ -3408,6 +3428,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                   /> <span className="mapscene-gfx-def">{fogTiles} tiles — the client's is a
                     graphics setting we can't read; ~24 matches a client-like zoom, the
                     editor default sits further out so the overhead view stays clear</span>
+                </label>
+                <label className="mapscene-toggle mapscene-fog-dist">
+                  Brightness <input
+                    type="range" min={1} max={4} step={1} value={brightnessPref}
+                    onChange={(e) => setBrightnessPref(Number(e.target.value))}
+                  /> <span className="mapscene-gfx-def">{brightnessPref} — the client's
+                    Brightness setting (default 3): scene ambient ×{(0.7 + 0.1 * brightnessPref).toFixed(1)},
+                    exactly Class239's (0.7 + 0.1·b). Baked into vertex colours, so changing
+                    it rebuilds the scene — match your client's setting when comparing.</span>
                 </label>
               </div>
               <table className="mapscene-gfx-table">
