@@ -31,6 +31,10 @@ export async function buildTexturedModelMesh(model: ModelData): Promise<Textured
 
   // Bucket visible faces by texture id (-1 = flat colour; ids without a
   // dumped material PNG fall back to flat so nothing renders untinted-white).
+  // Textured faces whose mapping produces non-finite UVs are dropped — the
+  // client draws that zero-scale NaN garbage as an invisible smear.
+  const writeUVs = makeUVWriter(model)
+  const uvScratch = new Float32Array(6)
   const buckets = new Map<number, number[]>()
   for (let f = 0; f < faceCount; f++) {
     if (faceAlpha[f] === -1) continue
@@ -38,6 +42,7 @@ export async function buildTexturedModelMesh(model: ModelData): Promise<Textured
     if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount) continue
     let tex = faceTextures?.[f] ?? -1
     if (tex >= 0 && !textures.get(tex)) tex = -1
+    if (tex >= 0 && !writeUVs(f, ia, ib, ic, uvScratch, 0)) continue
     const bucket = buckets.get(tex)
     if (bucket) bucket.push(f)
     else buckets.set(tex, [f])
@@ -45,8 +50,6 @@ export async function buildTexturedModelMesh(model: ModelData): Promise<Textured
   const bucketOrder = [...buckets.keys()].sort((a, b) => a - b) // -1 first
   const validFaces = [...buckets.values()].reduce((n, b) => n + b.length, 0)
   if (validFaces === 0) return null
-
-  const writeUVs = makeUVWriter(model)
   const positions = new Float32Array(validFaces * 9)
   const colors = new Float32Array(validFaces * 9)
   const uvs = new Float32Array(validFaces * 6)

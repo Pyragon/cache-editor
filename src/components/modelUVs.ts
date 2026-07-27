@@ -1,10 +1,9 @@
 import type { ModelData } from '../loaders/models'
 
 // Standalone port of the client's texture-mapping UV generation
-// (MeshRasterizer.method11256/11271/11306/11255 in the darkan client) for use
-// by the map scene's merged loc geometry. ModelViewer.tsx carries an older
-// inline copy of the same math inside its build effect — consolidating it on
-// this module is a pending cleanup (see TODO.md).
+// (MeshRasterizer.method11256/11271/11306/11255 in the darkan client), shared
+// by the map scene's loc geometry, modelMesh's snapshot/cutscene builder and
+// ModelViewer.
 
 function jagexNormalSpace(
   nx: number, ny: number, nz: number,
@@ -59,7 +58,10 @@ function jagexNormalSpace(
   return space
 }
 
-export type UVWriter = (f: number, ia: number, ib: number, ic: number, out: number[] | Float32Array, base6: number) => void
+/** Writes the face's six UV values into `out` at `base6`. Returns false when
+ *  the mapping degenerates (non-finite UVs — the client's zero-scale NaN case);
+ *  the out slots are zeroed and the caller should drop the face. */
+export type UVWriter = (f: number, ia: number, ib: number, ic: number, out: number[] | Float32Array, base6: number) => boolean
 
 /**
  * Builds a per-face UV writer for one model.
@@ -119,9 +121,16 @@ export function makeUVWriter(model: ModelData): UVWriter {
       } else {
         sx = rawX / 1024; sy = rawY / 1024; sz = rawZ / 1024
       }
-      if (!isFinite(sx)) sx = 1
-      if (!isFinite(sy)) sy = 1
-      if (!isFinite(sz)) sz = 1
+      // NO finite-guard on these. The client's own math runs 64.0F/0 = Infinity
+      // straight into the matrix rows (method11256/11257 have no zero check), so
+      // every UV that touches a zero-scale axis comes out NaN/∞ and the face
+      // degenerates to an invisible smear. Clamping the scale to 1 "repaired"
+      // such mappings into valid projections the client never draws: Lumbridge
+      // fountain (model 24520) carries its fish-sheet face (texture 54) on a
+      // type-2 mapping with scaleY 0, and the clamp tiled crisp fish across the
+      // basin floor. JS shares Java's IEEE ∞/NaN semantics, so letting them flow
+      // reproduces the client bit-for-bit; writeUVs reports the non-finite
+      // result (returns false) and callers drop the face.
       const space = jagexNormalSpace(
         textureNormalX![m], textureNormalY![m], textureNormalZ![m],
         textureRotation![m] & 0xFF, sx, sy, sz,
@@ -182,7 +191,7 @@ export function makeUVWriter(model: ModelData): UVWriter {
       out[base6]     = 0; out[base6 + 1] = 1
       out[base6 + 2] = 1; out[base6 + 3] = 1
       out[base6 + 4] = 0; out[base6 + 5] = 0
-      return
+      return true
     }
 
     const type = pos < mappingCount ? textureRenderTypes![pos] & 0xFF : 0
@@ -267,11 +276,19 @@ export function makeUVWriter(model: ModelData): UVWriter {
         }
       }
 
+      // A zero-scale axis in the mapping poisons these with NaN/∞ — the client
+      // draws that garbage as an invisible smear; we drop the face instead.
+      if (!Number.isFinite(u[0]) || !Number.isFinite(v[0]) ||
+          !Number.isFinite(u[1]) || !Number.isFinite(v[1]) ||
+          !Number.isFinite(u[2]) || !Number.isFinite(v[2])) {
+        for (let i = 0; i < 6; i++) out[base6 + i] = 0
+        return false
+      }
       for (let i = 0; i < 3; i++) {
         out[base6 + i * 2]     = u[i]
         out[base6 + i * 2 + 1] = v[i]
       }
-      return
+      return true
     }
 
     let P = ia, M = ib, N = ic
@@ -280,5 +297,6 @@ export function makeUVWriter(model: ModelData): UVWriter {
       if (P >= vertexCount || M >= vertexCount || N >= vertexCount) { P = ia; M = ib; N = ic }
     }
     writePlanarUVs(P, M, N, ia, ib, ic, out, base6)
+    return true
   }
 }

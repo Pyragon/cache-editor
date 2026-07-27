@@ -2761,6 +2761,10 @@ class ModelAccumulator {
       const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
       if (ia >= model.vertexCount || ib >= model.vertexCount || ic >= model.vertexCount) continue
       const textureId = model.faceTextures?.[f] ?? -1
+      // UVs computed up front: a non-finite result is the client's degenerate
+      // zero-scale mapping (it draws NaN UVs as an invisible smear) — drop the
+      // face before it books anything into a bucket.
+      if (textureId >= 0 && !uvWriter(f, ia, ib, ic, this.uvScratch, 0)) continue
       // Client transparency test (MeshRasterizer_Sub3 ctor):
       // faceAlpha != 0 || blendType != 0. Transparent faces are ordered after
       // every opaque one, by face priority — the client's baked draw order.
@@ -2783,7 +2787,7 @@ class ModelAccumulator {
         bucket.alphas.push(a, a, a)
       }
       if (textureId >= 0) {
-        uvWriter(f, ia, ib, ic, this.uvScratch, 0)
+        // this.uvScratch still holds the values from the up-front call
         if (flipWinding) {
           const u = this.uvScratch[2], vv = this.uvScratch[3]
           this.uvScratch[2] = this.uvScratch[4]; this.uvScratch[3] = this.uvScratch[5]

@@ -255,6 +255,31 @@ alpha feeds the transparency rules traced in `TODO.md`.
 
 ---
 
+## Model texture mappings — a zero scale hides the face (TRACED 2026-07-27)
+
+**What the renderer does.** Each textured face points at a texture *mapping*
+(`texturePos` → the per-mapping `textureRenderTypes` / `textureNormalX/Y/Z` /
+`textureScaleX/Y/Z` / `textureRotation` / speed / trans arrays in the model
+binary, decoded in `loaders/models.ts`). For projected mappings (type 1
+cylinder, type 2 cube) the client turns each scale into `64.0F / scale` — and
+a **scale of 0 is Infinity**, which poisons that axis of the projection matrix
+with NaN (`MeshRasterizer.method11256/11257`, darkan-game-client). Any face
+whose UV formula touches the poisoned axis gets NaN UVs and degenerates to an
+invisible smear — effectively a *hidden face*, and content uses it that way:
+Lumbridge fountain (object 36781 → model 24520) carries a fish-sprite-sheet
+face (texture 54, same art as sprite 2) on a type-2 mapping with
+`textureScaleY = 0`, so the fish never show in the client. Our port
+(`components/modelUVs.ts`, shared by the map scene, snapshots and ModelViewer)
+mirrors the IEEE math and drops faces whose UVs come out non-finite — do NOT
+"fix" the zero by clamping; that un-hides such faces (tiled fish across the
+fountain basin).
+
+**Not surfaced.** Model binaries are read-only in the editor, so mappings
+aren't editable at all. If model editing ever lands, a zero scale on a
+projected mapping must surface as "face hidden", not be sanitised.
+
+---
+
 ## Loc sound / map-icon / map-sprite fields
 
 Traced 2026-07-25 while making the map-scene markers editable. cryogen's
