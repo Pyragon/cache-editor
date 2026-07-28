@@ -1,0 +1,118 @@
+.cs2-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.cs2-viewer-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.cs2-viewer-header h3 {
+  margin: 0;
+}
+
+.cs2-viewer-hint {
+  font-size: 12px;
+  opacity: 0.55;
+}
+
+.cs2-fallback-banner {
+  background: rgba(255, 170, 60, 0.12);
+  border: 1px solid rgba(255, 170, 60, 0.45);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.cs2-editor-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #333;
+  border-radius: 6px;
+}
+
+.cs2-editor-host .cm-editor {
+  height: 100%;
+  font-size: 13px;
+}
+
+.cs2-editor-host .cm-scroller {
+  overflow: auto;
+  /* the one-dark background swallows the default thumb — use a clearly lighter one (Firefox) */
+  scrollbar-color: #6b7280 #282c34;
+}
+
+/* Chromium: same lighter thumb against the editor background */
+.cs2-editor-host .cm-scroller::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.cs2-editor-host .cm-scroller::-webkit-scrollbar-track {
+  background: #282c34;
+}
+
+.cs2-editor-host .cm-scroller::-webkit-scrollbar-thumb {
+  background: #6b7280;
+  border-radius: 6px;
+  border: 2px solid #282c34;
+}
+
+.cs2-editor-host .cm-scroller::-webkit-scrollbar-thumb:hover {
+  background: #8b93a1;
+}
+
+.cs2-tooltip {
+  max-width: 520px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cs2-tooltip-sig {
+  font-family: monospace;
+  font-weight: 600;
+  color: #7ec9ff;
+}
+
+.cs2-tooltip-desc {
+  margin-top: 4px;
+  color: #dcdcdc;
+}
+
+.cs2-tooltip-meta {
+  opacity: 0.65;
+  margin-top: 3px;
+}
+
+.cs2-tooltip-expr {
+  font-family: monospace;
+  margin-top: 4px;
+  color: #b5cea8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cs2-tooltip-note {
+  margin-top: 4px;
+  color: #e0b060;
+}
+
+.cs2-swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-left: 5px;
+  vertical-align: middle;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 2px;
+  cursor: pointer;
+}

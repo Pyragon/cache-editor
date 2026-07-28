@@ -536,6 +536,13 @@
   color: var(--text-dim);
 }
 
+/* Some viewers group Discard/Save in a wrapper — keep the bar's spacing inside it. */
+.save-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .save-bar-discard {
   padding: 7px 16px;
   border-radius: 6px;

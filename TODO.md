@@ -203,10 +203,21 @@ real cache, in rough risk order:
 - **Import a Blender model and convert it to the RS mesh format.** Not `.blend` directly (proprietary, no parser) — the route is Blender's **glTF or OBJ export**, converted client-side into a new-format 727 mesh. Needs, in order: (1) a mesh **encoder** in TS (`models.ts` only decodes today) — vertices as delta-smart2 streams, faces, per-face HSL colours quantised from vertex/material colours, the 23-byte footer; (2) cryogen `ModelDefinitions.getActions()` so the written `model.dat` actually repacks (check whether models repack at all today); (3) an Upload button on the model viewer with the usual staged-upload pattern + upload-safety disclaimers. Constraints to enforce at import: ≤65k verts/faces (shorts), tri-only geometry, and textures mapped to the closest RS mechanism (planar PNM per face) or dropped to flat colours in v1.
 - **Per-face translucency isn't rendered.** Fully transparent faces (alpha 255) are now hidden, but partially transparent ones (glass, ghosts — alpha 1–254) still draw opaque. Fixing it means a 4-component colour attribute + `transparent` materials in ModelViewer, and accepting the sorting artifacts that come with double-sided transparency.
 
+## CS2 Scripts
+
+- **The format spec, emission patterns and the pipeline's state live in `docs/cs2.md` — read it
+  first.** Decompiler and recompiler are cryogen's (`com.cryo.cs2`); the editor page is done and
+  signed off (see README).
+- **The 289-script asm tail.** Those scripts round-trip byte-identically but only as assembly
+  text, because the structured decompiler can't shape them yet — break ladders / case
+  fall-through and value-carrying arms (`if (c) return f();` sharing one RETURN), which need
+  break-statement and conditional-expression representations. Use `CS2VerifyOne` as the oracle.
+- **Own return-signature inference**, replacing the cs2-decompiler-v2 `scripts.json` bootstrap —
+  it's also what makes some function headers wrong today.
+
 ## General Editor
 
 - **REMINDER: set up proper production hosting when the editor is nearly feature-complete** (user asked 2026-07-14 to be reminded "much later once we get almost everything finished"). The app is backend-less, so production = `npm run build` + Caddy `file_server` on `dist/` (no Node process at runtime, nothing to restart — unlike the dev server, whose week-old instance developed 20-second event-loop stalls). Content-hashed assets can take the same `immutable` caching the `/icons/*` Caddy route already has.
-- **Detail viewers still missing** (raw-JSON fallback only): `cs2`.
 - **Label known params in the params tables** — items' param 644 and the NPC combat params are labeled; do the same for as many other param keys as we can identify, sourcing meanings from cryogen/darkan param usages (`ItemDefinitions`-style getters, server lookups). The `ParamsTable` `rowAnnotation` hook is the extension point.
 - **Open Cache button** shows `📁 folderName` — consider a cleaner label or breadcrumb.
 - **Error handling** — if a struct file is missing or malformed, the quest silently shows no server data. Could surface a visible warning.

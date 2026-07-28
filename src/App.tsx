@@ -3,6 +3,8 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { ENTRY_ORDER, getEntryPath, getLoader, resolveEntryHandle } from './loaders'
 import type { LoadedItem, QuestServerData } from './loaders'
 import HuffmanViewer from './components/HuffmanViewer'
+import { CS2Viewer } from './components/CS2Viewer'
+import type { CS2Script } from './loaders/cs2'
 import type { HuffmanData } from './components/HuffmanViewer'
 import QuestViewer from './components/QuestViewer'
 import type { QuestData } from './components/QuestViewer'
@@ -141,7 +143,7 @@ const DONE_ENTRIES = new Set([
   'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics', 'sprites', 'config_map_sprites',
   'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests', 'game_tips',
-  'config_bas', 'npcs',
+  'config_bas', 'npcs', 'cs2',
 ])
 
 function unavailableReason(name: string): string {
@@ -369,6 +371,10 @@ function App() {
 
   const enumContent = selectedEntry?.name === 'enums' && selectedItemContent != null
     ? selectedItemContent as EnumData
+    : null
+
+  const cs2Content = selectedEntry?.name === 'cs2' && selectedItemContent != null
+    ? selectedItemContent as CS2Script
     : null
 
   const cursorContent = selectedEntry?.name === 'config_cursors' && selectedItemContent != null
@@ -650,6 +656,26 @@ function App() {
     if (!entryHandle) return
     await loader.saveItem(entryHandle, { id: 0, name: selectedEntry.name }, data)
     setActiveContent(data)
+  }
+
+  // script_N hover docs in the CS2 editor: fetch the target script's function header
+  // (or its fallback marker) straight from the dump.
+  async function resolveCs2Header(id: number): Promise<string | null> {
+    if (!cacheHandle) return null
+    try {
+      const entryHandle = await resolveEntryHandle(cacheHandle, getEntryPath('cs2'))
+      if (!entryHandle) return null
+      const file = await (await entryHandle.getFileHandle(`${id}.cs2`)).getFile()
+      const head = await file.slice(0, 600).text()
+      for (const line of head.split('\n')) {
+        const stripped = line.trim()
+        if (stripped.startsWith('function ')) return stripped.replace(/ \{$/, '')
+        if (stripped.startsWith('// FALLBACK')) return `script_${id} — asm fallback (no structured signature)`
+      }
+      return `script_${id}`
+    } catch {
+      return null
+    }
   }
 
   async function currentEntryHandle(): Promise<FileSystemDirectoryHandle | null> {
@@ -1401,6 +1427,8 @@ function App() {
                 ? <ParticleViewer data={particleContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : enumContent != null
                 ? <EnumViewer data={enumContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                : cs2Content != null
+                ? <CS2Viewer script={cs2Content} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} resolveScript={resolveCs2Header} />
                 : cursorContent != null
                 ? <CursorViewer data={cursorContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : mapSpriteContent != null
