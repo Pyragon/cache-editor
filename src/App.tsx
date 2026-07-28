@@ -317,6 +317,22 @@ function App() {
   // State mirror of pendingNewRef, so the "not saved yet" banner re-renders.
   const [pendingNew, setPendingNew] = useState<{ entry: string; id: number } | null>(null)
 
+  // Ctrl/Cmd+S saves whatever is being edited, app-wide: every editable viewer renders the
+  // shared "Unsaved changes" bar (.save-bar) when dirty, so clicking its Save button is a
+  // universal save hook — current and future viewers included, no per-viewer wiring. Capture
+  // phase so nested key handlers (CodeMirror, the map scene) can't swallow it, and the browser
+  // save-page dialog is suppressed even when nothing is dirty.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        document.querySelector<HTMLButtonElement>('.save-bar .save-bar-save:not(:disabled)')?.click()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [])
+
   // Warn before the tab closes/reloads with unsaved changes. (The browser
   // shows its own generic message; the returnValue text isn't displayed.)
   useEffect(() => {
