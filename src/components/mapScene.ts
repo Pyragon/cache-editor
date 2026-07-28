@@ -3647,8 +3647,9 @@ export function buildLightsMesh(
   return group
 }
 
-/** Region environment JSON (map_environments/<regionId>.json — the terrain
- *  archive's environment tail, dumped by cryogen MapEnvironmentDumper). */
+/** Region environment JSON (maps/environments/<regionId>.json — the terrain
+ *  archive's environment tail, dumped beside the region's own maps/<id>.json
+ *  because it is part of the same archive, not a cache index of its own). */
 export type RegionEnvironment = {
   environment?: {
     flags: number
@@ -3689,7 +3690,7 @@ export async function loadRegionEnvironment(
   regionId: number,
 ): Promise<RegionEnvironment | null> {
   try {
-    const dir = await rootHandle.getDirectoryHandle('map_environments')
+    const dir = await (await rootHandle.getDirectoryHandle('maps')).getDirectoryHandle('environments')
     const file = await (await dir.getFileHandle(`${regionId}.json`)).getFile()
     return JSON.parse(await file.text()) as RegionEnvironment
   } catch {
@@ -3702,16 +3703,20 @@ export async function loadRegionEnvironment(
  * doesn't have one yet (a region can have lights added where it had no
  * environment tail at all).
  *
- * NOTE: cryogen dumps map_environments as read-only editor data — its map
- * repacker re-encodes only the tile section, so edits here reach the dump but
- * not the packed cache until the dumper learns to round-trip the tail.
+ * The tail IS packed back: cryogen's `MapDefinitions.encodeTerrain` appends it
+ * after the tile section, and a region's manifest entry lists this file
+ * alongside maps/<id>.json, so an edit here counts as a change to the region
+ * and gets repacked. Sections the editor doesn't model (the static lighting
+ * grid, the region's own opcode order) must be written back untouched — the
+ * drafts carry the whole record for exactly that reason.
  */
 export async function saveRegionEnvironment(
   rootHandle: FileSystemDirectoryHandle,
   regionId: number,
   env: RegionEnvironment,
 ): Promise<void> {
-  const dir = await rootHandle.getDirectoryHandle('map_environments', { create: true })
+  const maps = await rootHandle.getDirectoryHandle('maps', { create: true })
+  const dir = await maps.getDirectoryHandle('environments', { create: true })
   const fileHandle = await dir.getFileHandle(`${regionId}.json`, { create: true })
   const writable = await fileHandle.createWritable()
   await writable.write(JSON.stringify(env))

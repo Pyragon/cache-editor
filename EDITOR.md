@@ -193,7 +193,7 @@ maps, but the name is the dumper's, not the client's.
 
 ## Region environment
 
-**What the renderer does.** Reads `map_environments/<id>.json` for sun
+**What the renderer does.** Reads `maps/environments/<id>.json` for sun
 colour/ambient/light/backlight/position, fog colour and depth, skybox, and the
 bloom parameters from opcode 2 (`bloomThreshold`, `bloomStrength`, `whitePoint`,
 each a byte × 8/255, so 0..8).

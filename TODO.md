@@ -125,7 +125,7 @@ real cache, in rough risk order:
 - Object name resolution in the hover tooltip — needs batched/cached `objects/<id>.json` reads (up to ~2000 per region) before it's practical.
 - Overlay/underlay brush swatches show the config's FLAT colour, but textured overlays render their texture in-scene — texture thumbnails in the picker would need texture PNG loads per overlay.
 - The outer edge of the 3×3 neighbourhood mosaic clamps — only matters if the camera leaves the neighbourhood.
-- Skybox editor: surface a "used by N regions" list per skybox id (the data is all in `map_environments/*.json`).
+- Skybox editor: surface a "used by N regions" list per skybox id (the data is all in `maps/environments/*.json`).
 - **World map ideas** (see `docs/worldmap.md`): a world map view rendered from MAP_AREAS data; a "rebake worldmap from current maps" pipeline so editor edits show on the world map.
 
 ## Map Areas

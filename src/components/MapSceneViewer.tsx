@@ -16,10 +16,11 @@ import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, bui
 import { LocAnimator } from './locAnimator'
 import type { AnimationDef } from '../loaders/animations'
 import type { ModelData } from '../loaders/models'
-import type { SceneConfigs, LocRef, MarkerInfo, ObjectDefJson, RegionLight, SunConfig } from './mapScene'
+import type { SceneConfigs, LocRef, MarkerInfo, ObjectDefJson, RegionEnvironment, RegionLight, SunConfig } from './mapScene'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import ObjectDefEditor from './ObjectDefEditor'
 import type { AreaInfo, MapSpriteInfo } from './ObjectDefEditor'
+import RegionEnvironmentPanel from './RegionEnvironmentPanel'
 import './MapSceneViewer.css'
 
 // 3D scene preview of a map region and its 8 neighbours (the client always
@@ -259,12 +260,34 @@ type TerrainBrush = {
   flagSet: boolean
 }
 
+/**
+ * The sun colour as a multiplier on the fixed-function diffuse, relative to the
+ * client's default 0xDDCCBB. null when the region doesn't tint at all.
+ */
+/** The sun values that are baked into vertex colours, as a comparable key. */
+function bakedSunOf(env: RegionEnvironment | null): string {
+  const e = env?.environment
+  return [e?.sunPosition?.[0], e?.sunPosition?.[1], e?.sunPosition?.[2], e?.sunAmbient].join(',')
+}
+
+function sunTintFor(sunColour: number | undefined): [number, number, number] | null {
+  if (sunColour === undefined || (sunColour & 0xffffff) === 0xddccbb) return null
+  return [
+    Math.min(1.6, ((sunColour >> 16) & 0xff) / 0xdd),
+    Math.min(1.6, ((sunColour >> 8) & 0xff) / 0xcc),
+    Math.min(1.6, (sunColour & 0xff) / 0xbb),
+  ]
+}
+
 /** One edit against the parent's drafts; coalesce folds it into the previous
  *  undo step (used for drag-stroke continuations). */
 type EditPatch = {
   terrain?: MapTerrain
   objects?: LocEntry[]
   lights?: RegionLight[]
+  /** the region's environment record minus its lights — sun, fog, cube
+   *  texture, bloom, skybox, and the sections carried through untouched */
+  env?: RegionEnvironment
   /** edited object DEFINITIONS keyed by object id (`objects/<id>.json`). Unlike
    *  the others these aren't region data at all — they're global, so one entry
    *  changes every placement of that object everywhere in the game. */
@@ -285,7 +308,7 @@ type StampClipboard = {
   objects: LocEntry[]
 }
 
-export default function MapSceneViewer({ data, focus, objects, terrain, lights, objectDefs, onEdit, gfxSlot, onNavigate, pov = false }: {
+export default function MapSceneViewer({ data, focus, objects, terrain, lights, env, envEditable = false, objectDefs, onEdit, gfxSlot, onNavigate, pov = false }: {
   data: MapData
   focus?: { x: number; y: number; plane: number } | null
   /** draft of the centre region's placements (edits not yet saved) — kept
@@ -294,10 +317,16 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   /** draft of the centre region's terrain — same decoupling as `objects`, so
    *  a height-brush stroke rebuilds only the centre terrain/locs */
   terrain?: MapTerrain
-  /** draft of the region's point lights (map_environments `lights[]`). Absent
+  /** draft of the region's point lights (maps/environments `lights[]`). Absent
    *  until the parent has read the environment file; a light edit re-bakes the
    *  centre locs, since point lights are baked into their vertex colours. */
   lights?: RegionLight[]
+  /** draft of the rest of the environment record (maps/environments/<id>.json
+   *  without its lights). Fog, bloom, sun colour and the skybox apply live;
+   *  sun direction/ambient are baked, so they run the centre rebuild. */
+  env?: RegionEnvironment | null
+  /** whether the environment can be written back (needs a cache root) */
+  envEditable?: boolean
   /** draft object definitions, keyed by object id — see EditPatch.objectDefs.
    *  Fed to `LocAssets` so everything the scene resolves through `getDef`
    *  (marker kinds, models, recolours) shows the edit before it's saved. */
@@ -582,7 +611,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // where a left-drag moves an object. Selecting anything (scene click or list
   // row) switches to Edit, so you can't end up selected-but-elsewhere without
   // changing tab on purpose.
-  const [sideTab, setSideTab] = useState<'view' | 'edit' | 'place' | 'terrain'>('view')
+  const [sideTab, setSideTab] = useState<'view' | 'edit' | 'place' | 'terrain' | 'env'>('view')
   const [placing, setPlacing] = useState(false)
   const [placeMultiple, setPlaceMultiple] = useState(false)
   const placeMultipleRef = useRef(false)
@@ -694,6 +723,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const fogTilesRef = useRef(fogTiles); fogTilesRef.current = fogTiles
   const fogApplyRef = useRef<((on: boolean, tiles: number) => void) | null>(null)
   useEffect(() => { fogApplyRef.current?.(fogOn, fogTiles) }, [fogOn, fogTiles])
+  // The region's own fog/sun values, read by the scene's apply functions rather
+  // than captured, so editing them doesn't mean rebuilding to see the change.
+  const envPropRef = useRef<RegionEnvironment | null>(null)
+  envPropRef.current = env ?? null
+  const fogColourRef = useRef(0xc8c0a8)
+  const fogDepthRef = useRef(0)
+  const sunTintRef = useRef<[number, number, number] | null>(null)
+  /** re-applies everything about the environment that doesn't need a rebuild */
+  const applyEnvRef = useRef<((next: RegionEnvironment | null) => void) | null>(null)
+  /** swaps the sky dome for another skybox id/rotation without a scene rebuild */
+  const rebuildSkyboxRef = useRef<((skybox: RegionEnvironment['skybox'] | null) => Promise<void>) | null>(null)
   // Brightness is baked into vertex colours, so a change re-runs the partial
   // rebuild with the new factor (skipping the initial mount).
   const brightnessAppliedRef = useRef(brightnessPref)
@@ -707,6 +747,27 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     void rebuild(terrainPropRef.current ?? data.terrain, objectsPropRef.current ?? data.def.objects)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [brightnessPref])
+  // An environment edit: fog, bloom, sun colour and the clear colour apply to
+  // the live scene, the skybox swaps its dome, and the sun's DIRECTION/ambient
+  // re-run the centre rebuild because they are baked into vertex colours.
+  const lastEnvRef = useRef<RegionEnvironment | null | undefined>(undefined)
+  useEffect(() => {
+    const previous = lastEnvRef.current
+    lastEnvRef.current = env ?? null
+    if (previous === undefined || previous === (env ?? null)) return // first run, or no change
+    applyEnvRef.current?.(env ?? null)
+    const before = previous?.skybox
+    const after = env?.skybox
+    if (before?.id !== after?.id || before?.rotation !== after?.rotation) void rebuildSkyboxRef.current?.(after ?? null)
+    const bakedBefore = bakedSunOf(previous)
+    const bakedAfter = bakedSunOf(env ?? null)
+    if (bakedBefore !== bakedAfter) {
+      const rebuild = rebuildCenterRef.current
+      if (rebuild) void rebuild(terrainPropRef.current ?? data.terrain, objectsPropRef.current ?? data.def.objects)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [env])
+
   /** re-applies the sun tint (and the HDR overbright factor) to every built mesh */
   const refreshTintRef = useRef<(() => void) | null>(null)
   const [showOutlines, setShowOutlines] = useState(false)
@@ -720,6 +781,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const showLightsRef = useRef(true)
   showLightsRef.current = showLights
   const [showSky, setShowSky] = useState(true)
+  const showSkyRef = useRef(showSky); showSkyRef.current = showSky
   const skyMeshRef = useRef<THREE.Mesh | null>(null)
   const highlightClearRef = useRef<(() => void) | null>(null)
   const lightHighlightClearRef = useRef<(() => void) | null>(null)
@@ -2058,8 +2120,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             }
           }
         }
-        // region environment (map_environments dump): fog, sun, skybox
-        const env = await loadRegionEnvironment(data.rootHandle, data.id)
+        // region environment (maps/environments dump): fog, sun, skybox. The
+        // parent's draft wins — it is seeded from this same file and may carry
+        // edits made before the scene finished building.
+        const env = envPropRef.current ?? await loadRegionEnvironment(data.rootHandle, data.id)
         // Per-region bloom parameters (map-environment opcode 2). Regions that
         // don't override them keep the client's class defaults.
         if (bloomPassRef.current) {
@@ -2074,9 +2138,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // standard material; the water ShaderMaterial mirrors it through its
         // uniforms; the skybox opts out (fog:false in buildSkyboxMesh).
         {
-          const fogColour = env?.environment?.fogColour ?? 0xc8c0a8
-          const fogDepthUnits = ((env?.environment?.fogDepth ?? 0) + 256) * 4
-          const fogObj = new THREE.Fog(fogColour, 1, 2)
+          fogColourRef.current = env?.environment?.fogColour ?? 0xc8c0a8
+          fogDepthRef.current = env?.environment?.fogDepth ?? 0
+          const fogObj = new THREE.Fog(fogColourRef.current, 1, 2)
           fogApplyRef.current = (on, tiles) => {
             if (disposed) return
             if (!on) {
@@ -2085,6 +2149,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               waterUniforms.uFogFar.value = 1e9
               return
             }
+            fogObj.color.setHex(fogColourRef.current & 0xffffff)
+            const fogDepthUnits = (fogDepthRef.current + 256) * 4
             const end = tiles * 512
             const start = Math.max(1, end - fogDepthUnits)
             fogObj.near = start
@@ -2169,18 +2235,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
 
         // sun colour tint (fixed-function diffuse) relative to the default
         // 0xDDCCBB — applied to terrain/loc materials, including rebuilt ones
-        let sunTint: [number, number, number] | null = null
-        const sunColour = env?.environment?.sunColour
-        if (sunColour !== undefined && (sunColour & 0xffffff) !== 0xddccbb) {
-          sunTint = [
-            Math.min(1.6, ((sunColour >> 16) & 0xff) / 0xdd),
-            Math.min(1.6, ((sunColour >> 8) & 0xff) / 0xcc),
-            Math.min(1.6, (sunColour & 0xff) / 0xbb),
-          ]
-        }
+        sunTintRef.current = sunTintFor(env?.environment?.sunColour)
         const applyTint = (obj: THREE.Object3D) => {
           // Runs even with no sun tint: HDR materials still need their overbright
           // factor re-applied when bloom is toggled.
+          const sunTint = sunTintRef.current
           const tint = sunTint ?? [1, 1, 1]
           obj.traverse((o) => {
             const mesh = o as THREE.Mesh
@@ -2250,19 +2309,50 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         const initialObjects = objectsPropRef.current ?? data.def.objects
         lastBuiltObjectsRef.current = objectsPropRef.current
 
-        if (env?.skybox) {
-          const sky = await buildSkyboxMesh(data.rootHandle, assets, env.skybox.id, env.skybox.rotation)
-          if (sky && !disposed) {
-            // dome model hangs below the origin in three-space (RS y-down
-            // authoring) — mirror it up, and blow it up to read as distant
-            sky.scale.set(24, -24, 24)
-            // never pickable — it would otherwise be raycast on every hover
-            sky.traverse((o) => { o.raycast = () => {} })
-            track(sky)
-            scene.add(sky)
-            skyMeshRef.current = sky
+        // Everything an environment edit can change without a rebuild. The sun
+        // DIRECTION and ambient are baked into vertex colours, so those run the
+        // centre rebuild instead (see the effect that calls this).
+        applyEnvRef.current = (next) => {
+          if (disposed) return
+          if (bloomPassRef.current) {
+            bloomPassRef.current.threshold = next?.hdr?.bloomThreshold ?? 1.0
+            bloomPassRef.current.strength = next?.hdr?.bloomStrength ?? 0.25
+            bloomPassRef.current.whitePoint = next?.hdr?.whitePoint ?? 1.0
           }
+          fogColourRef.current = next?.environment?.fogColour ?? 0xc8c0a8
+          fogDepthRef.current = next?.environment?.fogDepth ?? 0
+          fogApplyRef.current?.(fogOnRef.current, fogTilesRef.current)
+          // only when the region actually carries a fog colour, exactly as the
+          // build does — otherwise editing bloom would repaint the backdrop of
+          // a region that never set one
+          if (next?.environment?.fogColour !== undefined) {
+            renderer.setClearColor(next.environment.fogColour & 0xffffff)
+          }
+          sunTintRef.current = sunTintFor(next?.environment?.sunColour)
+          refreshTintRef.current?.()
         }
+
+        const skyRoot = data.rootHandle
+        rebuildSkyboxRef.current = async (skybox) => {
+          if (disposed) return
+          if (skyMeshRef.current) {
+            scene.remove(skyMeshRef.current)
+            skyMeshRef.current = null
+          }
+          if (!skybox || !skyRoot) return
+          const sky = await buildSkyboxMesh(skyRoot, assets, skybox.id, skybox.rotation)
+          if (!sky || disposed) return
+          // dome model hangs below the origin in three-space (RS y-down
+          // authoring) — mirror it up, and blow it up to read as distant
+          sky.scale.set(24, -24, 24)
+          // never pickable — it would otherwise be raycast on every hover
+          sky.traverse((o) => { o.raycast = () => {} })
+          sky.visible = showSkyRef.current
+          track(sky)
+          scene.add(sky)
+          skyMeshRef.current = sky
+        }
+        await rebuildSkyboxRef.current(env?.skybox ?? null)
 
         // subtract the locs' static shadows from a copy of the light slices —
         // through the HD client's softening kernel (GroundGL.resetLight), NOT
@@ -3590,7 +3680,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   }, [bloomOn, status])
 
   // --- point lights ----------------------------------------------------
-  // The parent owns the draft (map_environments `lights[]`) exactly like the
+  // The parent owns the draft (maps/environments `lights[]`) exactly like the
   // terrain/placement drafts. Without it the lights are still listed, gizmo'd
   // and selectable — just read-only.
   const lightList = lights ?? sceneLights
@@ -3734,7 +3824,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         </label>
         <label
           className="mapscene-toggle"
-          title="Region point lights (map_environments lights[]) — diamond + radius ring in the light's own colour. A light hidden inside the loc it lights is still clickable (picking ignores what's in front of it); the selected one's ring shows through geometry."
+          title="Region point lights (maps/environments lights[]) — diamond + radius ring in the light's own colour. A light hidden inside the loc it lights is still clickable (picking ignores what's in front of it); the selected one's ring shows through geometry."
         >
           <input type="checkbox" checked={showLights} onChange={(e) => setShowLights(e.target.checked)} />
           <span className="mapscene-marker-key">
@@ -3860,7 +3950,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             >
               Terrain
             </button>
+            <button
+              type="button"
+              className={sideTab === 'env' ? 'selected' : ''}
+              title="Sun, fog, cube texture, bloom and skybox for this region (maps/environments)"
+              onClick={() => { setSideTab('env'); setPlacing(false); setAddingLight(false) }}
+            >
+              Env
+            </button>
           </div>
+          {sideTab === 'env' && (
+            <RegionEnvironmentPanel
+              env={env ?? null}
+              regionId={data.id}
+              editable={envEditable}
+              onChange={(next) => onEdit?.({ env: next })}
+            />
+          )}
           {sideTab === 'terrain' && (
             <TerrainPanel
               brush={terrainBrush}
@@ -4023,6 +4129,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             Browse what's in this region. Clicking a row selects it, moves the
             camera to it, and opens it in the Edit tab.
           </p>
+
           <LocList
             entries={listEntries}
             names={locNames}

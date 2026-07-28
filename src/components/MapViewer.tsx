@@ -41,6 +41,13 @@ const regionIdOf = (c: WorldCoords) => ((c.x >> 6) << 8) | (c.y >> 6)
 // The maps entry's single world viewer: no per-region item list — it owns the
 // current position, loads the region containing it (the 3D view adds the 8
 // neighbours itself), and saves edits back to that region's own file.
+/** The environment record minus its lights — those are drafted separately. */
+function withoutLights(env: RegionEnvironment): RegionEnvironment {
+  const rest = { ...env }
+  delete rest.lights
+  return rest
+}
+
 export default function MapViewer({ world, onDirtyChange, onNavigate }: {
   world: WorldMapData
   onDirtyChange?: (dirty: boolean) => void
@@ -53,11 +60,16 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
   const [terrain, setTerrain] = useState<MapData['terrain'] | null>(null)
   // draft of the region's placed objects — edited from the 3D side panel
   const [objects, setObjects] = useState<LocEntry[] | null>(null)
-  // The region's environment record (map_environments/<id>.json) and the draft
+  // The region's environment record (maps/environments/<id>.json) and the draft
   // of its point lights, which the 3D view edits like the placements. The whole
   // record is kept so a save round-trips fog/sun/skybox/HDR untouched.
   const [env, setEnv] = useState<RegionEnvironment | null>(null)
   const [lights, setLights] = useState<RegionLight[] | null>(null)
+  // draft of the rest of that record — sun, fog, cube texture, bloom, skybox,
+  // and the sections we only carry through (lighting grid, opcode order) —
+  // edited from the 3D view's Environment panel. Lights stay separate above
+  // because the scene rebakes on them; these mostly apply live.
+  const [envSettings, setEnvSettings] = useState<RegionEnvironment | null>(null)
   // Draft edits to object DEFINITIONS (objects/<id>.json), keyed by object id —
   // made from the 3D marker panel. Global data, not region data: one entry
   // rewrites a file every region shares. Held here anyway so they ride the same
@@ -136,7 +148,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
 
   // last-saved state, for Discard — kept out of `data` so saving doesn't
   // change the scene viewer's data prop (which would force a full rebuild)
-  type Snapshot = { terrain: MapData['terrain']; objects: LocEntry[]; lights: RegionLight[] | null; objectDefs: Map<number, ObjectDefJson> }
+  type Snapshot = { terrain: MapData['terrain']; objects: LocEntry[]; lights: RegionLight[] | null; envSettings: RegionEnvironment | null; objectDefs: Map<number, ObjectDefJson> }
   const baselineRef = useRef<Snapshot | null>(null)
   // per-step undo/redo over the drafts. Snapshots are references (every edit
   // path copies the arrays it changes), so pushing them is free.
@@ -147,11 +159,13 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
     // Point lights are only editable when we have a cache root to write the
     // environment file back to; otherwise the 3D view shows them read-only.
     const initialLights = world.rootHandle ? (env?.lights ?? []) : null
-    baselineRef.current = { terrain: data.terrain, objects: data.def.objects, lights: initialLights, objectDefs: new Map() }
+    const initialEnv = env ? withoutLights(env) : null
+    baselineRef.current = { terrain: data.terrain, objects: data.def.objects, lights: initialLights, envSettings: initialEnv, objectDefs: new Map() }
     historyRef.current = { past: [], future: [] }
     setTerrain(data.terrain)
     setObjects(data.def.objects)
     setLights(initialLights)
+    setEnvSettings(initialEnv)
     setObjectDefs(new Map())
     // a just-created region starts dirty — it doesn't exist on disk until saved
     setIsDirty(unsavedNewRef.current === data.id)
@@ -162,16 +176,17 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
 
   // Single entry point for every 3D-view edit (brush strokes, loc edits,
   // placements, stamps). `coalesce` folds drag-stroke steps into one undo.
-  function applyEdit(patch: { terrain?: MapData['terrain']; objects?: LocEntry[]; lights?: RegionLight[]; objectDefs?: Map<number, ObjectDefJson>; coalesce?: boolean }) {
+  function applyEdit(patch: { terrain?: MapData['terrain']; objects?: LocEntry[]; lights?: RegionLight[]; env?: RegionEnvironment; objectDefs?: Map<number, ObjectDefJson>; coalesce?: boolean }) {
     if (!terrain || !objects) return
     if (!patch.coalesce) {
-      historyRef.current.past.push({ terrain, objects, lights, objectDefs })
+      historyRef.current.past.push({ terrain, objects, lights, envSettings, objectDefs })
       if (historyRef.current.past.length > 60) historyRef.current.past.shift()
       historyRef.current.future = []
     }
     if (patch.terrain) setTerrain(patch.terrain)
     if (patch.objects) setObjects(patch.objects)
     if (patch.lights) setLights(patch.lights)
+    if (patch.env) setEnvSettings(patch.env)
     if (patch.objectDefs) setObjectDefs(patch.objectDefs)
     setIsDirty(true)
   }
@@ -182,10 +197,11 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
   undoRef.current = () => {
     const prev = historyRef.current.past.pop()
     if (!prev || !terrain || !objects) return
-    historyRef.current.future.push({ terrain, objects, lights, objectDefs })
+    historyRef.current.future.push({ terrain, objects, lights, envSettings, objectDefs })
     setTerrain(prev.terrain)
     setObjects(prev.objects)
     setLights(prev.lights)
+    setEnvSettings(prev.envSettings)
     setObjectDefs(prev.objectDefs)
     setIsDirty(true)
   }
@@ -193,10 +209,11 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
   redoRef.current = () => {
     const next = historyRef.current.future.pop()
     if (!next || !terrain || !objects) return
-    historyRef.current.past.push({ terrain, objects, lights, objectDefs })
+    historyRef.current.past.push({ terrain, objects, lights, envSettings, objectDefs })
     setTerrain(next.terrain)
     setObjects(next.objects)
     setLights(next.lights)
+    setEnvSettings(next.envSettings)
     setObjectDefs(next.objectDefs)
     setIsDirty(true)
   }
@@ -371,12 +388,16 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
         return nextSet
       })
     }
-    // Point lights live in a different file (map_environments/<id>.json), so
+    // Point lights live in a different file (maps/environments/<id>.json), so
     // they're only rewritten when they actually changed — and the rest of the
     // environment record goes back untouched.
-    if (world.rootHandle && lights && lights !== baselineRef.current?.lights) {
-      const nextEnv: RegionEnvironment = { ...(envRef.current ?? {}), lights }
-      if (lights.length === 0) delete nextEnv.lights
+    const lightsChanged = lights != null && lights !== baselineRef.current?.lights
+    const envChanged = envSettings !== baselineRef.current?.envSettings
+    if (world.rootHandle && (lightsChanged || envChanged)) {
+      // the env draft is the whole record minus lights, so it carries the
+      // sections we never model (lighting grid, opcode order) back out intact
+      const nextEnv: RegionEnvironment = { ...(envSettings ?? envRef.current ?? {}), lights: lights ?? [] }
+      if (!nextEnv.lights?.length) delete nextEnv.lights
       await saveRegionEnvironment(world.rootHandle, data.id, nextEnv)
       // the ref, not the `env` state: setting the state would re-run the draft
       // reset below and hand the 3D view a new lights array (= full rebuild)
@@ -393,7 +414,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
     }
     // deliberately no setData: the drafts already show the saved state, and a
     // data change would rebuild the whole 3D scene for nothing
-    baselineRef.current = { terrain, objects, lights, objectDefs }
+    baselineRef.current = { terrain, objects, lights, envSettings, objectDefs }
     setIsSaving(false)
     setIsDirty(false)
   }
@@ -413,6 +434,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
     setTerrain(baselineRef.current?.terrain ?? data.terrain)
     setObjects(baselineRef.current?.objects ?? data.def.objects)
     setLights(baselineRef.current?.lights ?? null)
+    setEnvSettings(baselineRef.current?.envSettings ?? null)
     setObjectDefs(baselineRef.current?.objectDefs ?? new Map())
     historyRef.current = { past: [], future: [] }
     setIsDirty(false)
@@ -769,6 +791,8 @@ export default function MapViewer({ world, onDirtyChange, onNavigate }: {
           objects={objects ?? undefined}
           terrain={terrain ?? undefined}
           lights={lights ?? undefined}
+          env={envSettings}
+          envEditable={world.rootHandle != null}
           objectDefs={objectDefs}
           onEdit={(patch) => applyEditRef.current(patch)}
           gfxSlot={gfxSlot}
