@@ -208,10 +208,14 @@ real cache, in rough risk order:
 - **The format spec, emission patterns and the pipeline's state live in `docs/cs2.md` — read it
   first.** Decompiler and recompiler are cryogen's (`com.cryo.cs2`); the editor page is done and
   signed off (see README).
-- **The last 12 asm fallbacks**, itemised with their script ids at the end of `docs/cs2.md`. Each
-  is its own oddity now rather than a family; the biggest single missing feature is a way to write
-  a **return value pushed before later statements run** (script 564). `CS2Tail` is the scoreboard
-  (writes a per-script `tail.txt`), `CS2VerifyOne <id>` the per-script diff.
+- **Three asm fallbacks are left (6,565/6,568 structured), and none of them is really open work** —
+  see the end of `docs/cs2.md`. Script **568** can't be decompiled by anyone: it's a debug script
+  whose call passes six ints where the callee wants five ints and a string, so its stacks don't
+  balance. Scripts **4738/5268** put an early push in the middle of the next statement's
+  expression, which the `stackN` form can't place; expressing it would need a comma-operator-ish
+  syntax in a language meant to be hand-edited. Revisit only if that syntax earns its keep
+  elsewhere. Tools: `CS2Tail` (scoreboard + per-script `tail.txt`), `CS2VerifyOne <id>` (diff),
+  `CS2Trace <id>` (per-instruction stack), `CS2ArityProbe` (opcode signature bugs).
 
 ## General Editor
 

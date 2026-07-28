@@ -18,8 +18,8 @@ result kind).
 | Verifier | cryogen `com.cryo.cs2.CS2RoundTrip` | done, run after every change |
 | Tail scoreboard | cryogen `com.cryo.cs2.CS2Tail` | classifies every script OK/STRUCT/DIFF, writes `tail.txt` |
 | Signature arity probe | cryogen `com.cryo.cs2.CS2ArityProbe` | finds wrong opcode signatures from the corpus |
-| Structured decompiler | cryogen `com.cryo.cs2.decompiler` (+ `results/`, `statements/`) | **6556/6568** |
-| Recompiler (parser → codegen) | cryogen `com.cryo.cs2.compiler` | **6556/6568 recompile byte-identically; 12 asm fallback — 100% total, all provable** |
+| Structured decompiler | cryogen `com.cryo.cs2.decompiler` (+ `results/`, `statements/`) | **6565/6568** |
+| Recompiler (parser → codegen) | cryogen `com.cryo.cs2.compiler` | **6565/6568 recompile byte-identically; 3 asm fallback — 100% total, all provable** |
 | Script signatures | cryogen `com.cryo.cs2.decompiler.ScriptSignatures` | inferred from the cache alone (no external bootstrap) |
 | Dumper/packer wiring | cryogen `CS2DefinitionDumper` | dumps decompiled text; `buildAddEdit` compiles it back |
 | Editor page | cache-editor `CS2Viewer` | done (CodeMirror IDE, see README) |
@@ -130,7 +130,7 @@ the five cp1252-unmappable bytes, so Java Strings are safe carriers.
   call), NOT from the bootstrap signatures, which over/under-count some scripts.
 - **Return-tuple order is canonical**: ints, then strings, then longs (same as arguments); v2's
   scripts.json tuple order is its own inference and inconsistent — only its counts are used.
-## Shapes added while chasing the tail (2026-07-28: 289 fallbacks → 12)
+## Shapes added while chasing the tail (2026-07-28: 289 fallbacks → 3)
 
 Everything below is verified by `CS2Tail` (decompile → recompile → compare bytes over all 6568).
 
@@ -186,11 +186,42 @@ Everything below is verified by `CS2Tail` (decompile → recompile → compare b
 - **Hook opcodes carry an `@N` operand** (which target the bind applies to) and four scripts carry a
   container **name** field; both are now in the syntax (`cc_setonop@1(…)`, `@name("script722")`).
 
-- **DEFERRED shapes (asm fallback, 12 scripts / 0.18%)**: return values pushed *before* later
-  statements run (script 564 — needs a way to write an early push); conditional exits leaving the
-  region (1230/1231/4908); value-carrying arms (948/4737); batched stores that strand a value
-  (4738/5268); calls whose results are consumed in ways the stack walk can't follow (568/4361); a
-  param lookup with a non-literal param id, where the result type can't be resolved (6567).
+### Second pass — the last dozen (same day)
+
+- **`stackN` slots: values pushed before the statements that follow them.** Jagex's compiler hoists
+  an argument or a return value out ahead of other code (script 564 pushes its return value, then
+  runs another statement, then returns). That is a pseudo-local living on the operand stack:
+  `stack0 = 1;` evaluates and leaves the value there, `return stack0;` costs no instructions. A
+  value still pending when a statement completes gets named this way, and **named slots may cross
+  an if-arm** — script 948's then-arm pushes four values that the return after the if picks up,
+  which is a value-carrying arm the source can now express.
+- **The same GOTO can be two different things**, and only trying tells them apart: an empty `else`
+  marker on the outer if, or a nested if's own marker sharing the outer's exit (script 1230). The
+  structurer claims it, and hands it back if the body then fails to parse — with a stack snapshot
+  so the retry starts clean.
+- **A batch store is defined by what follows**, not by what's pending: only when enough consecutive
+  stores follow to consume everything is it `[a, b] = [e1, e2]`. Otherwise it's an ordinary store
+  happening while an earlier push waits (script 5268).
+- **Unstructurable scripts must not invent return signatures.** A linear walk through a script
+  whose stack discipline can't be followed reports returns that were never there (script 4738 looks
+  like it returns an int), and every caller then trips on it. Call-site votes are the only evidence
+  used for those.
+- **Script-call argument types come from the callee's header, never from ScriptVarType chars.**
+  A synthetic `"iiil"` signature routed through the char mapping put long arguments on the int
+  stack — the long types spell themselves 0xCF/0x8C/0xA7/0xFB/0xC2, not `l`.
+- **A computed param id types itself from its consumer** (script 6567 walks a range of struct
+  params, some int and some string): the store right after the lookup says which stack it came off.
+  The compiler needs no matching rule — an assignment's store opcode comes from its target.
+
+- **DEFERRED shapes (asm fallback, 3 scripts / 0.05%)**:
+  - **568** — not decompilable in principle, and not our gap: it is a debug script (one of the four
+    named ones, 0 args, prints uninitialised locals) that calls `script_569` with **six ints where
+    the callee declares five ints and a string**. The bytecode's stacks don't balance, so the
+    client itself would read garbage there.
+  - **4738, 5268** — an early push landing *inside* the next statement's expression rather than
+    ahead of it (between two operands of a string merge). `stackN` places a push before a
+    statement; expressing one in the middle would need a comma-operator-ish form, which isn't worth
+    adding to a language meant to be hand-edited for two scripts.
 
 ## Design constraints for the structurer/recompiler pair
 
