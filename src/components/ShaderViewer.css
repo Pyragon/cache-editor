@@ -60,3 +60,13 @@
   padding: 20px;
   color: #888;
 }
+
+/* the deliberate-read-only explanation, a shade calmer than a warning */
+.shader-note-readonly {
+  line-height: 1.6;
+}
+
+.shader-note-readonly code {
+  font-size: 11px;
+  opacity: 0.85;
+}
