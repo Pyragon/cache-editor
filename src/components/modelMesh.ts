@@ -31,8 +31,8 @@ export async function buildTexturedModelMesh(model: ModelData): Promise<Textured
 
   // Bucket visible faces by texture id (-1 = flat colour; ids without a
   // dumped material PNG fall back to flat so nothing renders untinted-white).
-  // Textured faces whose mapping produces non-finite UVs are dropped — the
-  // client draws that zero-scale NaN garbage as an invisible smear.
+  // A zero-scale mapping poisons one UV coordinate; the writer pins it to a
+  // texture edge and the face still draws, as it does in the client.
   const writeUVs = makeUVWriter(model)
   const uvScratch = new Float32Array(6)
   const buckets = new Map<number, number[]>()

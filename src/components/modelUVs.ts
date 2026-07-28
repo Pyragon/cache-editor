@@ -58,9 +58,10 @@ function jagexNormalSpace(
   return space
 }
 
-/** Writes the face's six UV values into `out` at `base6`. Returns false when
- *  the mapping degenerates (non-finite UVs — the client's zero-scale NaN case);
- *  the out slots are zeroed and the caller should drop the face. */
+/** Writes the face's six UV values into `out` at `base6`. Always returns true:
+ *  a degenerate (zero-scale) mapping is pinned to a texture edge rather than
+ *  rejected, because the client draws those faces too. The boolean is kept so
+ *  callers don't have to change if a genuinely undrawable case turns up. */
 export type UVWriter = (f: number, ia: number, ib: number, ic: number, out: number[] | Float32Array, base6: number) => boolean
 
 /**
@@ -123,14 +124,13 @@ export function makeUVWriter(model: ModelData): UVWriter {
       }
       // NO finite-guard on these. The client's own math runs 64.0F/0 = Infinity
       // straight into the matrix rows (method11256/11257 have no zero check), so
-      // every UV that touches a zero-scale axis comes out NaN/∞ and the face
-      // degenerates to an invisible smear. Clamping the scale to 1 "repaired"
-      // such mappings into valid projections the client never draws: Lumbridge
-      // fountain (model 24520) carries its fish-sheet face (texture 54) on a
-      // type-2 mapping with scaleY 0, and the clamp tiled crisp fish across the
-      // basin floor. JS shares Java's IEEE ∞/NaN semantics, so letting them flow
-      // reproduces the client bit-for-bit; writeUVs reports the non-finite
-      // result (returns false) and callers drop the face.
+      // a UV touching a zero-scale axis comes out NaN/∞. Clamping the scale to 1
+      // "repairs" the mapping into a valid projection the client never draws:
+      // the Lumbridge fountain (model 24520, texture 54, type-2 scaleY 0) tiled
+      // crisp fish across its basin floor. JS shares Java's IEEE ∞/NaN
+      // semantics, so letting them flow reproduces the client's arithmetic — and
+      // writeUVs then pins the poisoned coordinate to a texture edge, since the
+      // client DRAWS these faces (see the note there).
       const space = jagexNormalSpace(
         textureNormalX![m], textureNormalY![m], textureNormalZ![m],
         textureRotation![m] & 0xFF, sx, sy, sz,
@@ -276,17 +276,27 @@ export function makeUVWriter(model: ModelData): UVWriter {
         }
       }
 
-      // A zero-scale axis in the mapping poisons these with NaN/∞ — the client
-      // draws that garbage as an invisible smear; we drop the face instead.
-      if (!Number.isFinite(u[0]) || !Number.isFinite(v[0]) ||
-          !Number.isFinite(u[1]) || !Number.isFinite(v[1]) ||
-          !Number.isFinite(u[2]) || !Number.isFinite(v[2])) {
-        for (let i = 0; i < 6; i++) out[base6 + i] = 0
-        return false
-      }
+      // A zero-scale axis poisons one coordinate with NaN/∞ — and the client
+      // DRAWS that face anyway. Traced end to end for the chapel window (model
+      // 57928, texture 715, cube mapping scaled 3745/17822/0):
+      //   f_54 = 64/0 = ∞, so f_57 = (n·row3)/∞ = NaN, and since every NaN
+      //   comparison is false the dominant-axis test (method11254) can never
+      //   pick that axis — it falls through to an X face, whose U comes off
+      //   the ∞-scaled row and is itself non-finite (method11255, i_7 4/5).
+      // The client hands those coordinates to the GPU as they are. Sampling at
+      // a garbage coordinate returns SOME texel, and texture 715 is a uniform
+      // 0x050505 fill, so in game the window is a solid black pane — which is
+      // exactly what it looks like. Dropping the face instead left a hole you
+      // could see the world through.
+      //
+      // Feeding NaN into three.js is undefined across GPUs, so the non-finite
+      // component is pinned to a texture edge (−∞/NaN → 0, +∞ → 1): one texel
+      // stretched over the face, which is what the client's garbage coordinate
+      // amounts to. The finite coordinate is left exactly as computed.
+      const edge = (n: number) => (Number.isFinite(n) ? n : n > 0 ? 1 : 0)
       for (let i = 0; i < 3; i++) {
-        out[base6 + i * 2]     = u[i]
-        out[base6 + i * 2 + 1] = v[i]
+        out[base6 + i * 2]     = edge(u[i])
+        out[base6 + i * 2 + 1] = edge(v[i])
       }
       return true
     }
