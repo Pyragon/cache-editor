@@ -107,7 +107,14 @@
 /* --- playback preview modal --- */
 
 .cutscene-player-dialog {
-  width: min(1180px, 96vw);
+  width: min(1720px, 97vw);
+}
+
+/* The shared preview-modal body caps itself at 960px, which is right for a
+   model preview and wrong here: without this the dialog widens and the content
+   stays in a 960px column on the left. */
+.cutscene-player-dialog .anim-preview-body {
+  width: 100%;
 }
 
 .cutscene-player-main {
@@ -120,7 +127,10 @@
   position: relative;
   flex: 1;
   min-width: 0;
-  aspect-ratio: 16 / 9;
+  /* Height drives this box, NOT an aspect ratio: an aspect-ratio combined with
+     a max-height transfers into a maximum WIDTH, which kept the stage narrow no
+     matter how wide the dialog got. The canvas inside is what holds a ratio. */
+  height: clamp(360px, calc(100vh - 210px), 1100px);
   background: #000;
   border: 1px solid #2c2c34;
   border-radius: 8px;
@@ -136,7 +146,7 @@
    absolutely-positioned inner so it can never stretch the row taller. */
 .cutscene-player-actions {
   position: relative;
-  width: 290px;
+  width: 320px;
   flex-shrink: 0;
   border: 1px solid #2c2c34;
   border-radius: 8px;
@@ -220,7 +230,6 @@
 
 .cutscene-player-scrub {
   flex: 1;
-  accent-color: #4fc3f7;
 }
 
 .cutscene-player-time {

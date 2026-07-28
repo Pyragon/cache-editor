@@ -585,3 +585,46 @@
   font-size: 13px;
   color: #d9a441;
 }
+
+/* ---------------------------------------------------------------------------
+   Shared slider: a hairline track with a round thumb. The browser default
+   (a chunky bar with a square grip) is not wanted anywhere in this app, so
+   every range input should carry `rs-slider` — the pseudo-elements are
+   -webkit-only, which is all a Chromium-only app needs.
+   --------------------------------------------------------------------------- */
+
+.rs-slider {
+  appearance: none;
+  height: 14px; /* hit area; the visible track is the 2px line */
+  min-width: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.rs-slider::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.rs-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: none;
+  background: #7eb8ff;
+  margin-top: -4.5px; /* centres the thumb on the 2px track */
+}
+
+.rs-slider:hover::-webkit-slider-thumb {
+  background: #a5cfff;
+}
+
+.rs-slider:disabled {
+  cursor: default;
+}
+
+.rs-slider:disabled::-webkit-slider-thumb {
+  background: rgba(255, 255, 255, 0.25);
+}

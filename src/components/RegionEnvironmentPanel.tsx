@@ -373,7 +373,7 @@ function Slider({ label, on, onToggle, value, min, max, step, onValue, hint, bak
   }, [preview != null])
   return (
     <Row label={label} on={on} onToggle={onToggle} hint={hint} baked={baked}>
-      <input type="range" className="env-slider" min={min} max={max} step={step} value={shown}
+      <input type="range" className="env-slider rs-slider" min={min} max={max} step={step} value={shown}
         onChange={(e) => (baked ? setPreview(Number(e.target.value)) : onValue(Number(e.target.value)))}
         onPointerUp={commit}
         onKeyUp={commit}
