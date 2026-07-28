@@ -16,10 +16,13 @@ result kind).
 | Container codec | cryogen `com.cryo.cs2.CS2ScriptContainer` | **proven: 6568/6568 byte-identical** |
 | Asm text form (fallback + study tool) | cryogen `com.cryo.cs2.CS2Assembly`, `CS2Print` | **proven: 6568/6568 byte-identical** |
 | Verifier | cryogen `com.cryo.cs2.CS2RoundTrip` | done, run after every change |
-| Structured decompiler | cryogen `com.cryo.cs2.decompiler` (+ `results/`, `statements/`) | **6279/6568 verified** |
-| Recompiler (parser → codegen) | cryogen `com.cryo.cs2.compiler` | **6279/6568 recompile byte-identically; 289 asm fallback — 100% total, all provable** |
-| Dumper/packer wiring | cryogen `CS2DefinitionDumper` | still dumps raw binary |
-| Editor page | cache-editor | raw text fallback only |
+| Tail scoreboard | cryogen `com.cryo.cs2.CS2Tail` | classifies every script OK/STRUCT/DIFF, writes `tail.txt` |
+| Signature arity probe | cryogen `com.cryo.cs2.CS2ArityProbe` | finds wrong opcode signatures from the corpus |
+| Structured decompiler | cryogen `com.cryo.cs2.decompiler` (+ `results/`, `statements/`) | **6556/6568** |
+| Recompiler (parser → codegen) | cryogen `com.cryo.cs2.compiler` | **6556/6568 recompile byte-identically; 12 asm fallback — 100% total, all provable** |
+| Script signatures | cryogen `com.cryo.cs2.decompiler.ScriptSignatures` | inferred from the cache alone (no external bootstrap) |
+| Dumper/packer wiring | cryogen `CS2DefinitionDumper` | dumps decompiled text; `buildAddEdit` compiles it back |
+| Editor page | cache-editor `CS2Viewer` | done (CodeMirror IDE, see README) |
 
 The **old cryogen decompiler is deleted** (Cody's call, 2026-07-27): `com.cryo.cache.loaders.cs2`
 lost everything except `CS2Type`/`CS2ParamDefs` (kept — they're the enums/structs/params type
@@ -127,13 +130,67 @@ the five cp1252-unmappable bytes, so Java Strings are safe carriers.
   call), NOT from the bootstrap signatures, which over/under-count some scripts.
 - **Return-tuple order is canonical**: ints, then strings, then longs (same as arguments); v2's
   scripts.json tuple order is its own inference and inconsistent — only its counts are used.
-- **DEFERRED shapes (asm fallback, ~213 scripts / 3.2%)**: break-GOTO *ladders* (an early break
-  inside a case hops to the next case's terminal break, which hops to the join — script 36) often
-  combined with **case fall-through** (a case body without a terminal break running into the next
-  case); complex condition trees beyond AND-of-ORs (scripts 376/373); while-loops whose back-jump
-  doesn't land on the tracked condition start (script 366/125 — likely loop-head variants);
-  interleaved/partial tuple-store runs (scripts 661/73/23); ~12 scripts with wrong bootstrap
-  return signatures (script 108 — fix by inferring signatures ourselves from RETURN sites).
+## Shapes added while chasing the tail (2026-07-28: 289 fallbacks → 12)
+
+Everything below is verified by `CS2Tail` (decompile → recompile → compare bytes over all 6568).
+
+- **Conditions are arbitrary short-circuit trees**, not the && -of-|| special case that was
+  originally assumed. Each test compiles to either `BRANCH(→success)` (fails through to the next
+  test — an || link) or `BRANCH(+1) GOTO(→fail)` (holds through to the next — an && link), so a
+  head is a flat run of tests wired by jump targets. Merging adjacent tests back into && / || pairs
+  recovers `a || (b && c)` and `(a || b) && c` alike. Which merge to take first **is not decidable
+  locally** — in `(a && b) || c` the b/c pair also satisfies the || rule but leads nowhere — so the
+  decompiler walks every grouping (an interval DP) and keeps whatever reduces completely.
+- **How far a head reaches also isn't decidable one test at a time**: a group may only merge once
+  its own successors have, so the longest run that reduces to a single node landing on the code
+  right after it wins. Two guards keep that from swallowing the body: only value-producing
+  instructions may sit between tests, and **a head never reaches past a back-jump target**, since
+  that is where a loop's own condition starts (script 89).
+- **A loop's back-jump must land on the head's condition start.** A back-jump to anywhere else
+  belongs to a loop nested at the end of the body — the enclosing construct is a plain if, and the
+  body region structures that loop itself (script 366).
+- **An if with an empty body** leaves the head's own false-exit GOTO in the position where a body's
+  trailing jump would sit; reading it as one invents an `else` and emits a jump that never existed
+  (script 112).
+- **Switch clauses are positional.** The default body is usually last, sometimes inline before the
+  first case, and occasionally **wedged between two cases** (script 385 keeps a `case -1` after it),
+  so `SwitchStatement` records its index among the cases. A clause's trailing `break` is a real
+  instruction that is mandatory except on the clause running into the join, so it can't be derived
+  from position — the source carries an explicit `break;`. A GOTO in the break position that is a
+  preceding BRANCH's false-exit is **not** a break. A switch with an empty table and no default
+  jump is just its selector being evaluated (script 4656).
+- **Tuple values are ordinary pushes.** They can be stored (`[a, b] = f()`), fed straight into
+  another call as arguments (`if_setsize(getdimensions(), 0, 0, comp)`), or discarded — one POP per
+  returned value, in the callee's signature order. Store runs are **not** in descending component
+  order: components live on their own typed stacks, so a `[int, string]` pair stores whichever type
+  the compiler emitted first; the run is however many consecutive stores consume every component
+  once, and the source order is the reverse of the store order.
+- **A store with more than one value pending is a batch** (`[a, b] = [e1, e2]`), not a run of
+  assignments: the compiler evaluated every right-hand side before storing any of them, which
+  differs whenever a later expression reads an earlier target.
+- **Return signatures come from the cache, not from cs2-decompiler-v2.** A RETURN takes whatever is
+  pending, so reading it off the stacks makes a script's header a result of decompiling rather than
+  an input to it; the corpus is then iterated to a fixed point because a script's returns can only
+  be read once its callees' are. Recursive scripts (1467 calls itself) are seeded from how their
+  call sites consume the result — the store run most call sites agree on. Dropping the v2 bootstrap
+  scored **better** than keeping it: its wrong guesses were worse than starting from nothing.
+- **Four opcode signatures were wrong**, found by `CS2ArityProbe` rather than by reading the client
+  one handler at a time: control never transfers with values pending, so between two jumps a correct
+  table's pushes and pops cancel exactly, and an op that appears only in unbalanced runs is a bug
+  with its correction attached. `IF_SETMODELTINT` pops the component too, `DETAILCANSET_*` take
+  their setting argument, `IF_SETMOUSEOVERCURSOR` is a setter that pushes nothing, `POP_2_INT`
+  discards two ints. Every `X_PARAM` op pops the subject it queries (only `instr6771` doesn't — its
+  subject is the hooked component). All confirmed against darkan's interpreter.
+- **Long-typed hook params**: the long-stack type characters are 0xCF/0x8C/0xA7/0xFB/0xC2 (the five
+  `createLongJagexType` entries in `CS2Type`), not `l`.
+- **Hook opcodes carry an `@N` operand** (which target the bind applies to) and four scripts carry a
+  container **name** field; both are now in the syntax (`cc_setonop@1(…)`, `@name("script722")`).
+
+- **DEFERRED shapes (asm fallback, 12 scripts / 0.18%)**: return values pushed *before* later
+  statements run (script 564 — needs a way to write an early push); conditional exits leaving the
+  region (1230/1231/4908); value-carrying arms (948/4737); batched stores that strand a value
+  (4738/5268); calls whose results are consumed in ways the stack walk can't follow (568/4361); a
+  param lookup with a non-literal param id, where the result type can't be resolved (6567).
 
 ## Design constraints for the structurer/recompiler pair
 

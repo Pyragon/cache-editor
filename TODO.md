@@ -208,12 +208,10 @@ real cache, in rough risk order:
 - **The format spec, emission patterns and the pipeline's state live in `docs/cs2.md` — read it
   first.** Decompiler and recompiler are cryogen's (`com.cryo.cs2`); the editor page is done and
   signed off (see README).
-- **The 289-script asm tail.** Those scripts round-trip byte-identically but only as assembly
-  text, because the structured decompiler can't shape them yet — break ladders / case
-  fall-through and value-carrying arms (`if (c) return f();` sharing one RETURN), which need
-  break-statement and conditional-expression representations. Use `CS2VerifyOne` as the oracle.
-- **Own return-signature inference**, replacing the cs2-decompiler-v2 `scripts.json` bootstrap —
-  it's also what makes some function headers wrong today.
+- **The last 12 asm fallbacks**, itemised with their script ids at the end of `docs/cs2.md`. Each
+  is its own oddity now rather than a family; the biggest single missing feature is a way to write
+  a **return value pushed before later statements run** (script 564). `CS2Tail` is the scoreboard
+  (writes a per-script `tail.txt`), `CS2VerifyOne <id>` the per-script diff.
 
 ## General Editor
 
