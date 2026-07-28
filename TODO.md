@@ -14,7 +14,6 @@ Open work only — completed passes live in git history and README.
 - **Not ported in `skeletalAnimation.ts`:**
   - **Frame interpolation/tweening** (`animatePartialtransform`, blending between two frames) — real animations use this for smooth playback between keyframes; playback currently poses one exact frame at a time.
   - **The BAS equipment-matrix branch inside `animateTransform`** (the `verticesData.isNotEmpty()` case, a full 3×3 rotation-matrix composition) — always empty/null in the base playback path (confirmed via every real call site), needed only for equipment-piece-specific pose adjustments.
-  - **Billboard effect transform types** (8/9/10 offset/rotate/scale) — mutate billboard-group data no inverted index exists for yet.
   - **Submesh gating** (`verticesSubmeshes`, restricting a transform to specific equipment pieces in a composite) — not built into `mergeModels()`'s output yet, so multi-part composites (identikit/equipment stacks) can't be animated with full correctness.
 - **Type-5 reveal limitation in ModelViewer's in-place path**: it can hide faces (collapse to a degenerate triangle) but can't REVEAL faces that were alpha-hidden at rest (they're never built into the buffer). The chathead preview rebuilds geometry per frame and handles both directions.
 - **Transform math not verified against the live client** — a careful line-by-line port of darkan source, but treat it as unverified until someone compares stepped poses against real client rendering on a rigged model.
@@ -32,6 +31,27 @@ Open work only — completed passes live in git history and README.
 - **`sound_effects_midi` editor not tested in a real browser session** — typecheck/lint/build pass; the dumper/decoder is verified byte-identical independently.
 
 ## Maps
+
+### TEST: the region environment tab (2026-07-28)
+
+The 3D view's **Env** tab edits the environment record — the tail of the
+region's terrain archive (`maps/environments/<id>.json`): sun, fog, cube
+texture, bloom, skybox. Typecheck, lint and build pass; untested against a real
+cache. Needs cryogen's matching path change (`MapDefinitions.environmentFile`
+now resolves `maps/environments`) to be in place first, or a re-dump writes to
+the old folder and the tab finds nothing.
+
+- **Baked vs live.** Sun direction (the compass dial) and ambient should rebuild
+  the region ONCE, on release — not per drag step. Fog colour/depth, bloom, sun
+  colour and the skybox should apply with no rebuild at all.
+- **Flag bits, not zeroes.** Unticking a field's checkbox must remove it from
+  the record (the flags byte is what defines the layout), and ticking it back on
+  starts at the client default rather than 0.
+- **Nothing lost on save.** After Save, the region's `environments/<id>.json`
+  still carries its `lightingGrid` and `opcodeOrder` — the opcode order alone is
+  what keeps ~560 regions repacking to identical bytes.
+- **Draft flow.** Undo/redo steps through env edits alongside placements, and
+  Discard restores the file values in both the panel and the scene.
 
 ### TEST: the object/marker editing pass (2026-07-25/26)
 
@@ -86,7 +106,7 @@ real cache, in rough risk order:
 - **EDITOR SURFACES and editor gaps — see `EDITOR.md`.** Cody's rule: *"this is an editor, we need to be able to edit absolutely everything"* — read-only is a bug. `EDITOR.md` holds two things: the cache-field knowledge our render traces produced (ground blending, loc models/textures, per-texture material fields, region environments, point lights, face-level data), so building the UI doesn't mean re-deriving the trace; and the running list of map-editor gaps requested 2026-07-25 — loc panel detail + live preview + dirty/unsaved warnings + `transformTo` preview, editable sound emitters and a sound-emitter table, a map icon/sprite table showing which objects display each, sliders on light fields, and terrain material/colour painting. **Add an entry there whenever a render change teaches us how a cache field behaves, or a panel shows something it can't edit.**
 - **REVISIT: what the 'barrier' marker actually means (Cody, 2026-07-25).** The red marker kind is *our* inference, not a client concept: `isMarkerModel` treats any 1–4 face model painted entirely in HSL16 **29113** (teal) or **20287** (green) as an invisible marker loc, and a green one with no sound/`mapCategoryId`/`mapSpriteId` on its def falls through to `'barrier'`. Introduced with the original 3D scene viewer (7571ff5). Worth checking against the client/darkan: is green really a collision-only blocker (bridge edges, ledge guards), and should the kind require `blocks`/`clipType` from the object def rather than resting on the sentinel colour alone? Also confirm the two sentinel colours are the complete set. **Context (2026-07-25): the long-open question of how the client HIDES these is answered — it's plain back-face culling.** Marker quads are single-sided and face downwards (all 6 green faces in model 68757, both faces of teal marker 1105), and the client culls back faces unconditionally: `DirectXRenderer` sets `D3DRS_CULLMODE = D3DCULL_CW` once at init, `OpenGLRenderer` does `glEnable(GL_CULL_FACE); glCullFace(GL_BACK)`, and neither is toggled anywhere. There is no `20287`/`29113`/`33728` constant in the client at all — the colours are an authoring convention, not something the engine reads. So `isMarkerModel` is now purely an EDITOR affordance (it puts a diamond where a marker is); the client-correct hiding comes for free from culling. That also means a sentinel-coloured face mixed into a real model — the Lumbridge signpost sign, loc 69787 model 68757, 6 green faces among 942 — needs no special case.
 - **ALL LIGHTING WORK LIVES IN `docs/lighting.md`** (moved there 2026-07-26). The sun formula and its reverted port, tone mapping and why the bake clamp starves it, the lighting-detail trace, loc and ground point lights, the agreed plan to move point lights into the shader, per-object `ambient`/`contrast`, ModelViewer's contrast base, HDR materials and texture gamma. They are one interlocking job — two attempts have been reverted for taking an item on its own — so they are not tracked as separate entries here.
-- **Pre-13 mesh upscale before posing — check the other animation previews (2026-07-25).** Fixed for map-scene locs: a frame's type-0/1 origins and translations are authored in the `<<2` upscaled space (the client runs `RSMesh.upscale()` at mesh build, BEFORE `Animation.rasterize`), so posing a raw pre-13 mesh and scaling the result afterwards makes every translation 4× too far — rotations/scales are ratios and survive, which is why it looked *nearly* right. `upscaleModel()` in models.ts now bakes it in for animated locs. The same pattern is still unfixed in `useSequencePlayback` (ModelViewer preview), `SpotAnimationViewer` and `CutscenePlayerModal`, which all pose the raw model: each needs `upscaleModel(model)` at the pose call, but check their camera/fit first — geometry becomes 4× larger, which matters if the view doesn't auto-fit.
+- **Pre-13 mesh upscale before posing — check the other animation previews (2026-07-25).** Fixed for map-scene locs: a frame's type-0/1 origins and translations are authored in the `<<2` upscaled space (the client runs `RSMesh.upscale()` at mesh build, BEFORE `Animation.rasterize`), so posing a raw pre-13 mesh and scaling the result afterwards makes every translation 4× too far — rotations/scales are ratios and survive, which is why it looked *nearly* right. `upscaleModel()` in models.ts now bakes it in for animated locs. The same pattern is still unfixed in `useSequencePlayback` (ModelViewer preview) and `SpotAnimationViewer`, which pose the raw model: each needs `upscaleModel(model)` at the pose call, but check their camera/fit first — geometry becomes 4× larger, which matters if the view doesn't auto-fit. **Not `CutscenePlayerModal`** (checked 2026-07-28): its entities come from `loadModelComposite`, which already upscales pre-13 parts in place and marks them v13 so no renderer double-applies it — adding `upscaleModel` there would make every entity 4× too big.
 - **"Remove roofs" is a per-TILE rule, not a per-plane one — don't let it eat the bridge railings.** We don't implement the client's setting at all today; `MapSceneViewer`'s feature table says as much ("We use per-plane toggles instead of the client's roof-removal rule"). Whenever it does get built, the naive version — hide everything on plane >= N — is wrong, and the Lumbridge bridge is the case that proves it: its **railings are locs on plane 1** (45143/45146/45147/45148 on tile rows y=24 and y=27), so a per-plane cull deletes them while leaving the deck, which sits on rows y=25/26 and gets shifted down to renderPlane 0 by the bridge flag. The bridge would render as a floating walkway with no sides. How the client actually does it:
   - `Preferences.removeRoofs` / `removeRoofsOptionOverride` are tri-state: 0 never, 1 the contextual mode ("when you walk under one"), 2 always. `MapRegion.handleRoofDisplay()` only runs its sweep when the override is 2.
   - The test is a **per-tile mask**, `tileFunctionMasks[plane][x][y] & 0x4`, checked at the camera/player tile; `calculateVisibilityAdjustments` then flood-fills outward over the enclosed area and writes a per-tile `settingsBits` byte the renderer consults tile by tile. Nothing anywhere hides a whole plane.
@@ -164,8 +184,151 @@ real cache, in rough risk order:
 
 - **Verify the chathead emote list (`src/loaders/headAnimations.ts`) against the new gamevals dump.** The list was transcribed from darkanrs `world-server/.../dialogue/HeadE.java` (2026-07-20); cross-check the names/animation ids against the gamevals dump and reconcile any differences.
 
+## Models
+
+- **VERIFY the zero-scale mapping change (2026-07-28).** Faces whose texture
+  mapping has a zero scale used to be dropped; they are now drawn with the
+  poisoned coordinate pinned to a texture edge, because that is what the client
+  does (full trace in `EDITOR.md`). This fixed the chapel windows — see-through
+  before, solid black now, matching the game — but it touches **2,077 models /
+  73,606 faces**, so it wants a wider eyeball. The known counter-case is the
+  **Lumbridge fountain (model 24520, texture 54, one face)**: check its basin
+  floor doesn't now carry a smear of the fish sheet.
+
+### HANDOFF 2026-07-29 (overnight): particles + the brightness question
+
+State when Cody went to bed: flames looked right, but (a) smoke grey not black,
+(b) particles vanishing by distance/angle, (c) fire's ground-glow missing,
+(d) whole viewer brighter than the client, all regions. What was done overnight,
+each with the reasoning, so testing can be targeted:
+
+1. **Vanishing fixed (real cause found).** The chapel region holds **68 emitter
+   systems** (5×8 candles + 4×2 + 4×2 smoke + 2×6 fires) against a nearest-32
+   budget ranked from the CAMERA — orbiting away let the candles nearest the
+   camera evict the fire in the middle of the screen. Ranking is now against
+   the **orbit target** (what you look at), `MAX_ACTIVE` raised to 64. There is
+   no distance cut-off at all any more.
+2. **`adjustsLightIntensity` traced properly** (DirectX `Class54`, after a
+   wrong guess the day before — EDITOR.md corrected): it means "lit by the
+   scene ambient like geometry", NOT "lights its surroundings". Ported as
+   `uAmbient`. The chapel's ambient is ≈1.01 so the visual effect there is
+   small; it matters in dark regions.
+3. **The ground pool = HDR × bloom, and the numbers now line up.** Material
+   1585's hdr op is a constant fill 401 → multiplier ≈**4.03**; with the
+   bloom gate added last round the flame renders ~4× overbright and the bloom
+   composite should spread it into the pool. **Cody never saw a build with the
+   gate + this multiplier active** — retest bloom on/off before assuming the
+   pool is still missing.
+4. **`premultiplyAlpha: 'none'` added to the particle texture load** — the
+   project-wide bitmap gotcha (see memory/ImageBitmap note); without it every
+   soft-alpha sprite has its rgb darkened by its own alpha at upload.
+5. **Smoke: capacity was already fixed** (per-producer rate×lifetime; the plume
+   wants ~2,600, one 512 cap starved it). If it is STILL grey after this build,
+   the remaining suspect is not the particles: it is (d).
+
+### FOLLOW-UP 2026-07-28: (b) fixed earlier; (a)/(c) were BILLBOARDS — TEST
+
+Cody retested with bloom on: smoke still grey, no light behind the fire, scene
+still too bright. Tracing (c) found the real mechanism and it isn't bloom at
+all: **the glow behind a fire's flames and its dense smoke column are billboard
+sprites** — camera-facing quads pinned to model faces (model 58392: 4 glow
+sprites ~500 units wide + 12 near-black smoke sprites stacked ~1.6 tiles high,
+next to its 6 particle emitters) — which neither 3D scene rendered at all. Full
+trace in `EDITOR.md` ("Billboards on loc models"); the overnight item 3 above
+("the ground pool = HDR × bloom") is superseded by it.
+
+Done (typecheck/lint/build pass, untested in a browser):
+
+- **`sceneBillboards.ts`** renders them in the map scene and the cutscene
+  player, per the DX path: quad at the host-face centroid pulled `distance`
+  units toward the camera, 2×size2d wide, tinted by the raw face colour with
+  alpha `255 − faceAlpha`, material texture on top, alpha-blended, z-write off.
+  `stationary` types draw only while Bloom is off (that is what the flag
+  means); `hasUid` host faces are now skipped by both scene mesh builders
+  (`billboardHiddenFaces`), matching the client dropping them from the mesh.
+- **Check:** the fire by the God Wars chapel shows a warm glow sprite behind
+  its flames and a tall dark smoke column; candles/torches around the chapel
+  for their own sprites; no stray coloured triangles where fires stand (the
+  hidden host faces); plane toggles still hide a fire wholly; Bloom Off makes
+  any `stationary` stand-in sprites appear, not disappear.
+- **Billboard ANIMATION is ported too (2026-07-28, round 2).** Cody's first
+  test showed the fire buried under a giant static cloud: at rest pose all 12
+  smoke sprites draw at once at full base alpha. Decoding animation 12409
+  proved the client look depends on the animation — type 5 fades most puffs to
+  INVISIBLE at any instant (verified offline: 2-4 of 6 per cluster at alpha 0
+  per frame), type 10 breathes each group 0.5×-1.66×, type 9 rolls them, and
+  type 1 raises the carrier faces. `skeletalAnimation.ts` now handles 8/9/10
+  (group id = the attachment's `depth`), and animated locs' sprites are driven
+  per posed frame through the animated-loc records (`addAnimated`), hidden
+  until their first pose. Check: the smoke is now sparse wisps that rise and
+  flicker; the glow pulses; nothing lingers after deleting a fire placement or
+  painting terrain under it (the rebuild/removal paths call
+  `billboards.remove()`).
+- **Not ported:** any HDR on billboard materials (the fire's two are
+  `hdr: false`); frame TWEENING (we step 5-tick keyframes, the client lerps —
+  smoke moves in 100ms steps); the roll direction sign is unverified (pick by
+  eye against the client if it reads wrong); the cutscene player never
+  animates locs, so animated-loc billboards stay hidden there (static-loc
+  torches still show).
+- **Round 3 (2026-07-28): order + colour space.** Cody's second test: the glow
+  drew as a near-opaque ball OVER the particles (in-game it sits faintly
+  behind), and the smoke was still too much. Two causes, both fixed:
+  (1) `RA()` is z-write (D3D render state 14), not blending — billboards draw
+  in the OBJECT pass with their host model and the client draws particles
+  LATER, over them; ours shared renderOrder 2 and the glow's 100-unit
+  camera-pull made three sort it nearer and draw it LAST. Billboards are now
+  renderOrder 2, particles 3. (2) The billboard/particle tints are sRGB
+  palette values written into our LINEAR buffer, so the OutputPass re-encode
+  brightened them (~#32312e smoke displayed ~2.4× lighter, the glow washed out
+  pale); both shaders now linearize the tint (`pow 2.2`). NOTE: the rest of
+  the scene still writes raw — that global gap is (d); these two passes are
+  now colour-correct in isolation, so if the fire looks right but the ground
+  behind it is still bright, that is (d), not the fire.
+- **Round 4 (2026-07-28): fog on sprites; footprint MEASURED as matching.**
+  Cody's third test: "billboards still a bit much, almost too large."
+  Cross-section profiles of his two captures (warmth through the fire centre,
+  GIF-frame-averaged) came out nearly identical — horizontal FWHM 47% in-game
+  vs 48% ours, vertical 36% vs 29%, peaks 225 vs 198 — so the quad SIZE math
+  (full width 2×size2d) is right; verified the client's particle quads too
+  (Class54 corners = pos ± (right±up)·(size>>12) → full width 2s, matches our
+  gl_PointSize). What WAS missing: the client's "Particle" effect is
+  fixed-function (the shader dump is just a 4-entry param table), so D3D
+  vertex FOG applies to billboards and particles exactly as to geometry, and
+  ours ignored scene.fog — a distant glow rendered full-vividness instead of
+  muted toward the backdrop. Both runtimes now take `setFog` (wired to
+  applyFog in the map viewer, live with the draw-distance slider, and to the
+  cutscene's fixed fog), fading the FINAL colour toward the raw fog colour so
+  fully-fogged sprites converge to the same backdrop meshes do. If the glow
+  still reads strong CLOSE UP (fog ≈ 0 there), the remaining suspects are
+  flame prominence (no tweening, camera angle foreshortening the flame column
+  against a camera-facing glow) — compare at the client's own camera angle
+  before touching the traced sizes.
+- If the smoke reads blacker but the scene behind it is still washed out, the
+  remainder is (d) below, as suspected.
+
+**(d) is the real morning item — the global brightness gap.** `docs/lighting.md`
+documents it as ONE interlocking job (env sun runs to ~2.75×, compressed by the
+client in a post pass, gated by "lighting detail"), with TWO reverted attempts
+and an explicit lesson: any change here shifts the whole scene and must land
+with a same-commit calibration against a live-client screenshot. That
+calibration needs Cody at the client, so it was deliberately NOT attempted
+overnight. The dark ground behind the smoke in his screenshot is this issue;
+the smoke alpha-blends against whatever is behind it, so it can never look as
+black as the client's while the ground behind it is too bright.
+
+- **VERIFY the scene particle runtime (2026-07-28).** `sceneParticles.ts` runs
+  the client's emitter sim per loc emitter face in both 3D scenes; fires, torches
+  and waterfalls should now burn (object 61761 by the God Wars chapel is the
+  test case). Untested in a browser. Worth checking: flames sit ON their loc
+  rather than under/beside it (the placement matrix and the y/z negation),
+  particle SIZE looks right at different camera distances (point size is a world
+  diameter converted to pixels), the frame rate holds in a dense region (budget:
+  192 particles each, nearest 48 emitters, 40-tile cull), and hiding a plane
+  hides its fires. Producers with no material fall back to a soft dot.
+
 ## Cutscenes
 
+- **RETEST FIRST (2026-07-28): the missing pieces may already be back.** The player added only ONE of the three geometry paths `buildLocsMesh` returns — the merged opaque mesh — and silently dropped the other two: `transparentLocs` (one mesh per loc carrying any transparent face: windows, fences, glass, fountains) and `animated` (locs with an idle sequence, which `buildLocsMesh` pulls out of the merge entirely). Both are now added, along with the locs' static shadows, the source region's sun (direction, ambient and colour tint), its fog, skybox, bloom and point lights. "A *class* of loc objects doesn't appear, walls and roof are fine" is exactly what dropping a whole geometry path looks like, so re-check the chapel before tracing individual loc ids. The original investigation follows.
 - **OPEN BUG (2026-07-21): a class of loc objects around the God Wars chapel don't appear (bridge stonework, church ledges/base-plinth/"bottom outer" trim); walls/roof are fine.** VERIFIED via per-loc render logging in `buildLocsMesh`: the chapel's walls (loc 61734 plane 0, 61699 plane 1), roof (61704 plane 2) and crenellations (61708 plane 3) ALL render at the correct cascaded heights (−1536 / −3584 / −4608 / −5280) — the multi-storey structure is faithful, so the earlier "walls don't render / floating" framing was WRONG. Ruled out: shape→model skip (none), marker-face hiding (only 1 genuine marker region-wide), height corruption (a red herring — the debug dedup was showing a *neighbour* region that reuses the same loc ids; the centre terrain is correct, hv[1455]=48). The missing pieces are NOT the chapel walls. `groundContourType` was ported (`contourVertexY` in mapScene.ts — ct1/2/4/5, client `ModelSM.contourToGround`) since bridges (loc 54937 ct5) and paths (ct1) need it; it builds/lints and doesn't regress the chapel, but did NOT visibly fix the reported missing pieces (the chapel ledge pieces are ct0). NEXT: get the specific loc id of one missing piece (right-click/inspect in the maps editor, or in-game Examine) and trace why THAT loc doesn't render — do not keep guessing which loc it is. (The contour port is no longer unverified — the Lumbridge bridge arch was confirmed correct on 2026-07-25 and signed off, so it stays.)
 
 - **Editing + repack.** The viewer is read-only; the cryogen side already has a verified byte-identical `encode()` (16/16), so an editable pass needs: editing UI (the usual draft/save-bar pattern), `saveItem` in the loader, a CacheBuilder repack path that reads the JSON back into `CutsceneDefinitions` (Gson → encode), and `getActions()` on the definition.
@@ -175,7 +338,8 @@ real cache, in rough risk order:
   - **Not simulated**: sounds, entity/positioned gfx, projectiles, hitmarks, hint arrows, tile messages, SET_VARIABLE/EXECUTE_SCRIPT hooks.
   - **Approximations to verify against the live client**: MOVEMENT/ROTATE facing-angle sign convention (yaw mapping is uncalibrated), walk/run/half-walk pace (assumed 1 tile per 30/15/60 cycles), and the spline row[3] term (client lerps it into `cameraPitch` — not applied).
   - The player entity renders as a cone marker — its appearance streams from the server at runtime (`CUTSCENE_BUFFER`), which the cache doesn't carry. Could offer a default identikit avatar via `playerAppearance.ts`.
-  - Terrain textures load but loc **static shadows** (the darkened ring under scenery) are skipped in the player.
+  - **The environment is the FIRST area's source region** (sun, fog, skybox, bloom, and the point lights that travel in with each copied chunk). A cutscene assembled from regions with different environments takes the first one — which is what the client does too, since a scene has one environment — but it is worth knowing if a cutscene ever looks lit like somewhere else.
+  - Fog uses a fixed 40-tile draw distance (`FOG_TILES`), the map view's default rather than the client's own setting.
 
 ## Vars
 

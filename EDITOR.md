@@ -191,6 +191,185 @@ maps, but the name is the dumper's, not the client's.
 
 ---
 
+## Particle emitters on loc models (traced 2026-07-28)
+
+**What the client does.** A mesh can bind particle producers to individual
+faces (`RSMesh.particleConfig`, footer flag 0x2). The face is a **spawn
+surface, not geometry**: each frame the renderer transforms that triangle's
+three vertices into world space and hands them to the producer
+(`MeshRasterizer_Sub2.method11273`), which scatters particles across it. The
+carrier faces themselves are painted in the invisible-marker green (HSL16
+20287) and face away from the viewer, so the client's unconditional back-face
+cull hides them.
+
+**Where it shows.** The burnt remains near the God Wars chapel (object 61761,
+model 58392) are 22 faces, **6 of which are emitter carriers** bound to
+producers 397/398. In game the loc is charred logs with flames over it; the
+editor drew the six green triangles instead, and animated them, because
+`buildAnimatedLocMesh` used `DoubleSide` where the static loc path uses
+`FrontSide`. Corpus-wide, **972 models carry emitters and 161 of those are pure
+carriers** — a single sentinel-green face whose only job is to spawn particles.
+
+**Don't skip emitter faces as a class.** An emitter can just as well bind to an
+ordinary visible face (a torch's flame on the torch's own geometry), so the fix
+is culling, not filtering. Animated loc meshes keep their placement on
+`mesh.matrix` instead of baking it into the vertices, so a mirrored placement
+reverses the on-screen winding and has to cull `BackSide` instead — the static
+path handles the same case by flipping the triangle order as it bakes.
+
+**How the editor renders it.** `sceneParticles.ts` runs one `ParticleSim` — the
+same client-faithful port the particles page and model viewer use — per emitter
+face, and draws its particles as additive point sprites with the producer's own
+material. The sim stays in MODEL space, because its physics are authored there
+(gravity, the emission axis off the face normal); a holder object carries the
+placement, negating y/z and undoing the sim's 12-bit fixed point exactly as the
+mesh builder does. Point size is a world diameter turned into pixels in the
+vertex shader, so it follows the viewport.
+
+**Blending and brightness are the material's, not the particle's.** Every
+particle material in the cache is `effectCombiner: 2` — the same alpha-blended
+path loc faces take — and that is what lets smoke be black: the God Wars plume
+(producer 179 on objects 61414/61416, material 850) is `#333333 → #000000` at
+alpha 70-90, so alpha-blending darkens what is behind it. Drawing particles
+additively cannot do that at all; it only brightens, and turned that plume into
+grey haze. Brightness comes from the material's `hdr` flag instead: the flames
+(producer 397, material 1585, `hdr: true`) are pushed past 1.0 and the scene's
+bloom pass turns that into the yellow halo a fire has in game, while the smoke's
+`hdr: false` material stays dark. Both mechanisms are the loc renderer's own —
+there is nothing particle-specific about either.
+
+A region has far more emitters than a model preview, so there is a budget:
+each emitter's ring is its own rate × lifetime (the flames settle near 500, the
+smoke plume over them near 2,600 — one shared cap starved the plume thin), and
+only the nearest 32 emitters simulate. There is deliberately NO distance
+cut-off: the orbit camera routinely sits 50+ tiles from what it is looking
+straight at, so any camera-distance radius switches fires off by view angle.
+HDR follows the scene's bloom toggle, exactly as loc materials do (the client
+gates HDR float textures on the bloom filter being live).
+
+**`adjustsLightIntensity` (TRACED 2026-07-29, DirectX path).** An earlier note
+here guessed it made the emitter light its surroundings — wrong. `Class54` is
+the HardwareRenderer's particle renderer (`aClass54_8837`), and the flag only
+batches particles and switches the renderer between `IA(sceneAmbient)` and
+`IA(1.0)` per batch (`Class54.method1095`): a flagged particle is LIT BY the
+scene ambient exactly like geometry, an unflagged one draws full-bright. It adds
+no light to anything. Ported as the `uAmbient` uniform (`setAmbient`). Also
+confirmed there: the particle pass sets no blend state of its own (it rides the
+transparent pass's alpha blending) and drops z-write via `RA(false)`.
+**CORRECTION 2026-07-28:** an earlier note here claimed the warm glow a fire
+casts is "HDR overbright spread by the bloom filter — nothing else". Wrong: the
+glow (and the dense smoke column) are **billboards** — see the billboard section
+below. The fire's particle material 1585 IS hdr ≈4.03 and does feed bloom, but
+the big halo behind the flames is a sprite the client draws explicitly.
+Emitters that fall out of range are hidden and left frozen rather than reset, so
+walking back to a fire finds it still burning. Per-plane groups hang off the
+scene's plane groups, so hiding a plane hides its fires with it.
+
+---
+
+## Billboards on loc models — a fire's glow and smoke column (traced 2026-07-28, DirectX path)
+
+**What they are.** A mesh can pin camera-facing sprites to individual faces
+(footer flag 0x4: `u16 typeId, u16 face, u8 depth, s8 distance` per entry). The
+God Wars fire (object 61761, model 58392) is the worked example: of its 22
+faces, 6 are particle-emitter carriers, **4 carry billboard type 93** — the
+warm glow behind the flames (material 920, a 128×128 white radial-alpha sprite,
+tinted `#e7d067` by the host face colour, ~500 units wide) — and **12 carry
+type 179**, the rising smoke column (material 899, a soft blob, tinted a
+near-black `#32312e`, ~800 units wide, stacked to ~1.6 tiles up). So the
+"light behind the fire" and a large share of the black plume are sprites, not
+particles, and neither is bloom.
+
+**The type config** (`billboards/<id>.json`, decoder verified against the
+client's `BillboardDefinitions`): `materialId` (opcode 1), `size2d`/`size3d`
+(opcode 2, stored −1), `shape` (4), `blendType` (5), `stationary` (6), `hasUid`
+(7). Gotchas learned from `MeshRasterizer_Sub3` (the DX mesh class):
+
+- **`hasUid` removes the host face from the mesh** — the ctor drops it from the
+  face list outright and only the sprite draws. Both fire types set it.
+- **`stationary` is a misnomer: it gates on bloom.** `method14275` draws a
+  flagged billboard only while the bloom filter is OFF (`!aBool522 ||
+  !method8471()`) — it is the fallback glow for the no-bloom look.
+- **`depth` is NOT a draw offset — it is the billboard's animation group id**
+  (transform types 8/9/10 flicker offset/rotation/scale per group; the smoke
+  puffs sit in groups 1-6). The pull-toward-camera uses the `distance` field
+  (100 for every fire billboard): view vector × `(1 − distance/len)`.
+- **Sizes are half-extents in world units** — the quad spans 2×size2d by
+  2×size3d (`Matrix44Var.method5213` scales a unit quad by size×2), and they do
+  NOT scale with the pre-13 `<<2` (the DX mesh is already upscaled).
+- **Tint = host face colour through the raw HSL palette** (not sun-lit), alpha
+  = `255 − faceAlpha`. The draw is the "Particle" shader (`Class103_Sub1`):
+  texture × DiffuseColour, alpha-blended, z-write off, right after the host
+  mesh. `shape`/`blendType` are NOT consulted in the DX path at all (the GL/SM
+  renderers use them; the ModelViewer's circle-clip/additive handling mirrors
+  those, which is close enough for previews).
+
+**Where the editor renders them.** `sceneBillboards.ts` (map scene + cutscene
+player): quads merged per material per placed loc, anchors baked to world
+space, the vertex shader does the view-space expansion, camera pull, group
+scale/roll/offset; `billboardHiddenFaces()` in models.ts feeds the `hasUid`
+skip in both scene face loops; the `stationary` gate follows the Bloom toggle.
+`ModelViewer` has its own THREE.Sprite-based rendering — which every model
+preview embeds (NPC/identikit/player/gfx/interface viewers) — and its sprites
+follow the animated pose too: anchors track the posed carrier faces, groups
+apply type-9/10 roll/scale, and the host face's baked + type-5 alpha and
+type-7 colour carry to the sprite. Still no camera pull there, and raw model
+units — a pre-13 model previews its billboards 4× large relative to the mesh.
+
+**Animation is NOT optional for these.** The fire's idle sequence (12409) is
+what makes it look right: type 1 raises the carrier faces, types 9/10
+roll/breathe each billboard group, and type-5 face fades leave only 2-4 of the
+6 smoke puffs per cluster visible at any instant (verified frame by frame).
+Rest pose draws all 12 at full base alpha — one giant cloud burying the fire.
+`skeletalAnimation.ts` handles types 8/9/10 now (`PosedVertices.
+billboardGroups`, group id = the attachment's `depth` byte, per
+`RSMesh.method2667`); the map scene drives animated locs' sprites per posed
+frame (`SceneBillboards.addAnimated`, hidden until the first pose). Still
+open: frame tweening (100ms steps vs the client's lerp), the roll-direction
+sign (unverified against the client), and the cutscene player, which never
+animates locs, so animated-loc billboards stay hidden there.
+
+**Editability.** The billboards entry has a viewer (`BillboardViewer`); the
+per-model attachments (which face carries which type, depth, distance) are mesh
+data and only become editable with the model editor. The type config's fields
+are all understood now, so a billboards *editor* pass is unblocked: size,
+material id, the two flags, with the fire glow as the live-preview case.
+
+---
+
+## Zero-scale texture mappings (traced 2026-07-28)
+
+**What the client does.** A texture mapping of type 1-3 carries three scales,
+and the cube path turns them into `64.0F / scale` (`MeshRasterizer.method11256`,
+the deob-named `particleDirection*` fields). A **zero** scale therefore becomes
+`Infinity`, which flows straight into the space matrix rows
+(`method11257` — no zero check anywhere) and poisons one projected coordinate
+with ∞/NaN. Two consequences follow, both load-bearing:
+
+- The dominant-axis test (`method11254`) can never pick the poisoned axis,
+  because every comparison against NaN is false. It falls through to another
+  cube face — whose own coordinate then comes off the ∞-scaled row.
+- The client hands those coordinates to the GPU unchanged. Sampling at a garbage
+  coordinate returns *some* texel, so **the face is drawn, not skipped**. On a
+  uniform texture that reads as a solid pane of one colour.
+
+**Where it shows.** The chapel wall (object 61735 → model 57928) puts its
+windows on 8 faces textured 715 — a flat `0x050505` fill — with a cube mapping
+scaled `3745, 17822, 0`. In game they are solid black window panes. Dropping
+those faces (what the editor did until now) left a hole you could see the world
+through. **2,077 models / 73,606 faces** across the cache hit this.
+
+**How the editor renders it.** `modelUVs.ts` reproduces the client's arithmetic
+including the ∞/NaN, then pins the non-finite coordinate to a texture edge
+(−∞/NaN → 0, +∞ → 1) because feeding NaN to a GPU is undefined across vendors.
+One texel stretched over the face — which is what the client's garbage
+coordinate amounts to. The counter-case to watch is the Lumbridge fountain
+(model 24520, texture 54, one face, cube scaleY 0): clamping the *scale* to 1
+there tiled crisp fish across the basin floor, which the client does not show,
+so the scales must keep flowing as ∞ and only the final coordinate is pinned.
+
+---
+
 ## Region environment
 
 **What the renderer does.** Reads `maps/environments/<id>.json` for sun

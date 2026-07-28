@@ -650,8 +650,14 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     // the mesh so they inherit its centering offset.
     const spriteMaterials: THREE.SpriteMaterial[] = []
     const spriteTextures: THREE.Texture[] = []
-    // host-face corner indices per sprite, so an animated pose can re-centre it
-    const spriteAnchors: { sprite: THREE.Sprite; ia: number; ib: number; ic: number }[] = []
+    // host face + group + base sizes per sprite, so an animated pose can
+    // re-centre it AND drive the billboard group effects (types 8/9/10) plus
+    // the host face's type-5 alpha / type-7 colour
+    const spriteAnchors: {
+      sprite: THREE.Sprite; smat: THREE.SpriteMaterial
+      face: number; group: number; size2d: number; size3d: number; tinted: boolean
+      ia: number; ib: number; ic: number
+    }[] = []
     if (data.billboards) {
       for (const bb of data.billboards) {
         const info = data.billboardTypes.get(bb.typeId)
@@ -660,8 +666,11 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
         const ia = triangleX[bb.face], ib = triangleY[bb.face], ic = triangleZ[bb.face]
         if (ia < 0 || ia >= vertexCount || ib < 0 || ib >= vertexCount || ic < 0 || ic >= vertexCount) continue
 
+        const tinted = def.blendType === 0
         const smat = new THREE.SpriteMaterial({
-          color: def.blendType === 0 ? hslToRgb(faceHsl(bb.face)) : 0xffffff,
+          color: tinted ? hslToRgb(faceHsl(bb.face)) : 0xffffff,
+          // the host face's baked alpha IS the sprite's (client: 255 - faceAlpha)
+          opacity: (255 - ((data.faceAlpha?.[bb.face] ?? 0) & 0xff)) / 255,
           transparent: true,
           depthWrite: false,
           blending: def.shape === 2 ? THREE.AdditiveBlending : THREE.NormalBlending,
@@ -676,7 +685,10 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
         sprite.scale.set(def.size2d * 2, def.size3d * 2, 1)
         sprite.renderOrder = 1
         mesh.add(sprite)
-        spriteAnchors.push({ sprite, ia, ib, ic })
+        spriteAnchors.push({
+          sprite, smat, face: bb.face, group: bb.depth,
+          size2d: def.size2d, size3d: def.size3d, tinted, ia, ib, ic,
+        })
 
         if (material) {
           createImageBitmap(material).then((bitmap) => {
@@ -966,12 +978,25 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
       // Skip recomputing bounds per frame — the mesh IS the scene, culling
       // buys nothing, and stale rest-pose bounds could wrongly cull a pose.
       mesh.frustumCulled = false
-      for (const { sprite, ia, ib, ic } of spriteAnchors) {
-        sprite.position.set(
-          (X[ia] + X[ib] + X[ic]) / 3,
-          -(Y[ia] + Y[ib] + Y[ic]) / 3,
-          -(Z[ia] + Z[ib] + Z[ic]) / 3,
+      const bbGroups = valid?.billboardGroups ?? null
+      for (const a of spriteAnchors) {
+        a.sprite.position.set(
+          (X[a.ia] + X[a.ib] + X[a.ic]) / 3,
+          -(Y[a.ia] + Y[a.ib] + Y[a.ic]) / 3,
+          -(Z[a.ia] + Z[a.ib] + Z[a.ic]) / 3,
         )
+        // billboard group effects: type-10 scale, type-9 roll (negated for the
+        // view-space y flip); type-8 offsets are view-space and rare — skipped
+        const g = bbGroups?.get(a.group)
+        a.sprite.scale.set(a.size2d * 2 * ((g?.sx ?? 128) / 128), a.size3d * 2 * ((g?.sy ?? 128) / 128), 1)
+        a.smat.rotation = -((g?.rot ?? 0) * Math.PI * 2) / 16384
+        // the host face's animated alpha/colour carry to the sprite (the
+        // client recomputes its tint from the face after every type-5/7 pass)
+        const fa = posedFaceAlpha ? posedFaceAlpha[a.face] & 0xff : ((data.faceAlpha?.[a.face] ?? 0) & 0xff)
+        a.smat.opacity = (255 - fa) / 255
+        if (a.tinted) {
+          a.smat.color.setHex(hslToRgb(posedFaceColor ? posedFaceColor[a.face] & 0xffff : faceHsl(a.face)))
+        }
       }
       for (const { sim, ia, ib, ic } of simAnchors) {
         sim.setTriangle({

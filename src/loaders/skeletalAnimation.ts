@@ -11,8 +11,15 @@ import type { AnimationFrameDef } from './animation_frame_sets'
 // 2 rotate, 3 scale (vertex groups from vertexSkins), plus the face-group
 // effects 5 (alpha: alpha += delta·8, clamped 0..255 where 255 = invisible)
 // and 7 (colour: HSL16 hue += Δx wrapped &0x3f, sat += Δy clamped 0..7,
-// light += Δz clamped 0..127), addressed via faceSkins. Types 8/9/10
-// (billboard offset/rotate/scale) remain unimplemented.
+// light += Δz clamped 0..127), addressed via faceSkins, and the billboard
+// group effects 8 (view-space offset += Δx/Δy), 9 (roll += Δx<<2 & 0x3fff)
+// and 10 (scale ×= Δx/128, Δy/128) — a label there is a billboard GROUP id,
+// which is the attachment's `depth` byte (MeshRasterizer_Sub3's
+// anIntArrayArray8954, built by RSMesh.method2667 from anInt811). The fire by
+// the God Wars chapel is the worked example: its smoke puffs live in groups
+// 1-6 and the animation scales/rolls each group while type-5 fades the host
+// faces — which is ALSO the billboards' alpha (the client recomputes a
+// sprite's tint from its host face after every type-5/7 pass).
 //
 // Fixed-point convention matches the client exactly: a 14-bit sine/cosine
 // table (SINE/COSINE, 16384 entries covering one full turn) and a lazy "upscale"
@@ -132,9 +139,9 @@ function applyTransform(state: PoseState, vertexCount: number, type: number, ver
       state.z[v] += state.originZ
     }
   }
-  // types 5/7 (face alpha/colour) are handled by applyAnimationFrame itself
-  // (they touch face groups, not this vertex state); 8/9/10 (billboard
-  // offset/rotate/scale) remain unimplemented — see file header.
+  // types 5/7 (face alpha/colour) and 8/9/10 (billboard offset/roll/scale)
+  // are handled by applyAnimationFrame itself — they touch face/billboard
+  // groups, not this vertex state.
 }
 
 // Type 2/9 store the raw pre-`<<2 & 0x3fff` smart delta (see
@@ -143,6 +150,19 @@ function applyTransform(state: PoseState, vertexCount: number, type: number, ver
 function resolveTransformDelta(type: number, raw: number): number {
   if (type === 2 || type === 9) return (raw << 2) & 0x3fff
   return raw
+}
+
+/** One billboard group's accumulated pose (client Class65 state, identity =
+ *  no offset, no roll, scale 128/128). */
+export type BillboardGroupPose = {
+  /** view-space offset, world units (type 8: anInt668/anInt672) */
+  dx: number
+  dy: number
+  /** roll in 14-bit angle units, a full turn is 16384 (type 9: anInt673) */
+  rot: number
+  /** width/height scale ×128 (type 10: anInt671/anInt670) */
+  sx: number
+  sy: number
 }
 
 export type PosedVertices = {
@@ -154,6 +174,9 @@ export type PosedVertices = {
   faceAlpha: Int8Array | null
   /** Posed per-face HSL16 colours, only when a type-7 transform ran. */
   faceColor: Uint16Array | null
+  /** Billboard group poses keyed by group id (= the attachment's `depth`),
+   *  only when a type-8/9/10 transform ran. */
+  billboardGroups: Map<number, BillboardGroupPose> | null
 }
 
 // Applies every transform in one frame to a model's vertices, in order, and
@@ -225,6 +248,8 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
   // Copied lazily on the first face-group transform.
   let faceAlpha: Int8Array | null = null
   let faceColor: Uint16Array | null = null
+  // Created lazily on the first billboard-group transform.
+  let billboardGroups: Map<number, BillboardGroupPose> | null = null
 
   for (let i = 0; i < frame.transformationIndices.length; i++) {
     const slot = frame.transformationIndices[i]
@@ -274,6 +299,29 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
       continue
     }
 
+    // Billboard group effects (MeshRasterizer_Sub3 types 8/9/10) — a label is
+    // a group id (the attachment's `depth`); state accumulates across entries
+    // exactly like the client's per-billboard Class65.
+    if (type === 8 || type === 9 || type === 10) {
+      billboardGroups ??= new Map()
+      const dx = resolveTransformDelta(type, frame.transformationX[i])
+      const dy = frame.transformationY[i]
+      for (const label of frameBase.labels[slot] ?? []) {
+        let group = billboardGroups.get(label)
+        if (!group) billboardGroups.set(label, group = { dx: 0, dy: 0, rot: 0, sx: 128, sy: 128 })
+        if (type === 8) {
+          group.dx += dx
+          group.dy += dy
+        } else if (type === 9) {
+          group.rot = (group.rot + dx) & 0x3fff
+        } else {
+          group.sx = (group.sx * dx) >> 7
+          group.sy = (group.sy * dy) >> 7
+        }
+      }
+      continue
+    }
+
     const x = resolveTransformDelta(type, frame.transformationX[i])
     const y = resolveTransformDelta(type, frame.transformationY[i])
     const z = resolveTransformDelta(type, frame.transformationZ[i])
@@ -288,5 +336,5 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
     }
   }
 
-  return { x: state.x, y: state.y, z: state.z, faceAlpha, faceColor }
+  return { x: state.x, y: state.y, z: state.z, faceAlpha, faceColor, billboardGroups }
 }

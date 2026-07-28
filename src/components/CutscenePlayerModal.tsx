@@ -14,13 +14,57 @@ import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
 import type { AnimationFrameSetData } from '../loaders/animation_frame_sets'
 import { applyAnimationFrame } from '../loaders/skeletalAnimation'
 import {
-  DEFAULT_SUN, LocAssets, SceneMosaic, averageHeight, buildLocsMesh, buildTerrainMesh, loadSceneConfigs,
+  DEFAULT_SUN, LocAssets, SceneMosaic, averageHeight, blurShadowGrid, buildAnimatedLocMesh, buildLightGrid,
+  buildLocsMesh, buildSkyboxMesh, buildTerrainMesh, loadRegionEnvironment, loadSceneConfigs, sunTintFor,
 } from './mapScene'
+import type { RegionEnvironment, SunConfig } from './mapScene'
+import { ClientBloomPass } from './clientBloom'
+import { SceneParticles } from './sceneParticles'
+import { SceneBillboards } from './sceneBillboards'
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { assembleCutsceneScene } from './cutsceneScene'
 import './AnimationViewer.css'
 import './CutsceneViewer.css'
 
 const REGION_UNITS = SIZE * 512
+
+// The client's pass order, same as the map scene: opaque objects, then ground,
+// then transparent objects back-to-front (MeshRasterizer_Sub3 /
+// SceneObjectManager.method3441). Without it the transparent locs this player
+// now draws would z-fight the ground they stand on.
+const ORDER_OPAQUE_LOC = -1
+const ORDER_TERRAIN = 0
+const ORDER_TRANSPARENT_LOC = 1
+
+/**
+ * A cutscene has no environment of its own — it copies chunks out of live
+ * regions — so it borrows the record of the region its FIRST area comes from:
+ * sun, fog, skybox and bloom. That is the right answer whenever a cutscene
+ * stays in one place, which every shipped one does, and the client is in the
+ * same position: a scene has exactly one environment however many regions fed
+ * its chunks.
+ */
+async function cutsceneEnvironment(root: FileSystemDirectoryHandle, def: CutsceneDef): Promise<RegionEnvironment | null> {
+  const area = def.areas[0]
+  if (!area) return null
+  return loadRegionEnvironment(root, ((area.regionX >> 6) << 8) | (area.regionY >> 6))
+}
+
+function sunOf(env: RegionEnvironment | null): SunConfig {
+  const e = env?.environment
+  if (!e) return DEFAULT_SUN
+  return {
+    x: e.sunPosition?.[0] ?? DEFAULT_SUN.x,
+    y: e.sunPosition?.[1] ?? DEFAULT_SUN.y,
+    z: e.sunPosition?.[2] ?? DEFAULT_SUN.z,
+    ambient: e.sunAmbient ?? DEFAULT_SUN.ambient,
+  }
+}
+
+/** Draw distance the fog fades out over, in tiles — the map view's default. */
+const FOG_TILES = 40
 const CYCLE_MS = 20
 
 type Props = {
@@ -120,6 +164,10 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
   // Everything the sim touches, mutable and rAF-owned.
   const rt = useRef<{
     renderer: THREE.WebGLRenderer | null
+    composer: EffectComposer | null
+    sky: THREE.Mesh | null
+    particles: SceneParticles | null
+    billboards: SceneBillboards | null
     scene: THREE.Scene
     camera: THREE.PerspectiveCamera
     heightsByCell: Map<string, Int32Array[]>
@@ -153,14 +201,33 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       msAcc: 0,
       finished: false,
       disposed: false,
+      composer: null,
+      sky: null,
+      particles: null,
+      billboards: null,
     }
   }
 
-  const durationCycles = def.actions.reduce((m, a) => Math.max(m, a.lengthInCycles), 0) + 50
+  // Where the timeline ends. A cutscene finishes at its FINISHED action — the
+  // sim stops dead there — so the bar has to end at the same cycle, or it reads
+  // as a second of playback that never happens (cutscene 0: 44.8s shown against
+  // a 43.8s finish, frozen at the end). Only a cutscene without a FINISHED gets
+  // the old tail, to leave its last action time to play out.
+  // +1 because an action fires when the clock REACHES its cycle: stopping the
+  // sim at the FINISHED cycle itself would leave that action (and anything else
+  // sharing the cycle) unapplied, which is what made the end read 134/135.
+  const finishCycle = def.actions.find((a) => a.type === 'FINISHED')?.lengthInCycles
+  const durationCycles = finishCycle != null
+    ? finishCycle + 1
+    : def.actions.reduce((m, a) => Math.max(m, a.lengthInCycles), 0) + 50
   // Distinct action start cycles, for the step-by-action buttons. An action at
   // start s is applied once the sim clock passes it (cycle > s), so "jump to
   // this action" means seek(s + 1).
   const actionStarts = [...new Set(def.actions.map((a) => a.lengthInCycles))].sort((a, b) => a - b)
+
+  // Played to the end: the FINISHED action fired, or the clock ran out. Keyed
+  // off `cycle` (state) rather than the runtime so the button re-renders.
+  const atEnd = ready && (cycle >= durationCycles || rt.current.finished)
 
   const stepToAction = (dir: 1 | -1) => {
     const r = rt.current
@@ -492,7 +559,7 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       try {
         const mapsDir = await resolveEntryHandle(rootHandle, getEntryPath('maps'))
         if (!mapsDir) { setStatus('The maps entry is missing — no terrain to build.'); return }
-        const assembled = await assembleCutsceneScene(def, mapsDir)
+        const assembled = await assembleCutsceneScene(def, mapsDir, rootHandle)
         if (cancelled) return
         setWarnings(assembled.warnings)
 
@@ -503,7 +570,28 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         // 3×3 mosaic grid with our 2×2 synthetic scene in the +0/+1 cells.
         const grid: (import('../loaders/maps').MapTerrain | null)[][] = [[null, null, null], [null, null, null], [null, null, null]]
         for (const cell of assembled.cells) grid[cell.rx + 1][cell.ry + 1] = cell.terrain
-        const mosaic = new SceneMosaic(grid, 0, 0, configs, DEFAULT_SUN)
+        // The scene's sun comes from the environment record of the region the
+        // cutscene copies its FIRST area from — the areas are nearly always one
+        // place, and a wrong sun is baked into every vertex colour, so the
+        // client's default is only a fallback for a cutscene with no areas.
+        const particles = new SceneParticles()
+        // blend + HDR come off the producer's material, exactly as loc faces do
+        particles.setMaterialLookup(async (id) => {
+          const meta = await assets.getMaterialMeta(id)
+          return meta ? { hdrMultiplier: meta.hdrMultiplier, effectCombiner: meta.effectCombiner } : null
+        })
+        r.particles = particles
+        for (const group of particles.groups) r.scene.add(group)
+        // billboard sprites (a fire's glow + smoke column); the cutscene player
+        // always runs with bloom on, so its `stationary` stand-ins stay hidden
+        const billboards = new SceneBillboards()
+        billboards.setBloomEnabled(true)
+        r.billboards = billboards
+        for (const group of billboards.groups) r.scene.add(group)
+
+        const env = await cutsceneEnvironment(rootHandle, def)
+        particles.setAmbient(sunOf(env).ambient)
+        const mosaic = new SceneMosaic(grid, 0, 0, configs, sunOf(env))
 
         for (const cell of assembled.cells) {
           if (cancelled) return
@@ -512,21 +600,101 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
           const palettes = [0, 1, 2, 3].map((p) => mosaic.paletteFor(cell.rx, cell.ry, p))
           const overlayCorners = [0, 1, 2, 3].map((p) => mosaic.overlayCornerFor(cell.rx, cell.ry, p))
           const underlayCorners = [0, 1, 2, 3].map((p) => mosaic.underlayCornerFor(cell.rx, cell.ry, p))
+          const offsetX = cell.rx * REGION_UNITS
+          const offsetZ = -cell.ry * REGION_UNITS
+
+          // Locs first, all four planes: their static shadows darken the ground
+          // the terrain pass then builds, exactly as the map scene orders it.
+          // Point lights that came in with the copied chunks, baked into the
+          // locs' vertex colours exactly as the map scene does it.
+          const lightGrid = cell.lights.length > 0 ? buildLightGrid(cell.lights, heights) : undefined
+          const locBuilds: (Awaited<ReturnType<typeof buildLocsMesh>> | null)[] = [null, null, null, null]
           for (let plane = 0; plane < 4; plane++) {
-            setStatus(`Building region ${cell.rx},${cell.ry} plane ${plane}…`)
-            if (cell.def.objects.length > 0) {
-              const locs = await buildLocsMesh(cell.terrain, cell.def.objects, plane, heights, assets)
-              if (locs.mesh) {
-                locs.mesh.position.set(cell.rx * REGION_UNITS, 0, -cell.ry * REGION_UNITS)
-                r.scene.add(locs.mesh)
-              }
+            if (cell.def.objects.length === 0) continue
+            setStatus(`Building region ${cell.rx},${cell.ry} objects (plane ${plane})…`)
+            locBuilds[plane] = await buildLocsMesh(cell.terrain, cell.def.objects, plane, heights, assets, undefined, lightGrid)
+            if (cancelled) return
+          }
+
+          for (let plane = 0; plane < 4; plane++) {
+            const built = locBuilds[plane]
+            if (!built) continue
+            // A loc's geometry comes back on THREE paths and this player used to
+            // add only the first, so transparent scenery (windows, fences,
+            // fountains) and animated locs (waving flags) were silently missing
+            // from every cutscene — see the same note in MapSceneViewer.
+            if (built.mesh) {
+              built.mesh.position.set(offsetX, 0, offsetZ)
+              built.mesh.renderOrder = ORDER_OPAQUE_LOC
+              r.scene.add(built.mesh)
             }
-            const terrainMesh = await buildTerrainMesh(cell.terrain, plane, heights, configs, assets, { lights, palettes, overlayCorners, underlayCorners })
+            for (const lm of built.transparentLocs) {
+              lm.position.x += offsetX
+              lm.position.z += offsetZ
+              lm.renderOrder = ORDER_TRANSPARENT_LOC
+              r.scene.add(lm)
+            }
+            for (const al of built.animated) {
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points, al.ambient, al.contrast)
+              if (cancelled) return
+              if (!anim) continue
+              // placement is baked into the mesh transform, so the region offset
+              // has to multiply in rather than sit on .position
+              anim.mesh.matrixAutoUpdate = false
+              anim.mesh.matrix.copy(new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(al.matrix))
+              anim.mesh.renderOrder = ORDER_OPAQUE_LOC
+              r.scene.add(anim.mesh)
+            }
+          }
+
+          // Particle emitters (fires, torches) and billboard sprites (glow,
+          // smoke). The cutscene scene has no plane toggles, so every plane's
+          // groups go straight in.
+          for (const built of locBuilds) {
+            if (!built) continue
+            for (const emitter of built.emitters) {
+              const placed = {
+                ...emitter,
+                matrix: new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(emitter.matrix),
+              }
+              await particles.add(placed)
+              billboards.add(placed)
+            }
+          }
+
+          const shadows = locBuilds.map((b) => blurShadowGrid(b?.shadows))
+          for (let plane = 0; plane < 4; plane++) {
+            setStatus(`Building region ${cell.rx},${cell.ry} terrain (plane ${plane})…`)
+            const terrainMesh = await buildTerrainMesh(cell.terrain, plane, heights, configs, assets, {
+              lights, shadows, palettes, overlayCorners, underlayCorners,
+            })
+            if (cancelled) return
             if (terrainMesh) {
-              terrainMesh.position.set(cell.rx * REGION_UNITS, 0, -cell.ry * REGION_UNITS)
+              terrainMesh.position.set(offsetX, 0, offsetZ)
+              terrainMesh.renderOrder = ORDER_TERRAIN
               r.scene.add(terrainMesh)
             }
           }
+        }
+
+        // The sun's COLOUR is a tint on the built materials rather than
+        // something baked into vertex colours (its direction and ambient are),
+        // and HDR materials carry an overbright factor that only counts once
+        // applied — without this the bloom above has nothing over 1.0 to find.
+        // Same treatment as the map scene's applyTint.
+        {
+          const tint = sunTintFor(env?.environment?.sunColour) ?? [1, 1, 1]
+          r.scene.traverse((o) => {
+            const mesh = o as THREE.Mesh
+            if (!mesh.material) return
+            for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+              const colour = (m as THREE.MeshBasicMaterial).color
+              if (!colour) continue // water is a ShaderMaterial — tinted through its uniforms
+              const hdr = (m.userData.hdrMultiplier as number | undefined) ?? 1
+              if (tint[0] === 1 && tint[1] === 1 && tint[2] === 1 && hdr === 1) continue
+              colour.setRGB(tint[0] * hdr, tint[1] * hdr, tint[2] * hdr)
+            }
+          })
         }
 
         // Entities: NPC composites + BAS stand/walk anims; the player entity is
@@ -599,7 +767,35 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         // Start-of-scene camera: overhead of the used area until an action takes over.
         r.camera.position.set(REGION_UNITS * 0.75, 4500, -REGION_UNITS * 0.55)
         r.camera.lookAt(REGION_UNITS * 0.75, 0, -REGION_UNITS * 0.75)
-        r.scene.background = new THREE.Color(0x000000)
+        // Distance fog, the client's own formula: it ends at the draw distance
+        // and fades over the last (fogDepth + 256) * 4 units, with the backdrop
+        // set to the same colour so the world fades into it rather than into
+        // black. Defaults are the client's (Class239.anInt2932 = 0xC8C0A8).
+        {
+          const fogColour = env?.environment?.fogColour ?? 0xc8c0a8
+          const end = FOG_TILES * 512
+          const start = Math.max(1, end - ((env?.environment?.fogDepth ?? 0) + 256) * 4)
+          r.scene.fog = new THREE.Fog(fogColour, start, end)
+          r.scene.background = new THREE.Color(fogColour)
+          // fixed-function fog covers particles/billboards in the client too
+          particles.setFog(fogColour, start, end)
+          billboards.setFog(fogColour, start, end)
+        }
+
+        // The region's sky dome, if it has one. Same treatment as the map
+        // scene: mirrored up (the model hangs below the origin in RS y-down
+        // authoring), blown up to read as distant, never pickable, and
+        // re-centred on the camera every frame so it can't be flown out of.
+        if (env?.skybox) {
+          const sky = await buildSkyboxMesh(rootHandle, assets, env.skybox.id, env.skybox.rotation)
+          if (cancelled) return
+          if (sky) {
+            sky.scale.set(24, -24, 24)
+            sky.traverse((o) => { o.raycast = () => {} })
+            r.scene.add(sky)
+            r.sky = sky
+          }
+        }
 
         const canvas = canvasRef.current!
         r.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
@@ -609,9 +805,32 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         const fitCanvas = () => {
           r.renderer!.setPixelRatio(window.devicePixelRatio || 1)
           r.renderer!.setSize(canvas.clientWidth, canvas.clientHeight, false)
+          r.composer?.setSize(canvas.clientWidth, canvas.clientHeight)
+          r.particles?.setViewport(canvas.clientHeight, r.camera.fov)
           r.camera.aspect = canvas.clientWidth / canvas.clientHeight
           r.camera.updateProjectionMatrix()
         }
+        // HDR + bloom, as in the map scene: a half-float target keeps the
+        // overbright values the client's HDR materials push past 1.0, and the
+        // bloom pass turns them into its glow. Per-region parameters when the
+        // environment overrides them, else the client's own class defaults.
+        {
+          const w = canvas.clientWidth || 1
+          const h = canvas.clientHeight || 1
+          const composer = new EffectComposer(r.renderer, new THREE.WebGLRenderTarget(w, h, {
+            type: THREE.HalfFloatType,
+            colorSpace: THREE.LinearSRGBColorSpace,
+          }))
+          composer.addPass(new RenderPass(r.scene, r.camera))
+          const bloom = new ClientBloomPass(w, h)
+          bloom.threshold = env?.hdr?.bloomThreshold ?? 1.0
+          bloom.strength = env?.hdr?.bloomStrength ?? 0.25
+          bloom.whitePoint = env?.hdr?.whitePoint ?? 1.0
+          composer.addPass(bloom)
+          composer.addPass(new OutputPass())
+          r.composer = composer
+        }
+
         fitCanvas()
         const resizeObserver = new ResizeObserver(fitCanvas)
         resizeObserver.observe(canvas)
@@ -635,9 +854,15 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
               stepped = true
             }
             if (stepped) setCycle(r.cycle)
+            // the sim stops at FINISHED; drop out of "playing" so the transport
+            // shows Replay instead of a pause button over a frozen picture
+            if (r.finished || r.cycle >= durationCycles) setPlaying(false)
           }
           applyCameraAndFade()
-          r.renderer!.render(r.scene, r.camera)
+          r.particles?.step(dt, r.camera)
+          if (r.sky) r.sky.position.copy(r.camera.position)
+          if (r.composer) r.composer.render()
+          else r.renderer!.render(r.scene, r.camera)
         }
         requestAnimationFrame(loop)
       } catch (e) {
@@ -649,6 +874,10 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       disposeResize?.()
       const rr = rt.current
       rr.disposed = true
+      rr.particles?.dispose()
+      rr.billboards?.dispose()
+      rr.billboards = null
+      rr.composer?.dispose()
       rr.renderer?.dispose()
       rr.scene.traverse((o) => {
         if (o instanceof THREE.Mesh) {
@@ -715,12 +944,13 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
             type="button"
             className="zoom-btn anim-preview-play"
             disabled={!ready}
+            title={atEnd ? 'Replay from the start' : playing ? 'Pause' : 'Play'}
             onClick={() => {
-              if (rt.current.finished || rt.current.cycle >= durationCycles) seek(0)
-              setPlaying((p) => !p)
+              if (atEnd) seek(0)
+              setPlaying((p) => (atEnd ? true : !p))
             }}
           >
-            {playing ? '⏸' : '▶'}
+            {atEnd ? '↺' : playing ? '⏸' : '▶'}
           </button>
           <button
             type="button"
@@ -733,7 +963,7 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
           </button>
           <input
             type="range"
-            className="cutscene-player-scrub"
+            className="cutscene-player-scrub rs-slider"
             min={0}
             max={durationCycles}
             value={Math.min(cycle, durationCycles)}

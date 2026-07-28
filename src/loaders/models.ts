@@ -1210,6 +1210,114 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
 // Parse entry point
 // ---------------------------------------------------------------------------
 
+/**
+ * Fills in a model's emitter producers and effector types — the particle
+ * configs its faces bind to. `parseModel` can't: the mesh footer carries only
+ * ids, and resolving them means reading `particles/` off the cache.
+ *
+ * Shared by the models page and by the 3D scenes (`LocAssets.getModel`), which
+ * would otherwise decode meshes whose emitters resolve to nothing and quietly
+ * render no fires at all. `cache` lets a caller reuse one producer across the
+ * hundreds of models in a region rather than re-reading it per model.
+ */
+export async function resolveModelEmitters(
+  model: ModelData,
+  rootHandle: FileSystemDirectoryHandle,
+  cache?: Map<number, EmitterProducer | null>,
+): Promise<void> {
+  if (!model.emitters?.length && !model.effectors?.length) return
+  let particlesDir: FileSystemDirectoryHandle | null = null
+  try { particlesDir = await rootHandle.getDirectoryHandle('particles') } catch { return /* not dumped */ }
+  if (!particlesDir) return
+
+  const producerIds = new Set((model.emitters ?? []).map((e) => e.producerId))
+  await Promise.all([...producerIds].map(async (producerId) => {
+    const cached = cache?.get(producerId)
+    if (cached !== undefined) {
+      if (cached) model.emitterProducers.set(producerId, cached)
+      return
+    }
+    const producer = await loadProducer(particlesDir!, producerId)
+    if (!producer) {
+      cache?.set(producerId, null)
+      return
+    }
+    const types = await loadTypes(particlesDir!, producer.particleFileIds ?? [])
+    const material = await loadMaterialPng(rootHandle, producer.materialId)
+    const info: EmitterProducer = {
+      producer: producer as unknown as Record<string, unknown>,
+      types: [...types.values()],
+      material,
+    }
+    cache?.set(producerId, info)
+    model.emitterProducers.set(producerId, info)
+  }))
+
+  // Effectors resolve to particle types too (their effectId IS a type id).
+  if (model.effectors?.length) {
+    const effectIds = [...new Set(model.effectors.map((e) => e.effectId))]
+    const types = await loadTypes(particlesDir, effectIds)
+    for (const [id, type] of types) model.effectorTypes.set(id, type as EffectorType)
+  }
+}
+
+/**
+ * Resolves a mesh's billboard attachments: the `billboards/<typeId>.json`
+ * config and its material PNG. Shared by the models page and the 3D scenes —
+ * without it a fire loc has its glow/smoke sprite ids but nothing to draw.
+ * `cache` lets a scene reuse one type across every fire in a region.
+ */
+export async function resolveModelBillboards(
+  model: ModelData,
+  rootHandle: FileSystemDirectoryHandle,
+  cache?: Map<number, { def: BillboardTypeDef; material: Blob | null } | null>,
+): Promise<void> {
+  if (!model.billboards?.length) return
+  let billboardsDir: FileSystemDirectoryHandle | null = null
+  let texturesDir: FileSystemDirectoryHandle | null = null
+  try { billboardsDir = await rootHandle.getDirectoryHandle('billboards') } catch { return /* not dumped */ }
+  try { texturesDir = await rootHandle.getDirectoryHandle('textures') } catch { /* not dumped */ }
+  const typeIds = new Set(model.billboards.map((b) => b.typeId))
+  await Promise.all([...typeIds].map(async (typeId) => {
+    const cached = cache?.get(typeId)
+    if (cached !== undefined) {
+      if (cached) model.billboardTypes.set(typeId, cached)
+      return
+    }
+    try {
+      const defFile = await (await billboardsDir!.getFileHandle(`${typeId}.json`)).getFile()
+      const def = JSON.parse(await defFile.text())
+      let material: Blob | null = null
+      if (texturesDir && def.materialId >= 0) {
+        try {
+          const dir = await texturesDir.getDirectoryHandle(String(def.materialId))
+          material = await (await dir.getFileHandle(`${def.materialId}.png`)).getFile()
+        } catch { /* missing material */ }
+      }
+      const info = { def, material }
+      cache?.set(typeId, info)
+      model.billboardTypes.set(typeId, info)
+    } catch {
+      // missing billboard def — attachment is skipped by every renderer
+      cache?.set(typeId, null)
+    }
+  }))
+}
+
+/**
+ * Faces replaced by a billboard whose type sets `hasUid`: the client removes
+ * them from the drawn mesh outright (MeshRasterizer_Sub3 ctor) and draws only
+ * the billboard. Needs `billboardTypes` resolved; null when nothing is hidden.
+ */
+export function billboardHiddenFaces(model: ModelData): Set<number> | null {
+  if (!model.billboards?.length) return null
+  let hidden: Set<number> | null = null
+  for (const bb of model.billboards) {
+    if (model.billboardTypes.get(bb.typeId)?.def.hasUid) (hidden ??= new Set()).add(bb.face)
+  }
+  return hidden
+}
+
 export function parseModel(data: Uint8Array, id: number): ModelData {
   const isNew = data[data.length - 1] === 0xFF && data[data.length - 2] === 0xFF
   const parsed = isNew ? decodeNewFormat(data) : decodeOldFormat(data)
@@ -1449,58 +1557,8 @@ const loader: CacheLoader = {
       }
     }
 
-    // Resolve each emitter's producer: the producer JSON, the motion types its
-    // particles inherit, and the material PNG they're drawn with.
-    if (model.emitters && rootHandle) {
-      let particlesDir: FileSystemDirectoryHandle | null = null
-      try { particlesDir = await rootHandle.getDirectoryHandle('particles') } catch { /* not dumped */ }
-      if (particlesDir) {
-        const producerIds = new Set(model.emitters.map((e) => e.producerId))
-        await Promise.all([...producerIds].map(async (producerId) => {
-          const producer = await loadProducer(particlesDir!, producerId)
-          if (!producer) return
-          const types = await loadTypes(particlesDir!, producer.particleFileIds ?? [])
-          const material = await loadMaterialPng(rootHandle, producer.materialId)
-          model.emitterProducers.set(producerId, {
-            producer: producer as unknown as Record<string, unknown>,
-            types: [...types.values()],
-            material,
-          })
-        }))
-
-        // Effectors resolve to particle types too (their effectId IS a type id).
-        if (model.effectors) {
-          const effectIds = [...new Set(model.effectors.map((e) => e.effectId))]
-          const types = await loadTypes(particlesDir, effectIds)
-          for (const [id, type] of types) model.effectorTypes.set(id, type as EffectorType)
-        }
-      }
-    }
-
-    // Resolve billboard configs + their material PNGs for the attachments.
-    if (model.billboards && rootHandle) {
-      let billboardsDir: FileSystemDirectoryHandle | null = null
-      let texturesDir: FileSystemDirectoryHandle | null = null
-      try { billboardsDir = await rootHandle.getDirectoryHandle('billboards') } catch { /* not dumped */ }
-      try { texturesDir = await rootHandle.getDirectoryHandle('textures') } catch { /* not dumped */ }
-      if (billboardsDir) {
-        const typeIds = new Set(model.billboards.map((b) => b.typeId))
-        await Promise.all([...typeIds].map(async (typeId) => {
-          try {
-            const defFile = await (await billboardsDir!.getFileHandle(`${typeId}.json`)).getFile()
-            const def = JSON.parse(await defFile.text())
-            let material: Blob | null = null
-            if (texturesDir && def.materialId >= 0) {
-              try {
-                const dir = await texturesDir.getDirectoryHandle(String(def.materialId))
-                material = await (await dir.getFileHandle(`${def.materialId}.png`)).getFile()
-              } catch { /* missing material */ }
-            }
-            model.billboardTypes.set(typeId, { def, material })
-          } catch { /* missing billboard def — attachment is skipped by the viewer */ }
-        }))
-      }
-    }
+    if (rootHandle) await resolveModelEmitters(model, rootHandle)
+    if (rootHandle) await resolveModelBillboards(model, rootHandle)
 
     return model
   },

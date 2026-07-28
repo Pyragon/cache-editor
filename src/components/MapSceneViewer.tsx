@@ -10,10 +10,12 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { LocEntry, MapData, MapRegionDef, MapTerrain } from '../loaders/maps'
 import { SIZE, decodeTerrain, decodeUnderwaterTerrain, tileIndex, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS, LOC_TYPE_LABELS } from '../loaders/maps'
-import { rgbToRenderedHex, DEFAULT_MODEL_SUN } from '../loaders/models'
+import { rgbToRenderedHex, DEFAULT_MODEL_SUN, modelUpscale } from '../loaders/models'
 import { NumberInput } from './defFields'
-import { buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildChunkGrid, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef, averageHeight } from './mapScene'
+import { blurShadowGrid, sunTintFor, buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildChunkGrid, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef, averageHeight } from './mapScene'
 import { LocAnimator } from './locAnimator'
+import { SceneParticles } from './sceneParticles'
+import { SceneBillboards } from './sceneBillboards'
 import type { AnimationDef } from '../loaders/animations'
 import type { ModelData } from '../loaders/models'
 import type { SceneConfigs, LocRef, MarkerInfo, ObjectDefJson, RegionEnvironment, RegionLight, SunConfig } from './mapScene'
@@ -268,15 +270,6 @@ type TerrainBrush = {
 function bakedSunOf(env: RegionEnvironment | null): string {
   const e = env?.environment
   return [e?.sunPosition?.[0], e?.sunPosition?.[1], e?.sunPosition?.[2], e?.sunAmbient].join(',')
-}
-
-function sunTintFor(sunColour: number | undefined): [number, number, number] | null {
-  if (sunColour === undefined || (sunColour & 0xffffff) === 0xddccbb) return null
-  return [
-    Math.min(1.6, ((sunColour >> 16) & 0xff) / 0xdd),
-    Math.min(1.6, ((sunColour >> 8) & 0xff) / 0xcc),
-    Math.min(1.6, (sunColour & 0xff) / 0xbb),
-  ]
 }
 
 /** One edit against the parent's drafts; coalesce folds it into the previous
@@ -837,9 +830,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // are occasional-use
   const [openLists, setOpenLists] = useState({ objects: true, lights: false, markers: false, controls: true })
   const planeGroupsRef = useRef<(THREE.Group | null)[]>([null, null, null, null])
+  // particle emitters bound to loc faces (fires, torches, waterfalls) — see
+  // sceneParticles.ts. Rebuilt with the scene, stepped in the RAF loop.
+  const particlesRef = useRef<SceneParticles | null>(null)
+  const billboardsRef = useRef<SceneBillboards | null>(null)
   const taggedRef = useRef<Tagged[]>([])
   // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
-  type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; mesh: THREE.Mesh; sphere: THREE.Sphere }
+  type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; billboards?: import('./sceneBillboards').AnimatedBillboards; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; mesh: THREE.Mesh; sphere: THREE.Sphere }
   const animLocsRef = useRef<AnimLocRecord[]>([])
   // Meshes carrying `userData.sortCentreY` — their per-frame sort depth is
   // recomputed from the model's vertical centre (see setTransparentSort above).
@@ -1849,6 +1846,16 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     window.addEventListener('keyup', onPovKeyUp)
     renderer.domElement.addEventListener('wheel', onPovWheel, { passive: false })
 
+    // wall-clock delta for the particle sims, independent of the render
+    // throttle above (they count client cycles, not frames)
+    let particleLast = performance.now()
+    const particleDt = () => {
+      const now = performance.now()
+      const dt = now - particleLast
+      particleLast = now
+      return dt
+    }
+
     function animate() {
       // idle throttle (~15fps) to stop hogging the compositor when nothing is
       // moving — but NOT while animated materials (water/scroll) are on screen,
@@ -1983,9 +1990,25 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           // skip anything not in view — the vast majority most frames
           if (!animFrustum.intersectsSphere(rec.sphere)) continue
           const posed = rec.animator.pose(rec.model, rec.animator.frameAt(seconds))
-          if (posed) { rec.update(posed); animVisible = true }
+          if (posed) {
+            rec.update(posed)
+            // billboards ride the same frame: anchors follow the posed carrier
+            // faces, alpha/colour follow type-5/7, scale/roll follow 9/10
+            rec.billboards?.pose(posed)
+            animVisible = true
+          }
         }
       }
+      // Particle emitters. Their own budget picks the nearest handful to
+      // simulate, so this stays cheap however many the region has; `animVisible`
+      // keeps the idle throttle awake while any are burning on screen.
+      // ranked against the orbit target — what you LOOK AT keeps its fire lit,
+      // not whatever happens to sit nearest the far-orbiting camera
+      const particles = particlesRef.current
+      if (particles && particles.count > 0 && particles.step(particleDt(), camera, povOn ? undefined : controls.target) > 0) {
+        animVisible = true // keep the idle throttle awake while a fire is on screen
+      }
+
       // hover raycast every other frame — but never mid-orbit (#5), and never
       // in POV mode (the cursor is locked; there is nothing to hover)
       if (pointerInside && !orbiting && !povOn && (frame++ & 1) === 0) {
@@ -2063,6 +2086,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       bloomPass.setSize(nw, nh)
       camera.aspect = nw / nh
       camera.updateProjectionMatrix()
+      particlesRef.current?.setViewport(nh, camera.fov)
     }
     const resizeObserver = new ResizeObserver(onResize)
     resizeObserver.observe(mount)
@@ -2086,9 +2110,33 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         sortCentreRef.current = []
         const mapsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('maps'))
 
+        // one particle runtime per scene build; its per-plane groups hang off
+        // the plane groups so hiding a plane hides its fires with it
+        particlesRef.current?.dispose()
+        const particles = new SceneParticles()
+        particles.setViewport(mount!.clientHeight || h, camera.fov)
+        particles.setHdrEnabled(bloomOnRef.current)
+        // blend + HDR come off the producer's material, exactly as loc faces do
+        particles.setMaterialLookup(async (id) => {
+          const meta = await assets.getMaterialMeta(id)
+          return meta ? { hdrMultiplier: meta.hdrMultiplier, effectCombiner: meta.effectCombiner } : null
+        })
+        // an emissive particle material (the fire's) is overbright; the bloom
+        // pass is what turns that into the halo around a flame
+        particles.setMaterialLookup((id) => assets.getMaterialMeta(id))
+        particlesRef.current = particles
+        // billboard sprites (a fire's glow + smoke column) — static quads, so
+        // no per-frame step; the shader faces them to the camera itself
+        billboardsRef.current?.dispose()
+        const billboards = new SceneBillboards()
+        billboards.setBloomEnabled(bloomOnRef.current)
+        billboardsRef.current = billboards
+
         for (let plane = 0; plane < 4; plane++) {
           const group = new THREE.Group()
           scene.add(group)
+          group.add(particles.groups[plane])
+          group.add(billboards.groups[plane])
           planeGroupsRef.current[plane] = group
         }
         const outlines = new THREE.Group()
@@ -2147,6 +2195,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               scene.fog = null
               waterUniforms.uFogNear.value = 1e8
               waterUniforms.uFogFar.value = 1e9
+              particlesRef.current?.setFog(null)
+              billboardsRef.current?.setFog(null)
               return
             }
             fogObj.color.setHex(fogColourRef.current & 0xffffff)
@@ -2159,6 +2209,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             ;(waterUniforms.uFogColor.value as THREE.Color).copy(fogObj.color)
             waterUniforms.uFogNear.value = start
             waterUniforms.uFogFar.value = end
+            // the client's fixed-function fog covers particles and billboards
+            // like geometry — their ShaderMaterials mirror it like water does
+            particlesRef.current?.setFog(fogColourRef.current, start, end)
+            billboardsRef.current?.setFog(fogColourRef.current, start, end)
           }
           fogApplyRef.current(fogOnRef.current, fogTilesRef.current)
         }
@@ -2176,6 +2230,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         if (env?.environment?.fogColour !== undefined) {
           renderer.setClearColor(env.environment.fogColour & 0xffffff)
         }
+
+        // particles with adjustsLightIntensity are lit by the scene ambient,
+        // exactly like geometry (Class54 switches IA() per batch — see
+        // sceneParticles.setAmbient). Brightness-pref changes won't re-reach
+        // this until the next build; the pref is a whole-scene rebake anyway.
+        particles.setAmbient(sun.ambient * brightnessMulRef.current)
 
         setStatus('computing mosaic…')
         const mosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun, assets.brightness)
@@ -2366,23 +2426,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // resetLight kernel (centre>>1 + neighbours) so walls/rocks feather into
         // the ground instead of hard 1-corner blobs.
         const blurredShadows = (locBuilds: ({ shadows: Uint8Array } | null)[]): Float32Array[] =>
-          locBuilds.map((b) => {
-            const s = b?.shadows
-            const V = SIZE + 1
-            const out = new Float32Array(V * V)
-            if (!s) return out
-            for (let x = 0; x < V; x++) {
-              for (let y = 0; y < V; y++) {
-                out[x * V + y] =
-                  (s[x * V + y] >> 1)
-                  + (x > 0 ? s[(x - 1) * V + y] >> 2 : 0)
-                  + (y > 0 ? s[x * V + y - 1] >> 2 : 0)
-                  + (y < V - 1 ? s[x * V + y + 1] >> 3 : 0)
-                  + (x < V - 1 ? s[(x + 1) * V + y] >> 3 : 0)
-              }
-            }
-            return out
-          })
+          locBuilds.map((b) => blurShadowGrid(b?.shadows))
 
         // Real progress: 8 passes per cell (4 loc planes + 4 terrain planes);
         // the loc passes report a done/total we use for sub-pass fraction.
@@ -2500,6 +2544,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               planeGroupsRef.current[plane]?.add(lm)
               taggedRef.current.push({ obj: lm, neighbor: !isCenter, kind: 'loc' })
             }
+            // Particle emitters (fires, torches) and billboard sprites (glow,
+            // smoke): the placement matrix here has no region offset baked in,
+            // so neighbours' attachments are shifted the same way their meshes are.
+            for (const emitter of built.emitters) {
+              const placed = { ...emitter }
+              if (offsetX !== 0 || offsetZ !== 0) {
+                placed.matrix = new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(emitter.matrix)
+              }
+              await particles.add(placed)
+              billboards.add(placed)
+            }
             // Animated locs (waving flags etc.): a separate posable mesh each,
             // placed with the region offset baked into the mesh transform.
             for (const al of built.animated) {
@@ -2519,7 +2574,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               const sphere = anim.mesh.geometry.boundingSphere
                 ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
                 : new THREE.Sphere(new THREE.Vector3(offsetX, 0, offsetZ), 1e9)
-              animLocsRef.current.push({ update: anim.update, model: al.model, animationId: al.animationId, neighbor: !isCenter, mesh: anim.mesh, sphere })
+              // billboards on an animated loc (a fire's glow + smoke) are
+              // driven by the same posed frames; hidden until the first pose
+              const bb = billboards.addAnimated({
+                model: al.model,
+                matrix: new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(al.matrix),
+                upscale: modelUpscale(al.model),
+                plane,
+              }) ?? undefined
+              animLocsRef.current.push({ update: anim.update, billboards: bb, model: al.model, animationId: al.animationId, neighbor: !isCenter, mesh: anim.mesh, sphere })
             }
             if (built.markers.length > 0) {
               const markerGroup = buildMarkersMesh(built.markers)
@@ -2821,6 +2884,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             clearLocHighlight()
             rec.mesh.parent?.remove(rec.mesh)
             disposeDeep(rec.mesh)
+            rec.billboards?.remove()
             taggedRef.current = taggedRef.current.filter((t) => t.obj !== rec.mesh)
             sortCentreRef.current = sortCentreRef.current.filter((m) => m !== rec.mesh)
             removedAnimated = true
@@ -2930,6 +2994,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                     built = true
                   }
                 }
+                // static billboards on a freshly placed loc (particles still
+                // wait for the next full rebuild — pre-existing behaviour)
+                for (const pe of b.emitters) billboardsRef.current?.add(pe)
                 for (const al of b.animated) {
                   const animator = animators.get(al.animationId)
                   // no loaded animator means nothing in the scene uses this
@@ -2947,6 +3014,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                   fresh.push({ obj: anim.mesh, plane, kind: 'loc' })
                   freshAnim.push({
                     update: anim.update, model: al.model, animationId: al.animationId,
+                    billboards: billboardsRef.current?.addAnimated({
+                      model: al.model, matrix: al.matrix, upscale: modelUpscale(al.model), plane,
+                    }) ?? undefined,
                     animator, neighbor: false, mesh: anim.mesh,
                     sphere: anim.mesh.geometry.boundingSphere
                       ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
@@ -3020,7 +3090,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             disposeDeep(obj)
           }
           // the centre's animated-loc meshes were just disposed with the loc
-          // meshes above — drop their pose records (neighbours survive)
+          // meshes above — drop their pose records and billboard sprites
+          // (neighbours survive; the rebuild below re-adds both)
+          for (const r of animLocsRef.current) if (!r.neighbor) r.billboards?.remove()
           animLocsRef.current = animLocsRef.current.filter((r) => r.neighbor)
           // drop sort entries whose mesh was just disposed (parent detached)
           sortCentreRef.current = sortCentreRef.current.filter((m) => m.parent !== null)
@@ -3111,7 +3183,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               const sphere = anim.mesh.geometry.boundingSphere
                 ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
                 : new THREE.Sphere(new THREE.Vector3(), 1e9)
-              rebuiltAnim.push({ update: anim.update, model: al.model, animationId: al.animationId, neighbor: false, mesh: anim.mesh, sphere })
+              rebuiltAnim.push({
+                update: anim.update, model: al.model, animationId: al.animationId,
+                billboards: billboardsRef.current?.addAnimated({
+                  model: al.model, matrix: al.matrix, upscale: modelUpscale(al.model), plane,
+                }) ?? undefined,
+                neighbor: false, mesh: anim.mesh, sphere,
+              })
             }
             if (built.markers.length > 0) {
               const markerGroup = buildMarkersMesh(built.markers)
@@ -3207,6 +3285,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       cameraRef.current = null
       controlsRef.current = null
       for (const d of disposables) d.dispose()
+      particlesRef.current?.dispose()
+      particlesRef.current = null
+      billboardsRef.current?.dispose()
+      billboardsRef.current = null
       void assetsRef.current?.dispose()
       assetsRef.current = null
       composer.dispose()
@@ -3675,8 +3757,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     // The client gates HDR float textures on the bloom filter being live
     // (Class66 checks method8471(), which IS the bloom filter), so turning bloom
     // off must also drop the overbright multiplier — otherwise the flame would
-    // clamp to white instead of the client's dim orange.
+    // clamp to white instead of the client's dim orange. Particles carry the
+    // same overbright on their materials, so they follow the toggle too.
     refreshTintRef.current?.()
+    particlesRef.current?.setHdrEnabled(bloomOn)
+    // `stationary` billboards are the client's no-bloom stand-ins: they draw
+    // only while the filter is off (MeshRasterizer_Sub3.method14275's gate)
+    billboardsRef.current?.setBloomEnabled(bloomOn)
   }, [bloomOn, status])
 
   // --- point lights ----------------------------------------------------

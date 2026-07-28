@@ -2,7 +2,8 @@ import * as THREE from 'three'
 import type { MapTerrain } from '../loaders/maps'
 import { SIZE, tileIndex } from '../loaders/maps'
 import type { ModelData } from '../loaders/models'
-import { hslToRgb, adjustLuminance, AMBIENT_DEFAULT, CONTRAST_DEFAULT, parseModel, applyRecolor, computeModelLitRgb, modelUpscale, upscaleModel, DEFAULT_MODEL_SUN, type ModelSun, type PointLight } from '../loaders/models'
+import type { LocEmitter } from './sceneParticles'
+import { hslToRgb, adjustLuminance, AMBIENT_DEFAULT, CONTRAST_DEFAULT, parseModel, applyRecolor, computeModelLitRgb, modelUpscale, upscaleModel, resolveModelEmitters, resolveModelBillboards, billboardHiddenFaces, DEFAULT_MODEL_SUN, type ModelSun, type PointLight } from '../loaders/models'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { makeUVWriter } from './modelUVs'
 import type { UVWriter } from './modelUVs'
@@ -2536,6 +2537,10 @@ export class LocAssets {
     return p
   }
 
+  /** producer id → its resolved config, shared by every model in the region */
+  private producerCache = new Map<number, import('../loaders/models').EmitterProducer | null>()
+  private billboardCache = new Map<number, { def: import('../loaders/models').BillboardTypeDef; material: Blob | null } | null>()
+
   async getModel(id: number): Promise<ModelData | null> {
     let p = this.models.get(id)
     if (!p) {
@@ -2556,7 +2561,22 @@ export class LocAssets {
           // ModelAccumulator won't apply it a second time and the geometry is
           // unchanged — what this buys is a mesh that can actually be contoured
           // and placed against the terrain, which is in fine scene units.
-          return upscaleModel(parseModel(new Uint8Array(await file.arrayBuffer()), id))
+          const model = upscaleModel(parseModel(new Uint8Array(await file.arrayBuffer()), id))
+          // A mesh's footer carries only producer IDS; resolving them means
+          // reading particles/ off the cache, which parseModel can't do. Without
+          // this the scene decodes fires whose emitters resolve to nothing and
+          // renders no flames at all. The cache is per-LocAssets, so the dozens
+          // of fires in a region share one read per producer.
+          if (model.emitters?.length || model.effectors?.length) {
+            await resolveModelEmitters(model, this.root, this.producerCache)
+          }
+          // Billboard attachments (a fire's glow + smoke sprites) resolve the
+          // same way: the mesh only carries type IDS, the config + material
+          // live in billboards/ and textures/.
+          if (model.billboards?.length) {
+            await resolveModelBillboards(model, this.root, this.billboardCache)
+          }
+          return model
         } catch {
           return null
         }
@@ -2765,14 +2785,19 @@ class ModelAccumulator {
       : undefined
     const lit = computeModelLitRgb(model, normalMat, light?.sun, points, localNormals, baseOf, ambient, contrast)
     if (hdrOf) unlitHdrFaces(model, lit, hdrOf)
+    // faces replaced by a hasUid billboard: the client drops them from the
+    // mesh and draws only the sprite (SceneBillboards)
+    const bbHidden = billboardHiddenFaces(model)
     for (let f = 0; f < model.faceCount; f++) {
       if (model.faceAlpha[f] === -1) continue
+      if (bbHidden?.has(f)) continue
       const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
       if (ia >= model.vertexCount || ib >= model.vertexCount || ic >= model.vertexCount) continue
       const textureId = model.faceTextures?.[f] ?? -1
-      // UVs computed up front: a non-finite result is the client's degenerate
-      // zero-scale mapping (it draws NaN UVs as an invisible smear) — drop the
-      // face before it books anything into a bucket.
+      // UVs computed up front. A degenerate zero-scale mapping no longer drops
+      // the face: the client draws it with the poisoned coordinate and the GPU
+      // samples some texel, which on a uniform texture is a solid pane (the
+      // chapel windows). uvWriter pins that coordinate to a texture edge.
       if (textureId >= 0 && !uvWriter(f, ia, ib, ic, this.uvScratch, 0)) continue
       // Client transparency test (MeshRasterizer_Sub3 ctor):
       // faceAlpha != 0 || blendType != 0. Transparent faces are ordered after
@@ -2909,6 +2934,48 @@ export type AnimatedLocMesh = {
  *  placement matrix as the mesh transform and re-pose cheaply without a
  *  per-vertex matrix multiply. Lighting is baked once from the placement's
  *  world-normal matrix (a waving flag's Gouraud shading barely shifts). */
+/**
+ * The sun colour as a multiplier on the fixed-function diffuse, relative to the
+ * client's default 0xDDCCBB. null when the region doesn't tint at all — shared
+ * so the map scene and the cutscene player tint their materials identically.
+ */
+export function sunTintFor(sunColour: number | undefined): [number, number, number] | null {
+  if (sunColour === undefined || (sunColour & 0xffffff) === 0xddccbb) return null
+  return [
+    Math.min(1.6, ((sunColour >> 16) & 0xff) / 0xdd),
+    Math.min(1.6, ((sunColour >> 8) & 0xff) / 0xcc),
+    Math.min(1.6, (sunColour & 0xff) / 0xbb),
+  ]
+}
+
+/**
+ * The locs' static shadows, softened the way the HD client does it
+ * (GroundGL.resetLight): effective shadow at a vertex = centre>>1 + west>>2 +
+ * south>>2 + north>>3 + east>>3. Raw subtraction — what the software renderer
+ * does — makes every wall and rock a hard one-corner dark blob; the blur halves
+ * the amplitude and feathers it into the neighbours.
+ *
+ * Takes the `shadows` grid `buildLocsMesh` returns for a plane, and produces
+ * what `buildTerrainMesh`'s `pre.shadows` expects. An absent grid (no locs built
+ * for that plane) gives zeroes, which is "no shadow" rather than "no data".
+ */
+export function blurShadowGrid(shadows: Uint8Array | undefined): Float32Array {
+  const V = SIZE + 1
+  const out = new Float32Array(V * V)
+  if (!shadows) return out
+  for (let x = 0; x < V; x++) {
+    for (let y = 0; y < V; y++) {
+      out[x * V + y] =
+        (shadows[x * V + y] >> 1)
+        + (x > 0 ? shadows[(x - 1) * V + y] >> 2 : 0)
+        + (y > 0 ? shadows[x * V + y - 1] >> 2 : 0)
+        + (y < V - 1 ? shadows[x * V + y + 1] >> 3 : 0)
+        + (x < V - 1 ? shadows[(x + 1) * V + y] >> 3 : 0)
+    }
+  }
+  return out
+}
+
 export async function buildAnimatedLocMesh(
   model: ModelData,
   matrix: THREE.Matrix4,
@@ -2920,6 +2987,21 @@ export async function buildAnimatedLocMesh(
   ambient = AMBIENT_DEFAULT,
   contrast = CONTRAST_DEFAULT,
 ): Promise<AnimatedLocMesh | null> {
+  // Back faces are culled here exactly as in the static loc path — the client
+  // sets its cull mode once at init and never toggles it (D3DRS_CULLMODE =
+  // D3DCULL_CW / glCullFace(GL_BACK)). This mesh keeps its placement on
+  // mesh.matrix rather than baked into the vertices, so a MIRRORED placement
+  // (negative determinant) reverses the on-screen winding and has to cull the
+  // other side instead; the static path handles the same case by flipping the
+  // triangle order as it bakes (see flipWinding).
+  //
+  // Drawing both sides instead — what this did before — showed geometry the
+  // client never does. Particle emitters bind to a face of the mesh and those
+  // carrier triangles are painted in the invisible-marker green: the burnt
+  // remains near the God Wars chapel (object 61761, model 58392) carry six of
+  // them, and they rendered as green triangles floating over the fire, moving
+  // with the loc's animation. The client culls them and draws its particles.
+  const cullSide = matrix.determinant() < 0 ? THREE.BackSide : THREE.FrontSide
   const upscale = modelUpscale(model)
   const uvWriter = makeUVWriter(model)
   const normalMat = new THREE.Matrix3().getNormalMatrix(matrix).elements
@@ -2965,8 +3047,11 @@ export async function buildAnimatedLocMesh(
   type LocBucket = { tex: number; faces: number[] }
   const buckets = new Map<number, LocBucket>()
   const scratch = new Float32Array(6)
+  // faces replaced by a hasUid billboard are never drawn (client drops them)
+  const bbHidden = billboardHiddenFaces(model)
   for (let f = 0; f < model.faceCount; f++) {
     if (model.faceAlpha[f] === -1) continue
+    if (bbHidden?.has(f)) continue
     const ia = model.triangleX[f], ib = model.triangleY[f], ic = model.triangleZ[f]
     if (ia >= model.vertexCount || ib >= model.vertexCount || ic >= model.vertexCount) continue
     const tex = model.faceTextures?.[f] ?? -1
@@ -3053,7 +3138,7 @@ export async function buildAnimatedLocMesh(
       faceMat[vert / 3] = materials.length
       vert += 3
     }
-    const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
+    const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: cullSide })
     if (tex >= 0) {
       const texture = await assets.getTexture(tex)
       if (texture) {
@@ -3803,7 +3888,7 @@ export async function buildLocsMesh(
   assets: LocAssets,
   onProgress?: (done: number, total: number) => void,
   lightGrid?: LightGrid,
-): Promise<{ mesh: THREE.Mesh | null; transparentLocs: THREE.Mesh[]; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[] }> {
+): Promise<{ mesh: THREE.Mesh | null; transparentLocs: THREE.Mesh[]; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[]; emitters: LocEmitter[] }> {
   // the Brightness preference scales the scene ambient — bake it into the sun
   // handed to every placement rather than special-casing computeModelLitRgb
   const bakeSun: ModelSun | undefined = assets.brightness === 1 ? undefined : {
@@ -3816,6 +3901,11 @@ export async function buildLocsMesh(
   // locs with an idle sequence (waving flags etc.) — collected out of the merged
   // static mesh so the scene can pose them per frame.
   const animated: AnimatedLoc[] = []
+  // Particle emitters AND billboards bound to loc faces (fires, torches,
+  // waterfalls; a fire's glow + smoke sprites). Collected for static and
+  // animated locs alike: the face is an anchor, not geometry, so it belongs to
+  // the particle/billboard runtimes rather than to any mesh.
+  const emitters: LocEmitter[] = []
   // one mesh per loc that has transparent faces + the materials they share
   const transparentLocs: THREE.Mesh[] = []
   const transMaterials = new Map<number, THREE.Material>()
@@ -3997,6 +4087,15 @@ export async function buildLocsMesh(
         if (isMarkerModel(model)) {
           markerModels++
           if ((model.faceColor[0] & 0xffff) === BARRIER_HSL) markerIsBarrier = true
+          // A marker model can be nothing BUT an emitter: 161 models in the cache
+          // are a single sentinel-green face carrying one producer — an invisible
+          // anchor whose whole job is to spawn particles. Skipping it here as
+          // "geometry we don't draw" would drop the fire with the anchor.
+          // (Billboards ride the same list — SceneParticles and SceneBillboards
+          // each take what applies to them.)
+          if (model.emitters?.length || model.billboards?.length) {
+            emitters.push({ model, matrix: matrix.clone(), upscale: modelUpscale(model), plane: renderPlane })
+          }
           continue
         }
         let m = model
@@ -4021,6 +4120,14 @@ export async function buildLocsMesh(
           // either, so a run of identical pieces down a slope stays uniformly
           // lit and uniformly textured. See ModelData.preContourVertexY.
           if (contoured) m = { ...m, vertexY: contoured, preContourVertexY: m.vertexY }
+        }
+        // Emitters and billboards ride the placement, whichever path the
+        // geometry takes: an emitter's carrier face is a spawn surface and
+        // never drawn (see EDITOR.md), a billboard's is replaced by its sprite.
+        // `animated` keeps SceneBillboards' static path off locs whose sprites
+        // are driven per-frame through the animated-loc records instead.
+        if (m.emitters?.length || m.billboards?.length) {
+          emitters.push({ model: m, matrix: matrix.clone(), upscale: modelUpscale(m), plane: renderPlane, animated: isAnimated })
         }
         if (isAnimated) {
           // keep out of the merged static mesh; the scene poses it per frame.
@@ -4101,5 +4208,5 @@ export async function buildLocsMesh(
       transparentLocs.push(sm)
     }
   }
-  return { mesh, transparentLocs, markers, shadows, animated }
+  return { mesh, transparentLocs, markers, shadows, animated, emitters }
 }

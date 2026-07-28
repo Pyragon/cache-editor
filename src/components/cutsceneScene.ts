@@ -1,7 +1,8 @@
 import type { CutsceneDef } from '../loaders/cutscenes'
 import { createRegionDef, decodeTerrain, tileIndex } from '../loaders/maps'
 import type { MapRegionDef, MapTerrain } from '../loaders/maps'
-import { calculateTileHeight } from './mapScene'
+import { calculateTileHeight, loadRegionEnvironment } from './mapScene'
+import type { RegionLight } from './mapScene'
 
 // Assembles the cutscene's scene the way the client does (MapRegion's cutscene
 // branch): each CutsceneArea copies a w×l block of 8-tile chunks from a live
@@ -20,6 +21,21 @@ export type CutsceneSceneCell = {
   ry: number
   def: MapRegionDef
   terrain: MapTerrain
+  /** Point lights that travelled in with the chunks copied into this cell,
+   *  already translated to its coordinates (see remapLights). */
+  lights: RegionLight[]
+}
+
+/** One 8×8-tile chunk copy, kept so the region's lights can follow its tiles. */
+type ChunkCopy = {
+  srcRegionId: number
+  srcTileX: number
+  srcTileY: number
+  srcPlane: number
+  cell: CutsceneSceneCell
+  dstTileX: number
+  dstTileY: number
+  dstPlane: number
 }
 
 export type CutsceneScene = {
@@ -43,9 +59,57 @@ function effectiveHeightByte(src: MapTerrain, plane: number, x: number, y: numbe
   return 30
 }
 
+/**
+ * Point lights travel with the chunks that carry them. A light's x/z are
+ * region-local world units (512 per tile), so the chunk it belongs to is the
+ * one containing its tile — and if that chunk was copied into the scene, the
+ * light moves by the same tile delta, onto the destination plane. Lights whose
+ * chunk wasn't copied are simply not part of this scene.
+ *
+ * `ranges[]` and `y` are relative to the light itself (footprint spans and a
+ * height above the tile), so they survive the move untouched.
+ */
+async function remapLights(
+  rootHandle: FileSystemDirectoryHandle,
+  copies: ChunkCopy[],
+  warnings: string[],
+): Promise<void> {
+  const envCache = new Map<number, Promise<RegionLight[]>>()
+  const lightsOf = (regionId: number) => {
+    let p = envCache.get(regionId)
+    if (!p) {
+      p = loadRegionEnvironment(rootHandle, regionId).then((env) => env?.lights ?? [])
+      envCache.set(regionId, p)
+    }
+    return p
+  }
+  let moved = 0
+  for (const copy of copies) {
+    const lights = await lightsOf(copy.srcRegionId)
+    for (const light of lights) {
+      if (light.plane !== copy.srcPlane) continue
+      const tileX = light.x >> 9
+      const tileY = light.z >> 9
+      if (tileX < copy.srcTileX || tileX >= copy.srcTileX + 8) continue
+      if (tileY < copy.srcTileY || tileY >= copy.srcTileY + 8) continue
+      copy.cell.lights.push({
+        ...light,
+        ranges: [...light.ranges],
+        x: light.x + (copy.dstTileX - copy.srcTileX) * 512,
+        z: light.z + (copy.dstTileY - copy.srcTileY) * 512,
+        plane: copy.dstPlane,
+      })
+      moved++
+    }
+  }
+  if (moved > 0) warnings.push(`${moved} point light${moved === 1 ? '' : 's'} moved in with their chunks`)
+}
+
 export async function assembleCutsceneScene(
   def: CutsceneDef,
   mapsDir: FileSystemDirectoryHandle,
+  /** cache root — the source regions' environment records live under it */
+  rootHandle?: FileSystemDirectoryHandle,
 ): Promise<CutsceneScene> {
   const warnings: string[] = []
 
@@ -54,7 +118,7 @@ export async function assembleCutsceneScene(
   for (let rx = 0; rx < 2; rx++) {
     for (let ry = 0; ry < 2; ry++) {
       const regionDef = createRegionDef(rx, ry)
-      cells.push({ rx, ry, def: regionDef, terrain: decodeTerrain(regionDef) })
+      cells.push({ rx, ry, def: regionDef, terrain: decodeTerrain(regionDef), lights: [] })
     }
   }
   const cellAt = (rx: number, ry: number) => cells.find((c) => c.rx === rx && c.ry === ry) ?? null
@@ -78,6 +142,7 @@ export async function assembleCutsceneScene(
     return p
   }
 
+  const copies: ChunkCopy[] = []
   for (const area of def.areas) {
     if (area.rotation !== 0) {
       warnings.push(`area rotation ${area.rotation} isn't simulated (copied unrotated)`) // not in any shipped cutscene
@@ -110,6 +175,7 @@ export async function assembleCutsceneScene(
         const dstTileY = (dstChunkY & 0x7) * 8
         const srcPlane = area.plane
         const dstPlane = area.cutscenePlane
+        copies.push({ srcRegionId, srcTileX, srcTileY, srcPlane, cell, dstTileX, dstTileY, dstPlane })
 
         for (let tx = 0; tx < 8; tx++) {
           for (let ty = 0; ty < 8; ty++) {
@@ -139,6 +205,7 @@ export async function assembleCutsceneScene(
     }
   }
 
+  if (rootHandle) await remapLights(rootHandle, copies, warnings)
   for (const cell of cells) cell.def.hasLocations = cell.def.objects.length > 0
   return { cells, warnings }
 }
