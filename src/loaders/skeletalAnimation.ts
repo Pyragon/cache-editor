@@ -3,11 +3,13 @@ import type { AnimationFrameBaseDef } from './animation_frame_bases'
 import type { AnimationFrameDef } from './animation_frame_sets'
 
 // Applies one animation frame's bone-group transforms to a model — ports
-// darkan ModelSM.kt's animateTransform (the non-interpolated, single-frame
-// playback path; interpolateFrames' tweened blend between two frames and the
-// BAS equipment-matrix branches inside animateTransform, both gated on data
-// this project doesn't build yet, are NOT ported — see the TODO note where
-// they'd hook in). Implemented transform types: 0 origin marker, 1 translate,
+// darkan's animateTransform, INCLUDING the client's keyframe interpolation
+// (MeshRasterizer.method11266's two-frame path, gated on the sequence's
+// `tweened` flag): pass the next keyframe + elapsed/duration and every
+// transform's deltas blend toward it. (The BAS equipment-matrix branches,
+// gated on data this project doesn't build yet, remain NOT ported — see the
+// TODO note where they'd hook in.)
+// Implemented transform types: 0 origin marker, 1 translate,
 // 2 rotate, 3 scale (vertex groups from vertexSkins), plus the face-group
 // effects 5 (alpha: alpha += delta·8, clamped 0..255 where 255 = invisible)
 // and 7 (colour: HSL16 hue += Δx wrapped &0x3f, sat += Δy clamped 0..7,
@@ -211,7 +213,125 @@ function skinGroupsFor(model: ModelData): { vertexGroups: number[][]; faceGroups
   return cached
 }
 
-export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameBaseDef, frame: AnimationFrameDef): PosedVertices | null {
+/** One resolved transform to apply: slot + final (possibly interpolated)
+ *  deltas, already promoted for types 2/9. */
+type ResolvedEntry = { slot: number; x: number; y: number; z: number; skip: number }
+
+/**
+ * The client's keyframe interpolation (MeshRasterizer.method11266, the
+ * two-frame path): walk EVERY slot of the frame base, taking each frame's
+ * entry when present and the identity when not (0, or 128 for the scale
+ * types 3/10), and blend by elapsed/duration —
+ *   - rotations (2, and billboard roll 9) take the SHORTEST ARC per axis in
+ *     14-bit angle space (delta >= 8192 wraps negative);
+ *   - colour (7) wraps hue the same way in 6-bit space, sat/light linear;
+ *   - everything else lerps linearly (translate, scale, alpha, billboards);
+ *   - a frame1 entry flagged 0x2 ("hold") or a frame2 entry flagged 0x1
+ *     ("snap in") disables the blend — frame1's values apply exactly;
+ *   - the origin re-establishment comes from frame1's skip when it has one,
+ *     else frame2's.
+ * Division mirrors Java's int truncation. Types 2/9 are promoted (<<2 &
+ * 0x3fff) BEFORE the arc math, exactly where the client's decode does it.
+ */
+function resolveEntries(
+  frameBase: AnimationFrameBaseDef,
+  frame: AnimationFrameDef,
+  next: AnimationFrameDef | null,
+  elapsed: number,
+  duration: number,
+): ResolvedEntry[] {
+  const entries: ResolvedEntry[] = []
+  // Single-frame path — the client's else-branch: frame1's entries verbatim.
+  if (!next || elapsed <= 0 || next.frameBaseId !== frame.frameBaseId || next.rawFallbackBytes) {
+    for (let i = 0; i < frame.transformationIndices.length; i++) {
+      const slot = frame.transformationIndices[i]
+      const type = frameBase.transformationTypes[slot]
+      entries.push({
+        slot,
+        x: resolveTransformDelta(type, frame.transformationX[i]),
+        y: type === 2 ? resolveTransformDelta(type, frame.transformationY[i]) : frame.transformationY[i],
+        z: type === 2 ? resolveTransformDelta(type, frame.transformationZ[i]) : frame.transformationZ[i],
+        skip: frame.skippedReferences[i] ?? -1,
+      })
+    }
+    return entries
+  }
+
+  const t = Math.min(elapsed, duration)
+  let i1 = 0
+  let i2 = 0
+  for (let slot = 0; slot < frameBase.transformationTypes.length; slot++) {
+    const has1 = i1 < frame.transformationIndices.length && frame.transformationIndices[i1] === slot
+    const has2 = i2 < next.transformationIndices.length && next.transformationIndices[i2] === slot
+    if (!has1 && !has2) continue
+    const type = frameBase.transformationTypes[slot]
+    const ident = type === 3 || type === 10 ? 128 : 0
+
+    let x1 = ident, y1 = ident, z1 = ident, skip1 = -1, flag1 = 0
+    if (has1) {
+      x1 = resolveTransformDelta(type, frame.transformationX[i1])
+      y1 = type === 2 ? resolveTransformDelta(type, frame.transformationY[i1]) : frame.transformationY[i1]
+      z1 = type === 2 ? resolveTransformDelta(type, frame.transformationZ[i1]) : frame.transformationZ[i1]
+      skip1 = frame.skippedReferences[i1] ?? -1
+      flag1 = frame.transformationFlags[i1] ?? 0
+      i1++
+    }
+    let x2 = ident, y2 = ident, z2 = ident, skip2 = -1, flag2 = 0
+    if (has2) {
+      x2 = resolveTransformDelta(type, next.transformationX[i2])
+      y2 = type === 2 ? resolveTransformDelta(type, next.transformationY[i2]) : next.transformationY[i2]
+      z2 = type === 2 ? resolveTransformDelta(type, next.transformationZ[i2]) : next.transformationZ[i2]
+      skip2 = next.skippedReferences[i2] ?? -1
+      flag2 = next.transformationFlags[i2] ?? 0
+      i2++
+    }
+
+    let x: number, y: number, z: number
+    if ((flag1 & 0x2) !== 0 || (flag2 & 0x1) !== 0) {
+      x = x1; y = y1; z = z1
+    } else if (type === 2) {
+      let dx = (x2 - x1) & 0x3fff
+      let dy = (y2 - y1) & 0x3fff
+      let dz = (z2 - z1) & 0x3fff
+      if (dx >= 8192) dx -= 16384
+      if (dy >= 8192) dy -= 16384
+      if (dz >= 8192) dz -= 16384
+      x = (x1 + Math.trunc((dx * t) / duration)) & 0x3fff
+      y = (y1 + Math.trunc((dy * t) / duration)) & 0x3fff
+      z = (z1 + Math.trunc((dz * t) / duration)) & 0x3fff
+    } else if (type === 9) {
+      let dx = (x2 - x1) & 0x3fff
+      if (dx >= 8192) dx -= 16384
+      x = (x1 + Math.trunc((dx * t) / duration)) & 0x3fff
+      y = 0
+      z = 0
+    } else if (type === 7) {
+      let dh = (x2 - x1) & 0x3f
+      if (dh >= 32) dh -= 64
+      x = (x1 + Math.trunc((dh * t) / duration)) & 0x3f
+      y = y1 + Math.trunc(((y2 - y1) * t) / duration)
+      z = z1 + Math.trunc(((z2 - z1) * t) / duration)
+    } else {
+      x = x1 + Math.trunc(((x2 - x1) * t) / duration)
+      y = y1 + Math.trunc(((y2 - y1) * t) / duration)
+      z = z1 + Math.trunc(((z2 - z1) * t) / duration)
+    }
+    entries.push({ slot, x, y, z, skip: skip1 !== -1 ? skip1 : skip2 })
+  }
+  return entries
+}
+
+export function applyAnimationFrame(
+  model: ModelData,
+  frameBase: AnimationFrameBaseDef,
+  frame: AnimationFrameDef,
+  /** Next keyframe to blend toward (same frame base), or null to pose
+   *  `frame` exactly. Only sequences with `tweened` set should pass one. */
+  next: AnimationFrameDef | null = null,
+  /** Ticks elapsed within `frame` (fractional allowed) / its duration. */
+  elapsed = 0,
+  duration = 1,
+): PosedVertices | null {
   if (!model.vertexSkins || frame.rawFallbackBytes) return null
 
   const { vertexGroups, faceGroups } = skinGroupsFor(model)
@@ -251,29 +371,32 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
   // Created lazily on the first billboard-group transform.
   let billboardGroups: Map<number, BillboardGroupPose> | null = null
 
-  for (let i = 0; i < frame.transformationIndices.length; i++) {
-    const slot = frame.transformationIndices[i]
+  // Which transforms run — and with what deltas — comes from resolveEntries:
+  // frame1's entries verbatim in the single-frame case, or the client's
+  // slot-ordered union of both keyframes with interpolated deltas when
+  // tweening. Values arrive PROMOTED for types 2/9.
+  for (const entry of resolveEntries(frameBase, frame, next, elapsed, duration)) {
+    const { slot } = entry
     const type = frameBase.transformationTypes[slot]
 
     // Before EVERY transform entry (regardless of its type — the client's
-    // driver in Model.kt runs this unconditionally), re-establish the
-    // current origin from a DIFFERENT slot's live vertex positions (a
-    // zero-delta type-0 pass), keyed by frame.skippedReferences[i]
-    // (confusingly also called "labels" in AnimFrame.kt, NOT the same thing
-    // as AnimationFrameBaseDef.labels). Skipping this lets the origin drift
-    // stale across branches of the skeleton (e.g. legs -> neck, or across a
-    // face-effect entry), which produced stretched/spiked geometry
-    // (terrorbird capture) and gaping chathead jaws when type-5 blinks sat
-    // between rotation entries.
-    const skipSlot = frame.skippedReferences[i]
-    if (skipSlot != null && skipSlot !== -1) {
-      applyTransform(state, model.vertexCount, 0, verticesForSlot(skipSlot), 0, 0, 0)
+    // driver runs this unconditionally), re-establish the current origin from
+    // a DIFFERENT slot's live vertex positions (a zero-delta type-0 pass),
+    // keyed by the entry's skip reference (confusingly also called "labels"
+    // in AnimFrame.kt, NOT the same thing as AnimationFrameBaseDef.labels).
+    // Skipping this lets the origin drift stale across branches of the
+    // skeleton (e.g. legs -> neck, or across a face-effect entry), which
+    // produced stretched/spiked geometry (terrorbird capture) and gaping
+    // chathead jaws when type-5 blinks sat between rotation entries. When
+    // tweening, frame1's skip wins and frame2's fills in (client 483-487).
+    if (entry.skip !== -1) {
+      applyTransform(state, model.vertexCount, 0, verticesForSlot(entry.skip), 0, 0, 0)
     }
 
-    // Face-group effects (darkan ModelSM.animateTransform types 5/7).
+    // Face-group effects (types 5/7) — deltas already interpolated.
     if (type === 5) {
       faceAlpha ??= Int8Array.from(model.faceAlpha)
-      const delta = frame.transformationX[i]
+      const delta = entry.x
       for (const f of facesForSlot(slot)) {
         let alpha = (faceAlpha[f] & 0xff) + delta * 8
         if (alpha < 0) alpha = 0
@@ -284,7 +407,7 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
     }
     if (type === 7) {
       faceColor ??= Uint16Array.from(model.faceColor)
-      const dh = frame.transformationX[i], ds = frame.transformationY[i], dl = frame.transformationZ[i]
+      const dh = entry.x, ds = entry.y, dl = entry.z
       for (const f of facesForSlot(slot)) {
         const hsl = faceColor[f] & 0xffff
         const h = (dh + ((hsl >> 10) & 0x3f)) & 0x3f
@@ -304,8 +427,8 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
     // exactly like the client's per-billboard Class65.
     if (type === 8 || type === 9 || type === 10) {
       billboardGroups ??= new Map()
-      const dx = resolveTransformDelta(type, frame.transformationX[i])
-      const dy = frame.transformationY[i]
+      const dx = entry.x
+      const dy = entry.y
       for (const label of frameBase.labels[slot] ?? []) {
         let group = billboardGroups.get(label)
         if (!group) billboardGroups.set(label, group = { dx: 0, dy: 0, rot: 0, sx: 128, sy: 128 })
@@ -322,10 +445,7 @@ export function applyAnimationFrame(model: ModelData, frameBase: AnimationFrameB
       continue
     }
 
-    const x = resolveTransformDelta(type, frame.transformationX[i])
-    const y = resolveTransformDelta(type, frame.transformationY[i])
-    const z = resolveTransformDelta(type, frame.transformationZ[i])
-    applyTransform(state, model.vertexCount, type, verticesForSlot(slot), x, y, z)
+    applyTransform(state, model.vertexCount, type, verticesForSlot(slot), entry.x, entry.y, entry.z)
   }
 
   if (state.upscaled) {

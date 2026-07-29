@@ -75,15 +75,45 @@ export class LocAnimator {
     return this.frameCount - 1
   }
 
+  private frameFor(frameIndex: number) {
+    const setId = this.def.frameSetIds?.[frameIndex]
+    if (setId == null) return null
+    return this.frameSets.get(setId)?.frames.get(frameFileId(this.def, frameIndex)) ?? null
+  }
+
   /** Pose a model at a frame index. Null if the frame/base is missing or the
    *  model has no compatible skin data. */
   pose(model: ModelData, frameIndex: number): PosedVertices | null {
-    const setId = this.def.frameSetIds?.[frameIndex]
-    if (setId == null) return null
-    const frame = this.frameSets.get(setId)?.frames.get(frameFileId(this.def, frameIndex))
+    const frame = this.frameFor(frameIndex)
     if (!frame || frame.rawFallbackBytes) return null
     const base = this.frameBases.get(frame.frameBaseId)
     if (!base) return null
     return applyAnimationFrame(model, base, frame)
+  }
+
+  /**
+   * Pose with the client's keyframe interpolation: fractional ticks within
+   * the current frame blend toward the next one when the sequence is
+   * `tweened` (MeshRasterizer.method11266; without the flag the client — and
+   * this — steps exact keyframes). The next frame follows our looping clock,
+   * so the wrap tween targets the frame the playback will actually show.
+   */
+  poseAt(model: ModelData, seconds: number): PosedVertices | null {
+    if (this.frameCount === 0) return null
+    const durations = this.def.frameDurations ?? []
+    let tick = ((seconds * 1000) / 20) % this.totalTicks
+    let index = this.frameCount - 1
+    for (let i = 0; i < this.frameCount; i++) {
+      const d = Math.max(1, durations[i] ?? 1)
+      if (tick < d) { index = i; break }
+      tick -= d
+    }
+    const frame = this.frameFor(index)
+    if (!frame || frame.rawFallbackBytes) return null
+    const base = this.frameBases.get(frame.frameBaseId)
+    if (!base) return null
+    if (!this.def.tweened || this.frameCount <= 1) return applyAnimationFrame(model, base, frame)
+    const next = this.frameFor((index + 1) % this.frameCount)
+    return applyAnimationFrame(model, base, frame, next, tick, Math.max(1, durations[index] ?? 1))
   }
 }
