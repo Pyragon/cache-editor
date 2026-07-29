@@ -68,6 +68,12 @@ type Props = {
   /** Extra text appended to the "N verts · M faces" stats line (e.g. the
    *  preview modal's "Anim 808 · frame 3 / 21"). */
   statsExtra?: string
+  /** Camera distance as a multiple of the model's bounding span. Lower fills
+   *  more of the frame; 2.5 is the standalone viewer's default. */
+  fitScale?: number
+  /** Hides the id/vertex-count header — for embeds where the surrounding panel
+   *  already says what is being shown. */
+  hideHeader?: boolean
 }
 
 // Per-particle size, tint and alpha need a shader — THREE.Points only supports a
@@ -237,7 +243,7 @@ function makeDotTexture(): THREE.Texture {
   return texture
 }
 
-export default function ModelViewer({ data, display, posedVertices, cameraStateRef, statsExtra }: Props) {
+export default function ModelViewer({ data, display, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader }: Props) {
   const mountRef = useRef<HTMLDivElement>(null)
   const matsRef = useRef<(THREE.MeshBasicMaterial | THREE.ShaderMaterial)[]>([])
   // Decoded material textures, keyed by texture id and kept across scene
@@ -904,13 +910,13 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
       const t = new THREE.Vector3(pose.offsetX, -pose.offsetY, -pose.offsetY).applyQuaternion(qx)
       poseGroup.position.copy(t)
 
-      const zoom = pose.zoom > 0 ? pose.zoom : span * 2.5
+      const zoom = pose.zoom > 0 ? pose.zoom : span * fitScale
       camera.fov = ICON_FOV
       camera.position.set(0, 0, zoom)
       camera.near = Math.max(zoom * 0.01, 0.1)
       camera.far = zoom * 10 + span * 100
     } else {
-      camera.position.set(0, 0, span * 2.5)
+      camera.position.set(0, 0, span * fitScale)
       camera.near = span * 0.001
       camera.far  = span * 100
     }
@@ -1123,7 +1129,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
 
   return (
     <div className="model-viewer">
-      <div className="model-header">
+      {!hideHeader && <div className="model-header">
         <span className="model-id">Model {data.id}</span>
         <span className="model-stats">
           {data.vertexCount} verts · {data.faceCount} faces
@@ -1132,7 +1138,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
           {statsExtra && ` · ${statsExtra}`}
         </span>
         <span className="model-hint">Drag to rotate · Scroll to zoom · Right-drag to pan</span>
-      </div>
+      </div>}
       <div ref={mountRef} className="model-canvas" />
       <div className="model-toolbar">
         <button

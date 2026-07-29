@@ -39,53 +39,74 @@ export function useSequencePlayback(
   const poseSeq = useRef(0)
 
   const frameCount = animation?.frameDurations?.length ?? 0
+  // 8,211 of the 17,186 sequences set this; the rest are authored to step.
+  const tweened = animation?.tweened === true
 
-  async function poseFrame(index: number) {
-    if (!animation || !model || !rootHandle) return
+  /** Resolves one keyframe and its base, both session-cached. Returns null
+   *  (after setting a status) when the frame can't be posed. */
+  async function loadFrame(index: number, seq: number) {
+    if (!animation || !rootHandle) return null
     const setId = animation.frameSetIds?.[index]
-    if (setId == null) return
+    if (setId == null) return null
     const fileId = frameFileId(animation, index)
+
+    let frameSetP = frameSetCache.current.get(setId)
+    if (!frameSetP) {
+      setStatus('Loading…')
+      frameSetP = (async () => {
+        const dir = await resolveEntryHandle(rootHandle, getEntryPath('animation_frame_sets'))
+        const loader = getLoader('animation_frame_sets')
+        if (!dir || !loader) throw new Error('animation_frame_sets entry not available')
+        return await loader.loadItem(dir, { id: setId, name: `${setId}` }, rootHandle) as AnimationFrameSetData
+      })()
+      frameSetCache.current.set(setId, frameSetP)
+      frameSetP.catch(() => frameSetCache.current.delete(setId))
+    }
+    const frameSet = await frameSetP
+    if (seq !== poseSeq.current) return null
+    const frame = frameSet.frames.get(fileId)
+    if (!frame) { setStatus(`Frame set ${setId} has no file ${fileId}.`); return null }
+    if (frame.rawFallbackBytes) { setStatus('This frame is unreadable (references an orphaned frame base).'); return null }
+
+    let frameBaseP = frameBaseCache.current.get(frame.frameBaseId)
+    if (!frameBaseP) {
+      setStatus('Loading…')
+      frameBaseP = (async () => {
+        const dir = await resolveEntryHandle(rootHandle, getEntryPath('animation_frame_bases'))
+        const loader = getLoader('animation_frame_bases')
+        if (!dir || !loader) throw new Error('animation_frame_bases entry not available')
+        const data = await loader.loadItem(dir, { id: frame.frameBaseId, name: `${frame.frameBaseId}` }, rootHandle) as { def: AnimationFrameBaseDef }
+        return data.def
+      })()
+      frameBaseCache.current.set(frame.frameBaseId, frameBaseP)
+      frameBaseP.catch(() => frameBaseCache.current.delete(frame.frameBaseId))
+    }
+    const frameBase = await frameBaseP
+    if (seq !== poseSeq.current) return null
+    return { frame, frameBase }
+  }
+
+  /** Poses `index`, optionally blended `elapsed`/`duration` of the way toward
+   *  the next keyframe. Only sequences flagged `tweened` get a blend — the
+   *  rest are authored to step. */
+  async function poseFrame(index: number, elapsed = 0, duration = 1) {
+    if (!animation || !model || !rootHandle) return
     const seq = ++poseSeq.current
 
     try {
-      // Only surface "Loading…" on a real cache miss — setting it on every
-      // frame advance re-rendered and reflowed the dialog twice per frame
-      // during playback (the cached path is effectively synchronous).
-      let frameSetP = frameSetCache.current.get(setId)
-      if (!frameSetP) {
-        setStatus('Loading…')
-        frameSetP = (async () => {
-          const dir = await resolveEntryHandle(rootHandle, getEntryPath('animation_frame_sets'))
-          const loader = getLoader('animation_frame_sets')
-          if (!dir || !loader) throw new Error('animation_frame_sets entry not available')
-          return await loader.loadItem(dir, { id: setId, name: `${setId}` }, rootHandle) as AnimationFrameSetData
-        })()
-        frameSetCache.current.set(setId, frameSetP)
-        frameSetP.catch(() => frameSetCache.current.delete(setId)) // failed loads may retry
-      }
-      const frameSet = await frameSetP
-      if (seq !== poseSeq.current) return
-      const frame = frameSet.frames.get(fileId)
-      if (!frame) { setStatus(`Frame set ${setId} has no file ${fileId}.`); setPosedVertices(null); return }
-      if (frame.rawFallbackBytes) { setStatus('This frame is unreadable (references an orphaned frame base).'); setPosedVertices(null); return }
+      const current = await loadFrame(index, seq)
+      if (!current) { if (seq === poseSeq.current) setPosedVertices(null); return }
 
-      let frameBaseP = frameBaseCache.current.get(frame.frameBaseId)
-      if (!frameBaseP) {
-        setStatus('Loading…')
-        frameBaseP = (async () => {
-          const dir = await resolveEntryHandle(rootHandle, getEntryPath('animation_frame_bases'))
-          const loader = getLoader('animation_frame_bases')
-          if (!dir || !loader) throw new Error('animation_frame_bases entry not available')
-          const data = await loader.loadItem(dir, { id: frame.frameBaseId, name: `${frame.frameBaseId}` }, rootHandle) as { def: AnimationFrameBaseDef }
-          return data.def
-        })()
-        frameBaseCache.current.set(frame.frameBaseId, frameBaseP)
-        frameBaseP.catch(() => frameBaseCache.current.delete(frame.frameBaseId))
+      let next = null
+      if (tweened && frameCount > 1 && elapsed > 0) {
+        const following = await loadFrame((index + 1) % frameCount, seq)
+        if (seq !== poseSeq.current) return
+        // Only blend within one frame base — a set change mid-blend would
+        // interpolate against unrelated bone slots.
+        if (following && following.frameBase === current.frameBase) next = following.frame
       }
-      const frameBase = await frameBaseP
-      if (seq !== poseSeq.current) return
 
-      const posed = applyAnimationFrame(model, frameBase, frame)
+      const posed = applyAnimationFrame(model, current.frameBase, current.frame, next, elapsed, duration)
       if (!posed) { setStatus('This frame base has no compatible skin data for the loaded model.'); setPosedVertices(null); return }
 
       setPosedVertices(posed)
@@ -97,7 +118,7 @@ export function useSequencePlayback(
     }
   }
 
-  // A fresh model or sequence starts over from frame 0 (and re-arms autoplay).
+  // A fresh SEQUENCE starts over from frame 0 (and re-arms autoplay).
   useEffect(() => {
     setFrameIndex(0)
     setPosedVertices(null)
@@ -105,21 +126,65 @@ export function useSequencePlayback(
     if (autoPlay) setPlaying(true)
     // autoPlay is a config flag, not reactive state
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, animation])
+  }, [animation])
 
+  // A fresh MODEL keeps the current frame — restarting here made every edit in
+  // a live editor snap the animation back to the start, which reads as the
+  // whole preview resetting. Only the stale pose is dropped, because it holds
+  // vertex data sized for the previous mesh; the effect below immediately
+  // re-poses the new one at the same frame.
   useEffect(() => {
-    if (model && animation) poseFrame(frameIndex)
+    setPosedVertices(null)
+  }, [model])
+
+  // Paused (or scrubbing): pose the selected frame exactly. While playing the
+  // RAF loop below owns posing, so this would fight it.
+  useEffect(() => {
+    if (model && animation && !playing) void poseFrame(frameIndex)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, animation, frameIndex])
+  }, [model, animation, frameIndex, playing])
 
-  // Playback: advance per the frame's own duration (20ms client ticks) —
-  // posing is an in-place buffer update, so real-time speed is fine.
+  // Playback. Frames advance at their authored durations (20ms client ticks),
+  // but a TWEENED sequence is re-posed every render frame at its sub-frame
+  // fraction — stepping keyframes alone runs at whatever the durations say,
+  // which for a stand animation is 5 ticks (100ms), i.e. 10 updates a second,
+  // and reads as stutter however fast the scene renders.
+  const playState = useRef({ index: 0, elapsedMs: 0 })
   useEffect(() => {
-    if (!playing || !model || frameCount === 0) return
-    const duration = (animation?.frameDurations?.[frameIndex] ?? 1) * 20
-    const timer = setTimeout(() => setFrameIndex((i) => (i + 1) % frameCount), Math.max(duration, 20))
-    return () => clearTimeout(timer)
-  }, [playing, frameIndex, model, frameCount, animation?.frameDurations])
+    if (!playing || !model || !animation || frameCount === 0) return
+    const durations = animation.frameDurations ?? []
+    const durationMs = (i: number) => Math.max((durations[i] ?? 1) * 20, 20)
+
+    playState.current = { index: frameIndex, elapsedMs: 0 }
+    let raf = 0
+    let last = performance.now()
+
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick)
+      const state = playState.current
+      state.elapsedMs += now - last
+      last = now
+
+      let advanced = false
+      while (state.elapsedMs >= durationMs(state.index)) {
+        state.elapsedMs -= durationMs(state.index)
+        state.index = (state.index + 1) % frameCount
+        advanced = true
+      }
+      if (advanced) setFrameIndex(state.index)
+
+      const duration = durationMs(state.index)
+      void poseFrame(
+        state.index,
+        tweened ? state.elapsedMs / 20 : 0,
+        tweened ? duration / 20 : 1,
+      )
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+    // frameIndex seeds the loop but must not restart it every advance
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, model, animation, frameCount, tweened])
 
   return { posedVertices, status, frameIndex, setFrameIndex, frameCount, playing, setPlaying }
 }

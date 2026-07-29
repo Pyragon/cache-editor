@@ -580,6 +580,9 @@ input[type="number"]::-webkit-inner-spin-button {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
+  /* Guarantees room around the 14px steppers, which centre on this box — at
+     the natural ~22px a short field left them all but touching the edges. */
+  min-height: 24px;
   /* room for the steppers, only while they're visible (see :hover below) */
   padding-right: 0;
   transition: padding-right 0.12s;
@@ -588,7 +591,9 @@ input[type="number"]::-webkit-inner-spin-button {
 .num-input-steps {
   position: absolute;
   top: 50%;
-  right: 0;
+  /* Inset from the edge — flush against the border looked cramped anywhere the
+     field has a visible one. */
+  right: 5px;
   transform: translateY(-50%);
   display: flex;
   gap: 2px;
@@ -607,7 +612,7 @@ input[type="number"]::-webkit-inner-spin-button {
 
 .num-input:hover .num-input-field,
 .num-input:focus-within .num-input-field {
-  padding-right: 36px;
+  padding-right: 41px;
 }
 
 /* Table columns size to their content, so growing the padding on hover would
@@ -616,13 +621,13 @@ input[type="number"]::-webkit-inner-spin-button {
 .quest-table .num-input-field,
 .quest-table .num-input:hover .num-input-field,
 .quest-table .num-input:focus-within .num-input-field {
-  padding-right: 36px;
+  padding-right: 41px;
   transition: none;
 }
 
 .num-input-step {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   display: flex;
   align-items: center;
   justify-content: center;

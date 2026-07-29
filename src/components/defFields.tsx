@@ -2,7 +2,7 @@
 // Styling comes from ItemViewer.css / QuestViewer.css / SpriteViewer.css —
 // component CSS is global in this app by convention.
 import { useEffect, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, Ref } from 'react'
 import type { ParamRow } from './defParams'
 
 // Item icon served from public/icons (fetched by scripts/download-icons.mjs).
@@ -29,7 +29,7 @@ export function ItemIcon({ id }: { id: number }) {
 // unstyled spinner arrows (hidden via .num-input in ItemViewer.css).
 // `className` picks the surrounding field style (item-field-input in grids,
 // cell-input in tables) so it drops into either context.
-export function NumberInput({ value, onChange, className = 'item-field-input', step = 1, min, max, title, placeholder }: {
+export function NumberInput({ value, onChange, className = 'item-field-input', step = 1, min, max, title, placeholder, onStep, inputRef }: {
   value: number
   onChange: (value: number) => void
   className?: string
@@ -38,6 +38,14 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
   max?: number
   title?: string
   placeholder?: string
+  /** Takes over the steppers and Arrow keys so a field can walk a set of valid
+   *  values instead of every integer (e.g. only the items that fit an
+   *  equipment slot). The owner calls `onChange` itself, which lets the search
+   *  be async. Typing is unaffected — free entry still works, so an out-of-set
+   *  value can be entered and flagged rather than blocked. */
+  onStep?: (current: number, direction: 1 | -1) => void
+  /** Handle on the underlying field, for callers that want to focus it. */
+  inputRef?: Ref<HTMLInputElement>
 }) {
   // While focused, the field is free text (digits and a leading minus) so
   // intermediate states like "" or "-" survive typing — a controlled
@@ -53,9 +61,15 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
     return next
   }
 
+  function bump(direction: 1 | -1) {
+    if (onStep) onStep(value, direction)
+    else onChange(clamp(value + direction * step))
+  }
+
   return (
     <span className="num-input" title={title}>
       <input
+        ref={inputRef}
         className={`${className} num-input-field`}
         type="text"
         inputMode="numeric"
@@ -70,8 +84,8 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
           if (/^-?\d+$/.test(raw)) onChange(clamp(parseInt(raw, 10)))
         }}
         onKeyDown={(e) => {
-          if (e.key === 'ArrowUp') { e.preventDefault(); setText(null); onChange(clamp(value + step)) }
-          if (e.key === 'ArrowDown') { e.preventDefault(); setText(null); onChange(clamp(value - step)) }
+          if (e.key === 'ArrowUp') { e.preventDefault(); setText(null); bump(1) }
+          if (e.key === 'ArrowDown') { e.preventDefault(); setText(null); bump(-1) }
         }}
       />
       <span className="num-input-steps">
@@ -79,8 +93,8 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
           type="button"
           className="num-input-step"
           tabIndex={-1}
-          disabled={min != null && value <= min}
-          onClick={() => onChange(clamp(value - step))}
+          disabled={!onStep && min != null && value <= min}
+          onClick={() => bump(-1)}
         >
           −
         </button>
@@ -88,8 +102,8 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
           type="button"
           className="num-input-step"
           tabIndex={-1}
-          disabled={max != null && value >= max}
-          onClick={() => onChange(clamp(value + step))}
+          disabled={!onStep && max != null && value >= max}
+          onClick={() => bump(1)}
         >
           +
         </button>
