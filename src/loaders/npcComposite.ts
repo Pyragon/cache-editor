@@ -156,6 +156,22 @@ export async function loadModelComposite(
             const def = JSON.parse(await file.text())
             const u = def.textureSpeedU ?? 0, v = def.textureSpeedV ?? 0
             if (u !== 0 || v !== 0) merged.textureSpeeds.set(id, { u, v })
+            // effectCombiner ("blendType") — non-zero means the client draws
+            // this material alpha-blended (glass, ghosts)
+            const bt = def.effectCombiner ?? 0
+            if (bt !== 0) merged.textureBlendTypes.set(id, bt)
+            if (def.detailsOnly === true) merged.textureDetailsOnly.set(id, true)
+            if (def.hdr === true && texturesDir) {
+              try {
+                const sub = await texturesDir.getDirectoryHandle(String(id))
+                const mat = JSON.parse(await (await sub.getFileHandle(`${id}.json`)).getFile().then((fl) => fl.text()))
+                const op = mat.hdrOperationIndex != null ? mat.textureOperations?.[mat.hdrOperationIndex] : null
+                if (op && op.type === 0 && typeof op.fillValue === 'number') {
+                  const mult = 1 + (op.fillValue * 31) / 4096
+                  if (mult > 1) merged.textureHdrMultipliers.set(id, mult)
+                }
+              } catch { /* no op graph — stays at 1 */ }
+            }
           } catch { /* no definition */ }
         }
       }))

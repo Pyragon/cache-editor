@@ -571,6 +571,21 @@ export type ModelData = {
   // fire cape's flow: OpenGlToolkit scrolls offset = seconds * speed / 64). Only
   // materials that actually move have an entry.
   textureSpeeds: Map<number, { u: number; v: number }>
+  // texture id → the texture def's effectCombiner ("blendType"). Non-zero means
+  // the client draws that material's faces in its transparent pass with the
+  // texture's alpha (glass, ghosts); 0 = opaque (any PNG alpha there is a
+  // specular gloss mask, never opacity). Only non-zero ids have an entry.
+  textureBlendTypes: Map<number, number>
+  // texture id → the def's detailsOnly flag: a greyscale detail map the client
+  // layers neutrally, so renderers must normalise by its average luma or every
+  // textured face darkens by it. Only true ids have an entry.
+  textureDetailsOnly: Map<number, boolean>
+  // texture id → the material's HDR overbright multiplier (1 + fill·31/4096
+  // from a constant-fill hdr op) — renderers push these faces past 1.0 so the
+  // bloom pass glows them. Only ids with a resolvable multiplier > 1 have an
+  // entry; hdr materials with full op graphs stay unrepresented (same
+  // limitation as the scenes' MaterialMeta).
+  textureHdrMultipliers: Map<number, number>
   // Billboard attachments (darkan Mesh.kt: u8 count, then u16 typeId,
   // u16 face, u8 depth, s8 distance per entry; gated by footer flag 0x4).
   billboards: ModelBillboard[] | null
@@ -1030,6 +1045,9 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textureTransU, textureTransV,
     textures: new Map(),
     textureSpeeds: new Map(),
+    textureBlendTypes: new Map(),
+    textureDetailsOnly: new Map(),
+    textureHdrMultipliers: new Map(),
     billboards,
     billboardTypes: new Map(),
     emitters,
@@ -1195,6 +1213,9 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
     textureTransU: null, textureTransV: null,
     textures: new Map(),
     textureSpeeds: new Map(),
+    textureBlendTypes: new Map(),
+    textureDetailsOnly: new Map(),
+    textureHdrMultipliers: new Map(),
     billboards: null, // old-format models predate billboards
     billboardTypes: new Map(),
     emitters: null, // …and particle emitters
@@ -1378,6 +1399,9 @@ export function mergeModels(models: ModelData[]): ModelData {
 
   const textures = new Map<number, Blob>()
   const textureSpeeds = new Map<number, { u: number; v: number }>()
+  const textureBlendTypes = new Map<number, number>()
+  const textureDetailsOnly = new Map<number, boolean>()
+  const textureHdrMultipliers = new Map<number, number>()
   const billboards: ModelBillboard[] = []
   const billboardTypes = new Map<number, { def: BillboardTypeDef; material: Blob | null }>()
   const emitters: ModelEmitter[] = []
@@ -1429,6 +1453,9 @@ export function mergeModels(models: ModelData[]): ModelData {
     }
     for (const [id, blob] of m.textures) textures.set(id, blob)
     for (const [id, speed] of m.textureSpeeds) textureSpeeds.set(id, speed)
+    for (const [id, bt] of m.textureBlendTypes) textureBlendTypes.set(id, bt)
+    for (const [id, d] of m.textureDetailsOnly) textureDetailsOnly.set(id, d)
+    for (const [id, h] of m.textureHdrMultipliers) textureHdrMultipliers.set(id, h)
     if (m.billboards) for (const b of m.billboards) billboards.push({ ...b, face: b.face + fOff })
     for (const [id, info] of m.billboardTypes) billboardTypes.set(id, info)
     if (m.emitters) for (const e of m.emitters) emitters.push({ ...e, face: e.face + fOff })
@@ -1459,7 +1486,7 @@ export function mergeModels(models: ModelData[]): ModelData {
     textureScaleX, textureScaleY, textureScaleZ,
     textureRotation, textureDirection, textureSpeed,
     textureTransU, textureTransV,
-    textures, textureSpeeds,
+    textures, textureSpeeds, textureBlendTypes, textureDetailsOnly, textureHdrMultipliers,
     billboards: billboards.length > 0 ? billboards : null,
     billboardTypes,
     emitters: emitters.length > 0 ? emitters : null,
@@ -1550,6 +1577,22 @@ const loader: CacheLoader = {
             const u = def.textureSpeedU ?? 0
             const v = def.textureSpeedV ?? 0
             if (u !== 0 || v !== 0) model.textureSpeeds.set(id, { u, v })
+            const bt = def.effectCombiner ?? 0
+            if (bt !== 0) model.textureBlendTypes.set(id, bt)
+            if (def.detailsOnly === true) model.textureDetailsOnly.set(id, true)
+            // the overbright factor lives in the material op graph — only a
+            // constant-fill hdr op yields a single scalar (see MaterialMeta)
+            if (def.hdr === true && texturesDir) {
+              try {
+                const sub = await texturesDir.getDirectoryHandle(String(id))
+                const mat = JSON.parse(await (await sub.getFileHandle(`${id}.json`)).getFile().then((f) => f.text()))
+                const op = mat.hdrOperationIndex != null ? mat.textureOperations?.[mat.hdrOperationIndex] : null
+                if (op && op.type === 0 && typeof op.fillValue === 'number') {
+                  const mult = 1 + (op.fillValue * 31) / 4096
+                  if (mult > 1) model.textureHdrMultipliers.set(id, mult)
+                }
+              } catch { /* no op graph — stays at 1 */ }
+            }
           } catch {
             // no definition — texture stays still
           }
