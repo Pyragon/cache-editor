@@ -1989,7 +1989,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           if (!rec.mesh.visible || rec.mesh.parent?.visible === false) continue
           // skip anything not in view — the vast majority most frames
           if (!animFrustum.intersectsSphere(rec.sphere)) continue
-          const posed = rec.animator.pose(rec.model, rec.animator.frameAt(seconds))
+          const posed = rec.animator.poseAt(rec.model, seconds)
           if (posed) {
             rec.update(posed)
             // billboards ride the same frame: anchors follow the posed carrier
@@ -2130,6 +2130,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         billboardsRef.current?.dispose()
         const billboards = new SceneBillboards()
         billboards.setBloomEnabled(bloomOnRef.current)
+        // HDR comes off the sprite's material, exactly as loc faces do —
+        // an hdr billboard (glowing eyes, material 744 ≈×2.45) feeds bloom
+        billboards.setMaterialLookup((id) => assets.getMaterialMeta(id))
         billboardsRef.current = billboards
 
         for (let plane = 0; plane < 4; plane++) {

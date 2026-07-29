@@ -223,9 +223,13 @@ export class SceneParticles {
    * there), and the placement rides on a holder object: model units scaled by
    * the pre-13 upscale, y and z negated exactly as the mesh builder does, and
    * 4096 to undo the sim's 12-bit fixed point.
+   *
+   * Returns a removal handle for callers whose emitters are transient (an
+   * entity gfx that ends) — region locs just ignore it.
    */
-  async add({ model, matrix, upscale, plane }: LocEmitter): Promise<void> {
-    if (!model.emitters?.length) return
+  async add({ model, matrix, upscale, plane }: LocEmitter): Promise<{ remove(): void } | null> {
+    if (!model.emitters?.length) return null
+    const created: System[] = []
     const effectors: Effector[] = []
     for (const effector of model.effectors ?? []) {
       const type = model.effectorTypes.get(effector.effectId)
@@ -328,10 +332,24 @@ export class SceneParticles {
         -(model.vertexZ[ia] + model.vertexZ[ib] + model.vertexZ[ic]) / 3,
       ).multiplyScalar(upscale).applyMatrix4(matrix)
 
-      this.systems.push({
+      const system: System = {
         sim, points, holder, geometry, material, positions, colors, sizes, centre,
         sizeScale: upscale, cap, hdrMul: meta && meta.hdrMultiplier > 1 ? meta.hdrMultiplier : 1, followsLight, active: true,
-      })
+      }
+      this.systems.push(system)
+      created.push(system)
+    }
+    if (created.length === 0) return null
+    return {
+      remove: () => {
+        for (const system of created) {
+          system.holder.parent?.remove(system.holder)
+          system.holder.remove(system.points)
+          system.geometry.dispose()
+          system.material.dispose()
+        }
+        this.systems = this.systems.filter((s) => !created.includes(s))
+      },
     }
   }
 

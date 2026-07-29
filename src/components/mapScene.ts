@@ -3139,6 +3139,14 @@ export async function buildAnimatedLocMesh(
       vert += 3
     }
     const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: cullSide })
+    // Base state for EVERY group, textured or not: a flat-colour group whose
+    // faces bake translucency must blend its vertex alpha too. This lived only
+    // inside the textured branch, so an untextured translucent model rendered
+    // opaque — the Stone of Jas's aura shell (model 44495, all 448 faces at
+    // faceAlpha 192, no textures) drew as a solid crust over the stone.
+    // z-write stays ON, as in the client (see the note below).
+    material.transparent = matBakedAlpha[materials.length] === true
+    material.depthWrite = true
     if (tex >= 0) {
       const texture = await assets.getTexture(tex)
       if (texture) {

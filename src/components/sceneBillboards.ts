@@ -68,6 +68,7 @@ const BILLBOARD_VERT = `
 
 const BILLBOARD_FRAG = `
   uniform sampler2D map;
+  uniform float uHdr;
   uniform vec3 fogColor;
   uniform float fogNear;
   uniform float fogFar;
@@ -80,7 +81,10 @@ const BILLBOARD_FRAG = `
     // LINEAR buffer the OutputPass re-encodes, so linearize it or the sprite
     // displays brightened — the dark smoke column read as light grey and the
     // glow washed out pale. (The sampled texture is already linear.)
-    vec3 rgb = pow(vColor.rgb, vec3(2.2)) * tex.rgb;
+    // uHdr is the material's overbright multiplier (Saradomin's eye sprites,
+    // material 744, are hdr fill-192 -> x2.45) — past 1.0 the bloom pass
+    // turns it into the glow; 1.0 while bloom is off, like every material.
+    vec3 rgb = pow(vColor.rgb, vec3(2.2)) * tex.rgb * uHdr;
     // Region distance fog: the client's Particle effect is fixed-function, so
     // D3D vertex fog mutes a distant glow toward the backdrop exactly as it
     // does geometry — without this the glow reads too vivid at range.
@@ -126,9 +130,12 @@ type AnimatedSystem = {
 }
 
 /** Handle for one animated loc's sprites: drive with `pose`, `remove` when the
- *  loc leaves the scene (deleted placement, centre rebuild). */
+ *  loc leaves the scene (deleted placement, centre rebuild). `setVisible`
+ *  lets an owner whose sprites are NOT children of its group (a cutscene
+ *  entity) hide them with it. */
 export type AnimatedBillboards = {
   pose(posed: PosedVertices | null): void
+  setVisible(on: boolean): void
   remove(): void
 }
 
@@ -143,6 +150,13 @@ export class SceneBillboards {
   private fallback: THREE.Texture | null = null
   private bloomOn = true
   private count_ = 0
+  private materialMeta: ((id: number) => Promise<{ hdrMultiplier: number; effectCombiner: number } | null>) | null = null
+
+  /** Where a material's HDR multiplier comes from (the scene's LocAssets). */
+  setMaterialLookup(lookup: (id: number) => Promise<{ hdrMultiplier: number; effectCombiner: number } | null>): void {
+    this.materialMeta = lookup
+  }
+
   /** region fog mirrored from scene.fog (near 1e8 = fog off) */
   private fogColor = new THREE.Color(0xc8c0a8)
   private fogNear = 1e8
@@ -215,13 +229,23 @@ export class SceneBillboards {
       }
     }
     if (systems.length === 0) return null
+    let ownerHidden = false
+    const applyVisibility = () => {
+      for (const { mesh, isGated } of systems) {
+        mesh.visible = !ownerHidden && !mesh.userData.awaitingPose && (isGated ? !this.bloomOn : true)
+      }
+    }
     return {
       pose: (posed) => {
-        for (const { system, mesh, isGated } of systems) {
+        for (const { system, mesh } of systems) {
           this.writePose(system, placed, posed)
           mesh.userData.awaitingPose = false
-          mesh.visible = isGated ? !this.bloomOn : true
         }
+        applyVisibility()
+      },
+      setVisible: (on) => {
+        ownerHidden = !on
+        applyVisibility()
       },
       remove: () => {
         for (const { system, mesh } of systems) {
@@ -400,6 +424,7 @@ export class SceneBillboards {
       fragmentShader: BILLBOARD_FRAG,
       uniforms: {
         map: { value: texture },
+        uHdr: { value: 1 },
         fogColor: { value: this.fogColor.clone() },
         fogNear: { value: this.fogNear },
         fogFar: { value: this.fogFar },
@@ -409,17 +434,41 @@ export class SceneBillboards {
       // the client's "Particle" shader path alpha-blends; face colour carries
       // the brightness (the glow is a near-opaque warm sprite, not additive)
       blending: THREE.NormalBlending,
+      // A sprite with `distance: 0` sits EXACTLY on its host face (Saradomin's
+      // eyes). The client survives the coplanarity because its billboard pass
+      // reuses the mesh's transform pipeline bit-for-bit; our anchors take a
+      // different path, so without a bias the depth test can z-fight the host
+      // surface. (Depth write is off, so only the comparison shifts.)
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -2,
     })
+    material.userData.hdrMul = 1
+    // the overbright factor lives in the material meta; fill it in when it
+    // resolves (the client gates HDR on the bloom filter being live)
+    if (materialId >= 0 && this.materialMeta) {
+      const target = material
+      void this.materialMeta(materialId).then((meta) => {
+        if (meta && meta.hdrMultiplier > 1) {
+          target.userData.hdrMul = meta.hdrMultiplier
+          target.uniforms.uHdr.value = this.bloomOn ? meta.hdrMultiplier : 1
+        }
+      })
+    }
     this.materials.set(materialId, material)
     return material
   }
 
   /** Mirrors the client's `stationary` gate: those sprites are the no-bloom
-   *  stand-ins, drawn only while the bloom filter is off. */
+   *  stand-ins, drawn only while the bloom filter is off — and HDR follows
+   *  the same switch, exactly like the particle and loc materials. */
   setBloomEnabled(on: boolean): void {
     this.bloomOn = on
     // an animated gated mesh that was never posed stays hidden either way
     for (const mesh of this.gated) mesh.visible = !on && !mesh.userData.awaitingPose
+    for (const material of this.materials.values()) {
+      material.uniforms.uHdr.value = on ? ((material.userData.hdrMul as number) ?? 1) : 1
+    }
   }
 
   dispose(): void {
