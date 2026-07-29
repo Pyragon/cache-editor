@@ -11,8 +11,21 @@ Open work only — completed passes live in git history and README.
 ## Animations
 
 - **REMINDER (2026-07-19): Cody found an animations issue while testing in the live client** — parked while other editors get finished; ask him what it was when animations come back up. (He never described it — don't guess.)
+- **Keyframe tweening is PORTED (2026-07-28)** — `applyAnimationFrame` takes an
+  optional next frame + elapsed/duration and blends per the client's
+  `MeshRasterizer.method11266`: slot-ordered union of both keyframes, identity
+  defaults (0 / 128 for scale types), shortest-arc rotation in 14-bit space
+  (hue in 6-bit), tween-block flags (f1&0x2 / f2&0x1 → snap), frame1's skip
+  reference winning over frame2's, gated on the sequence's `tweened` flag
+  (8211/17186 sequences set it). Wired into `LocAnimator.poseAt` (map viewer +
+  cutscene loc idles) and the cutscene entity/object/gfx poser, which re-poses
+  tweened holders every render frame with the sub-cycle fraction. CONFIRMED
+  working in cutscenes (Cody, 2026-07-28). Still open: ModelViewer's sequence
+  preview and SpotAnimationViewer don't use it (exact-frame stepping); the
+  cutscene wrap tween targets frame 0 rather than the client's
+  `frames.length - loopDelay` loop-back point (our playback loops the whole
+  sequence).
 - **Not ported in `skeletalAnimation.ts`:**
-  - **Frame interpolation/tweening** (`animatePartialtransform`, blending between two frames) — real animations use this for smooth playback between keyframes; playback currently poses one exact frame at a time.
   - **The BAS equipment-matrix branch inside `animateTransform`** (the `verticesData.isNotEmpty()` case, a full 3×3 rotation-matrix composition) — always empty/null in the base playback path (confirmed via every real call site), needed only for equipment-piece-specific pose adjustments.
   - **Submesh gating** (`verticesSubmeshes`, restricting a transform to specific equipment pieces in a composite) — not built into `mergeModels()`'s output yet, so multi-part composites (identikit/equipment stacks) can't be animated with full correctness.
 - **Type-5 reveal limitation in ModelViewer's in-place path**: it can hide faces (collapse to a degenerate triangle) but can't REVEAL faces that were alpha-hidden at rest (they're never built into the buffer). The chathead preview rebuilds geometry per frame and handles both directions.
@@ -328,18 +341,36 @@ black as the client's while the ground behind it is too bright.
 
 ## Cutscenes
 
-- **RETEST FIRST (2026-07-28): the missing pieces may already be back.** The player added only ONE of the three geometry paths `buildLocsMesh` returns — the merged opaque mesh — and silently dropped the other two: `transparentLocs` (one mesh per loc carrying any transparent face: windows, fences, glass, fountains) and `animated` (locs with an idle sequence, which `buildLocsMesh` pulls out of the merge entirely). Both are now added, along with the locs' static shadows, the source region's sun (direction, ambient and colour tint), its fog, skybox, bloom and point lights. "A *class* of loc objects doesn't appear, walls and roof are fine" is exactly what dropping a whole geometry path looks like, so re-check the chapel before tracing individual loc ids. The original investigation follows.
+- **OPEN BUG (2026-07-28, 3 failed fixes): Saradomin's eye billboards missing
+  at his teleport-in and in the end wide shot of cutscene 1** (they DO show in
+  the mid-scene close shots). VERIFIED NOT the cause: the data (host faces
+  alpha-0 at rest and through every anim; groups 0/1 scale 121-162/128, never
+  0; texture 744 exists, hdr ≈×2.45), and the billboard runtime itself — a
+  headless simulation of the exact call sequence (addAnimated → setVisible
+  → pose → placeEntity) yields a VISIBLE mesh with correct anchors (head
+  height), sizes and cyan tint. FAILED fixes: (1) polygonOffset depth bias
+  (kept as coplanarity protection, but it wasn't this), (2) FOG_TILES 40 → 64
+  (the region's black fog with fogDepth 3000 started at 14.6 tiles, which
+  LOOKED like the answer — camera-spline fade-in matched — but no change
+  on retest; the raise stays as a legit draw-distance fix). NEXT: stop
+  static analysis — instrument the live player (expose the billboard meshes'
+  per-frame `visible`/anchor/uniform state on `window`, check the focus-plane
+  gating band during the two failing shots, and check whether `onPosed` is
+  actually firing at those moments) and read the states during the exact
+  failing frames. Do not guess a fourth mechanism without live data.
+
 - **OPEN BUG (2026-07-21): a class of loc objects around the God Wars chapel don't appear (bridge stonework, church ledges/base-plinth/"bottom outer" trim); walls/roof are fine.** VERIFIED via per-loc render logging in `buildLocsMesh`: the chapel's walls (loc 61734 plane 0, 61699 plane 1), roof (61704 plane 2) and crenellations (61708 plane 3) ALL render at the correct cascaded heights (−1536 / −3584 / −4608 / −5280) — the multi-storey structure is faithful, so the earlier "walls don't render / floating" framing was WRONG. Ruled out: shape→model skip (none), marker-face hiding (only 1 genuine marker region-wide), height corruption (a red herring — the debug dedup was showing a *neighbour* region that reuses the same loc ids; the centre terrain is correct, hv[1455]=48). The missing pieces are NOT the chapel walls. `groundContourType` was ported (`contourVertexY` in mapScene.ts — ct1/2/4/5, client `ModelSM.contourToGround`) since bridges (loc 54937 ct5) and paths (ct1) need it; it builds/lints and doesn't regress the chapel, but did NOT visibly fix the reported missing pieces (the chapel ledge pieces are ct0). NEXT: get the specific loc id of one missing piece (right-click/inspect in the maps editor, or in-game Examine) and trace why THAT loc doesn't render — do not keep guessing which loc it is. (The contour port is no longer unverified — the Lumbridge bridge arch was confirmed correct on 2026-07-25 and signed off, so it stays.)
 
 - **Editing + repack.** The viewer is read-only; the cryogen side already has a verified byte-identical `encode()` (16/16), so an editable pass needs: editing UI (the usual draft/save-bar pattern), `saveItem` in the loader, a CacheBuilder repack path that reads the JSON back into `CutsceneDefinitions` (Gson → encode), and `getActions()` on the definition.
 - **PLAY_VORBIS previews** — the 116 vorbis actions reference index 36 (Vorbis), which has no cryogen dumper; sounds can't be previewed until that index is dumped.
 - **Playback preview gaps** (the 3D player simulates terrain/locs, camera splines, entity walk routes + animations, object spawns and fades):
   - Area **rotations 1–3** aren't implemented in `cutsceneScene.ts` (no shipped cutscene uses them — copied unrotated with a warning). The client transforms to port live in darkan `MapLoader.decodeTilesServer` / `EnvironmentManager.localOffsetX/Y`.
-  - **Not simulated**: sounds, entity/positioned gfx, projectiles, hitmarks, hint arrows, tile messages, SET_VARIABLE/EXECUTE_SCRIPT hooks.
-  - **Approximations to verify against the live client**: MOVEMENT/ROTATE facing-angle sign convention (yaw mapping is uncalibrated), walk/run/half-walk pace (assumed 1 tile per 30/15/60 cycles), and the spline row[3] term (client lerps it into `cameraPitch` — not applied).
+  - **Not simulated**: sounds, positioned (tile) gfx, projectiles, hitmarks, hint arrows, tile messages, SET_VARIABLE/EXECUTE_SCRIPT hooks. (ENTITY_GFX is fully simulated as of 2026-07-28, including attachment-only gfx models whose visuals are billboards/particles — confirmed working.)
+  - **Approximations to verify against the live client**: walk/run/half-walk pace (assumed 1 tile per 30/15/60 cycles), and the spline row[3] term (client lerps it into `cameraPitch` — not applied). (The MOVEMENT/ROTATE facing angle is CALIBRATED, 2026-07-28: clockwise-from-north 0x3fff units, three.js yaw = `-angle·2π/16384`; and walk-facing is GATED like the client — an entity only re-faces along its travel when its BAS `yawAcceleration` != 0 or its def's `contrast` != 0 (`PathingEntity.method15863`; contrast<<3 doubles as the turn rate, players default 256). NO BAS in this dump has a yawAcceleration, so most cutscene NPCs keep their scripted MOVEMENT facing — Saradomin's backwards glide in cutscene 0 is intentional.)
+  - **Gfx attachments snapshot the entity's placement at spawn** — a gfx on an entity that WALKS during it won't follow. (Entity MODEL billboards DO follow as of 2026-07-28: Saradomin's glowing eyes are two type-115 sprites on model 58935, wired through `addAnimated` with a by-reference placement matrix recomposed on every move/pose — TEST: eyes glow, track his head through anims and walks, and hide/show with him. Spawned-OBJECT model attachments and entity-model particle emitters remain unwired; no cutscene case seen yet. Billboard materials apply their HDR multiplier gated on bloom — the eyes are material 744, hdr ≈×2.45, which is what feeds the glow — and entity/object/gfx MESH textures apply theirs too (`ModelData.textureHdrMultipliers`, constant-fill hdr ops only, via `material.color` like the loc meshes). TEST: the eyes bloom; any hdr-textured mesh detail on the cast glows rather than rendering flat.)
   - The player entity renders as a cone marker — its appearance streams from the server at runtime (`CUTSCENE_BUFFER`), which the cache doesn't carry. Could offer a default identikit avatar via `playerAppearance.ts`.
   - **The environment is the FIRST area's source region** (sun, fog, skybox, bloom, and the point lights that travel in with each copied chunk). A cutscene assembled from regions with different environments takes the first one — which is what the client does too, since a scene has one environment — but it is worth knowing if a cutscene ever looks lit like somewhere else.
-  - Fog uses a fixed 40-tile draw distance (`FOG_TILES`), the map view's default rather than the client's own setting.
+  - Fog uses a fixed draw distance (`FOG_TILES`, now 64 — a high draw-distance client) rather than the client's own setting. 40 put the fog START at 14.6 tiles in cutscene 1 (black fog, fogDepth 3000 = a 23-tile fade band) and swallowed Saradomin's eye sprites from mid-distance — if sprites or scenery ever fade too EARLY or too LATE versus the client again, this constant is the knob.
 
 ## Vars
 

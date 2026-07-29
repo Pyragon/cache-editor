@@ -13,6 +13,7 @@ import { frameFileId } from '../loaders/animations'
 import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
 import type { AnimationFrameSetData } from '../loaders/animation_frame_sets'
 import { applyAnimationFrame } from '../loaders/skeletalAnimation'
+import type { PosedVertices } from '../loaders/skeletalAnimation'
 import {
   DEFAULT_SUN, LocAssets, SceneMosaic, averageHeight, blurShadowGrid, buildAnimatedLocMesh, buildLightGrid,
   buildLocsMesh, buildSkyboxMesh, buildTerrainMesh, loadRegionEnvironment, loadSceneConfigs, sunTintFor,
@@ -21,6 +22,8 @@ import type { RegionEnvironment, SunConfig } from './mapScene'
 import { ClientBloomPass } from './clientBloom'
 import { SceneParticles } from './sceneParticles'
 import { SceneBillboards } from './sceneBillboards'
+import { LocAnimator } from './locAnimator'
+import { modelUpscale } from '../loaders/models'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
@@ -29,6 +32,7 @@ import './AnimationViewer.css'
 import './CutsceneViewer.css'
 
 const REGION_UNITS = SIZE * 512
+const ONE_V3 = new THREE.Vector3(1, 1, 1)
 
 // The client's pass order, same as the map scene: opaque objects, then ground,
 // then transparent objects back-to-front (MeshRasterizer_Sub3 /
@@ -63,8 +67,14 @@ function sunOf(env: RegionEnvironment | null): SunConfig {
   }
 }
 
-/** Draw distance the fog fades out over, in tiles — the map view's default. */
-const FOG_TILES = 40
+/** Draw distance the fog fades out over, in tiles. The client uses the
+ *  player's draw-distance preference; 40 (the map view's default) put the fog
+ *  START at 14.6 tiles in cutscene 1 (fogColour black, fogDepth 3000 — a
+ *  23-tile fade band), swallowing Saradomin's 26-unit eye sprites from
+ *  mid-distance while his big lit silhouette stayed readable. 64 matches a
+ *  high draw-distance client and keeps the fade band's far edge past the
+ *  2×2-region area a cutscene can even copy. */
+const FOG_TILES = 64
 const CYCLE_MS = 20
 
 type Props = {
@@ -82,11 +92,55 @@ type EntityMesh = { tm: TexturedModelMesh; model: ModelData }
 const applyPose = (em: EntityMesh, posed: { x: Int32Array; y: Int32Array; z: Int32Array } | null) =>
   applyPoseToMesh(em.tm, em.model, posed)
 
+type AnimState = { def: AnimationDef; frame: number; acc: number; oneShot: boolean }
+
+/** Anything startAnim can drive. The two counters serialize the ASYNC anim
+ *  swaps: each request takes a ticket at call time and only the latest may
+ *  commit, and a one-shot completion may only revert to the stand/idle when
+ *  no newer request is in flight. Without this, a cached def resolving in
+ *  call order let the completion revert OVERWRITE a same-cycle
+ *  ANIMATE_MOVEMENT — Saradomin's kneel-down (10395) is exactly 104 ticks
+ *  and its kneel-loop (10379) fires on the exact completion cycle, so on
+ *  replay (everything cached) he stood up instead. */
+type AnimHolder = {
+  anim: AnimState | null
+  em: EntityMesh | null
+  animPending: number
+  animCommitted: number
+  /** attachment driver — called with every posed frame */
+  onPosed?: (posed: PosedVertices) => void
+}
+
+/** A cutscene-spawned object (REPLACE_OBJECT): unlike region locs these are
+ *  props the script places, and in this era they are how battle crowds are
+ *  staged — cutscene 0's fight is mostly loc-spawned fighters whose combat
+ *  loops are their defs' idle animations. */
+type ObjectRt = AnimHolder & {
+  group: THREE.Group
+  /** the def's idle sequence — plays while spawned, and is what an
+   *  ANIMATE_OBJECT one-shot falls back to */
+  idleAnimId: number
+}
+
+/** An in-flight entity gfx (spot animation riding an entity). Many gfx
+ *  models are nothing but attachment carriers (1-5 faces hosting billboards
+ *  and particle emitters — the burst around Saradomin's heal is billboards),
+ *  so the mesh may be absent while `poseModel` still drives the pose. */
+type GfxRt = AnimHolder & {
+  holder: THREE.Group
+  parent: THREE.Group
+  /** the composite the sequence poses, whether or not a mesh was built */
+  poseModel: ModelData
+  /** billboard/particle attachments riding this gfx, removed with it */
+  attachments: { pose: (posed: PosedVertices | null) => void; remove: () => void }[]
+  /** false while the sequence is still loading — anim null + settled is "done" */
+  settled: boolean
+}
+
 // ---------------------------------------------------------------------------
 // Runtime state (all in refs — the sim runs on the rAF loop, not React).
 
-type EntityRt = {
-  em: EntityMesh | null
+type EntityRt = AnimHolder & {
   group: THREE.Group
   placed: boolean
   fineX: number
@@ -94,9 +148,20 @@ type EntityRt = {
   plane: number
   yaw: number // three.js rotation.y
   route: { tiles: [number, number][]; paces: number[]; next: number } | null
-  anim: { def: AnimationDef; frame: number; acc: number; oneShot: boolean } | null
   standAnimId: number
   walkAnimId: number
+  /** NPC-model billboards (Saradomin's glowing eyes, model 58935 type 115):
+   *  separate scene meshes that must FOLLOW the entity — bbMatrix is the
+   *  placement the billboard runtime reads, resynced on every move/pose. */
+  bb: import('./sceneBillboards').AnimatedBillboards | null
+  bbMatrix: THREE.Matrix4 | null
+  lastPosed: PosedVertices | null
+  /** whether walking re-faces the entity along its travel direction — the
+   *  client's PathingEntity.method15863 gate: BAS yawAcceleration != 0 or the
+   *  NPC def's contrast != 0. Saradomin in cutscene 0 has BOTH zero, so his
+   *  eastward glide keeps the scripted westward facing (walking backwards
+   *  toward the camera is intentional). */
+  turnsWhileWalking: boolean
 }
 
 type CameraRt = {
@@ -168,13 +233,28 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
     sky: THREE.Mesh | null
     particles: SceneParticles | null
     billboards: SceneBillboards | null
+    /** idle-animated locs (torch flames, flags): posed every frame like the
+     *  map scene — rendered at rest pose, a torch's flame model is a tall
+     *  authored stack of licks the animation is what collapses */
+    animLocs: {
+      update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void
+      model: ModelData
+      animationId: number
+      animator?: LocAnimator
+      billboards?: import('./sceneBillboards').AnimatedBillboards
+    }[]
     scene: THREE.Scene
     camera: THREE.PerspectiveCamera
     heightsByCell: Map<string, Int32Array[]>
     entities: EntityRt[]
-    objects: (THREE.Group | null)[]
+    objects: (ObjectRt | null)[]
+    gfx: GfxRt[]
     camRt: CameraRt
     fade: FadeRt
+    /** height of the camera's current focus point — drives which planes'
+     *  particle/billboard groups draw (the client's plane visibility follows
+     *  the viewpoint; see Particle.java's per-plane bucketing) */
+    focusY: number
     cursor: number
     cycle: number
     msAcc: number
@@ -194,8 +274,10 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       heightsByCell: new Map(),
       entities: [],
       objects: [],
+      gfx: [],
       camRt: null,
       fade: null,
+      focusY: 0,
       cursor: 0,
       cycle: 0,
       msAcc: 0,
@@ -205,6 +287,7 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       sky: null,
       particles: null,
       billboards: null,
+      animLocs: [],
     }
   }
 
@@ -271,12 +354,28 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
     e.group.position.set(e.fineX, groundY(e.fineX, e.fineY, e.plane), -e.fineY)
     e.group.rotation.y = e.yaw
     e.group.visible = e.placed
+    // model billboards (Saradomin's eyes) live outside the group — move and
+    // show/hide them with it, re-anchoring at the held pose if any
+    if (e.bb && e.bbMatrix) {
+      e.bbMatrix.compose(e.group.position, new THREE.Quaternion().setFromEuler(new THREE.Euler(0, e.yaw, 0)), ONE_V3)
+      e.bb.setVisible(e.placed)
+      if (e.placed) e.bb.pose(e.lastPosed)
+    }
   }
 
-  // Animation caches shared by all entities.
+  // Animation caches shared by all entities. Each promise cache has a RESOLVED
+  // mirror, because posing must be able to run SYNCHRONOUSLY: a MOVEMENT and
+  // an ANIMATE_MOVEMENT in the same tick must land in the same stepCycle, and
+  // even a cached promise commits in a microtask AFTER the frame renders —
+  // Zilyana appeared standing for a beat before lying down. The mirrors fill
+  // at resolution (attached first, so they beat any awaiting consumer) and
+  // via the build-time prewarm below.
   const animDefCache = useRef(new Map<number, Promise<AnimationDef | null>>())
   const frameSetCache = useRef(new Map<number, Promise<AnimationFrameSetData | null>>())
   const frameBaseCache = useRef(new Map<number, Promise<AnimationFrameBaseDef | null>>())
+  const animDefSync = useRef(new Map<number, AnimationDef | null>())
+  const frameSetSync = useRef(new Map<number, AnimationFrameSetData | null>())
+  const frameBaseSync = useRef(new Map<number, AnimationFrameBaseDef | null>())
 
   const loadAnimDef = (id: number) => {
     let p = animDefCache.current.get(id)
@@ -289,53 +388,237 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         } catch { return null }
       })()
       animDefCache.current.set(id, p)
+      void p.then((v) => animDefSync.current.set(id, v))
     }
     return p
   }
 
-  const poseEntityFrame = async (e: EntityRt) => {
-    if (!e.anim || !e.em) return
-    const index = e.anim.frame
-    const setId = e.anim.def.frameSetIds?.[index]
-    if (setId == null) return
-    try {
-      let setP = frameSetCache.current.get(setId)
-      if (!setP) {
-        setP = (async () => {
+  const loadFrameSet = (setId: number): Promise<AnimationFrameSetData | null> => {
+    if (setId < 0) return Promise.resolve(null)
+    let p = frameSetCache.current.get(setId)
+    if (!p) {
+      p = (async () => {
+        try {
           const dir = await resolveEntryHandle(rootHandle, getEntryPath('animation_frame_sets'))
           const loader = getLoader('animation_frame_sets')
           if (!dir || !loader) return null
           return await loader.loadItem(dir, { id: setId, name: `${setId}` }, rootHandle) as AnimationFrameSetData
-        })()
-        frameSetCache.current.set(setId, setP)
-      }
-      const frameSet = await setP
-      const frame = frameSet?.frames.get(frameFileId(e.anim.def, index))
-      if (!frame || frame.rawFallbackBytes) return
-      let baseP = frameBaseCache.current.get(frame.frameBaseId)
-      if (!baseP) {
-        baseP = (async () => {
+        } catch { return null }
+      })()
+      frameSetCache.current.set(setId, p)
+      void p.then((v) => frameSetSync.current.set(setId, v))
+    }
+    return p
+  }
+
+  const loadFrameBase = (baseId: number) => {
+    let p = frameBaseCache.current.get(baseId)
+    if (!p) {
+      p = (async () => {
+        try {
           const dir = await resolveEntryHandle(rootHandle, getEntryPath('animation_frame_bases'))
           const loader = getLoader('animation_frame_bases')
           if (!dir || !loader) return null
-          const data = await loader.loadItem(dir, { id: frame.frameBaseId, name: `${frame.frameBaseId}` }, rootHandle) as { def: AnimationFrameBaseDef }
+          const data = await loader.loadItem(dir, { id: baseId, name: `${baseId}` }, rootHandle) as { def: AnimationFrameBaseDef }
           return data.def
-        })()
-        frameBaseCache.current.set(frame.frameBaseId, baseP)
-      }
-      const frameBase = await baseP
-      if (!frameBase || rt.current.disposed) return
-      const posed = applyAnimationFrame(e.em.model, frameBase, frame)
-      if (posed) applyPose(e.em, posed)
-    } catch { /* frame unavailable — hold the last pose */ }
+        } catch { return null }
+      })()
+      frameBaseCache.current.set(baseId, p)
+      void p.then((v) => frameBaseSync.current.set(baseId, v))
+    }
+    return p
   }
 
-  const startAnim = async (e: EntityRt, animId: number, oneShot: boolean) => {
-    if (animId < 0) { e.anim = null; if (e.em) applyPose(e.em, null); return }
-    const animDef = await loadAnimDef(animId)
+  /** No newer startAnim in flight — safe for a fallback (stand/idle) to run. */
+  const animSettled = (h: AnimHolder) => h.animPending === h.animCommitted
+
+  const frameSync = (def: AnimationDef, index: number) => {
+    const setId = def.frameSetIds?.[index]
+    if (setId == null) return null
+    return frameSetSync.current.get(setId)?.frames.get(frameFileId(def, index)) ?? null
+  }
+
+  /** the tween target's index, or -1 when the frame holds (one-shot end) */
+  const nextFrameIndex = (anim: AnimState) => {
+    const count = anim.def.frameDurations?.length ?? 0
+    if (!anim.def.tweened || count <= 1) return -1
+    return anim.frame + 1 >= count ? (anim.oneShot ? -1 : 0) : anim.frame + 1
+  }
+
+  type PoseTarget = {
+    anim: AnimState | null
+    em: EntityMesh | null
+    /** poses even without a mesh (attachment-only gfx) */
+    poseModel?: ModelData
+    /** attachment driver (billboards riding the pose) */
+    onPosed?: (posed: PosedVertices) => void
+  }
+
+  /** Pose from the resolved mirrors. False = something still loading. */
+  const tryPoseSync = (e: PoseTarget): boolean => {
+    const poseModel = e.em?.model ?? e.poseModel
+    if (!e.anim || !poseModel) return true
+    const anim = e.anim
+    const setId = anim.def.frameSetIds?.[anim.frame]
+    if (setId == null) return true
+    if (!frameSetSync.current.has(setId)) return false
+    const frame = frameSync(anim.def, anim.frame)
+    if (!frame || frame.rawFallbackBytes) return true
+    const ni = nextFrameIndex(anim)
+    let next: typeof frame | null = null
+    if (ni >= 0) {
+      const nextSetId = anim.def.frameSetIds?.[ni]
+      if (nextSetId != null && !frameSetSync.current.has(nextSetId)) return false
+      next = frameSync(anim.def, ni)
+    }
+    if (!frameBaseSync.current.has(frame.frameBaseId)) return false
+    const frameBase = frameBaseSync.current.get(frame.frameBaseId)
+    if (!frameBase) return true
+    // ticks elapsed in this frame, plus the sub-cycle fraction of the sim
+    // clock, so a 60fps render tweens smoothly through 20ms sim ticks
+    const elapsed = anim.acc + Math.min(rt.current.msAcc / CYCLE_MS, 0.999)
+    const duration = Math.max(1, anim.def.frameDurations?.[anim.frame] ?? 1)
+    const posed = applyAnimationFrame(poseModel, frameBase, frame, next, elapsed, duration)
+    if (posed) {
+      if (e.em) applyPose(e.em, posed)
+      e.onPosed?.(posed)
+    }
+    return true
+  }
+
+  /** Sync when everything's resolved (the prewarmed common case), else loads
+   *  and applies when the data lands. */
+  const poseEntityFrame = (e: PoseTarget) => {
+    if (tryPoseSync(e)) return
+    const anim = e.anim
+    if (!anim) return
+    void (async () => {
+      try {
+        await loadFrameSet(anim.def.frameSetIds?.[anim.frame] ?? -1)
+        const frame = frameSync(anim.def, anim.frame)
+        const ni = nextFrameIndex(anim)
+        if (ni >= 0) await loadFrameSet(anim.def.frameSetIds?.[ni] ?? -1)
+        if (frame && !frame.rawFallbackBytes) await loadFrameBase(frame.frameBaseId)
+        if (rt.current.disposed || e.anim !== anim) return
+        tryPoseSync(e)
+      } catch { /* frame unavailable — hold the last pose */ }
+    })()
+  }
+
+  const startAnim = async (e: AnimHolder, animId: number, oneShot: boolean) => {
+    // ticket the request: an older load resolving late may not overwrite a
+    // newer animation (fresh-load I/O and cached-microtask order both raced)
+    const seq = ++e.animPending
+    if (animId < 0) { e.animCommitted = seq; e.anim = null; if (e.em) applyPose(e.em, null); return }
+    // synchronous when prewarmed — the anim commits AND poses inside the
+    // calling stepCycle, simultaneous with a same-tick placement
+    let animDef = animDefSync.current.get(animId)
+    if (animDef === undefined) {
+      animDef = await loadAnimDef(animId)
+      if (e.animPending !== seq) return // superseded while loading
+    }
+    e.animCommitted = seq
     if (!animDef || !animDef.frameDurations?.length) return
     e.anim = { def: animDef, frame: 0, acc: 0, oneShot }
-    void poseEntityFrame(e)
+    poseEntityFrame(e)
+  }
+
+  /** The client refuses to start a cutscene until every action's assets are
+   *  `ready()` (CutsceneAction.method1599) — mirror it by prewarming every
+   *  referenced sequence (defs, frame sets, frame bases) at build, which is
+   *  also what makes the same-tick place+animate path fully synchronous. */
+  const prewarmAnims = async (ids: Iterable<number>) => {
+    await Promise.all([...new Set(ids)].filter((id) => id != null && id >= 0).map(async (id) => {
+      const def = await loadAnimDef(id)
+      if (!def?.frameDurations?.length) return
+      const setIds = new Set((def.frameSetIds ?? []).filter((s) => s != null && s >= 0))
+      await Promise.all([...setIds].map(loadFrameSet))
+      const baseIds = new Set<number>()
+      for (let i = 0; i < def.frameDurations.length; i++) {
+        const frame = frameSync(def, i)
+        if (frame && !frame.rawFallbackBytes) baseIds.add(frame.frameBaseId)
+      }
+      await Promise.all([...baseIds].map(loadFrameBase))
+    }))
+  }
+
+  /** Spawns a spot animation (gfx) on an entity — ENTITY_GFX, and the gfx an
+   *  ANIMATE_MOVEMENT can carry in its third field (the client plays them via
+   *  the same spot-anim slots). Plays its sequence once, then removes itself. */
+  const startEntityGfx = async (e: EntityRt, gfxId: number, displayHeight: number, rotation: number) => {
+    try {
+      const dir = await resolveEntryHandle(rootHandle, getEntryPath('spot_animations'))
+      if (!dir) return
+      const gfxDef = JSON.parse(await (await dir.getFileHandle(`${gfxId}.json`)).getFile().then((f) => f.text())) as Record<string, unknown>
+      const modelId = Number(gfxDef.modelId ?? -1)
+      if (modelId < 0) return
+      const composite = await loadModelComposite(rootHandle, {
+        hideMarkerFaces: true,
+        modelIds: [modelId],
+        recolor: {
+          from: gfxDef.originalColors as number[] | undefined,
+          to: gfxDef.modifiedColors as number[] | undefined,
+          textureFrom: gfxDef.originalTextures as number[] | undefined,
+          textureTo: gfxDef.modifiedTextures as number[] | undefined,
+        },
+        scale: {
+          x: Number(gfxDef.scaleXZ ?? 128) || 128,
+          y: Number(gfxDef.scaleY ?? 128) || 128,
+          z: Number(gfxDef.scaleXZ ?? 128) || 128,
+        },
+      })
+      const tm = await buildTexturedModelMesh(composite, {
+        ambient: 64 + Number(gfxDef.ambient ?? 0),
+        contrast: 850 + Number(gfxDef.contrast ?? 0) * 5,
+      })
+      if (rt.current.disposed) { tm?.dispose(); return }
+      // Most cutscene 1 gfx models are pure attachment carriers (1-5 faces,
+      // all billboard hosts / emitter spawn surfaces) — tm comes back null
+      // for those and the billboards/particles below ARE the effect. Only
+      // bail when there is neither a mesh nor any attachment.
+      if (!tm && !composite.billboards?.length && !composite.emitters?.length) return
+      const gfxYaw = -(rotation / 16384) * Math.PI * 2
+      const holder = new THREE.Group()
+      if (tm) holder.add(tm.mesh)
+      holder.position.y = displayHeight
+      holder.rotation.y = gfxYaw
+      e.group.add(holder)
+      const gfx: GfxRt = {
+        em: tm ? { tm, model: composite } : null,
+        poseModel: composite,
+        anim: null, animPending: 0, animCommitted: 0,
+        holder, parent: e.group, attachments: [], settled: false,
+      }
+      // Billboards/particles ride the entity's CURRENT placement (a cutscene
+      // entity rarely moves during its own gfx). Billboards follow the posed
+      // frames through onPosed; particles spawn from the rest-pose faces like
+      // every loc emitter does.
+      const placement = new THREE.Matrix4().compose(
+        new THREE.Vector3(e.group.position.x, e.group.position.y + displayHeight, e.group.position.z),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, e.group.rotation.y + gfxYaw, 0)),
+        new THREE.Vector3(1, 1, 1),
+      )
+      const placed = { model: composite, matrix: placement, upscale: modelUpscale(composite), plane: 0 }
+      const bb = rt.current.billboards?.addAnimated(placed)
+      if (bb) gfx.attachments.push(bb)
+      if (composite.emitters?.length && rt.current.particles) {
+        const pt = await rt.current.particles.add(placed)
+        if (pt) gfx.attachments.push({ pose: () => {}, remove: pt.remove })
+      }
+      gfx.onPosed = (posed) => { for (const a of gfx.attachments) a.pose(posed) }
+      rt.current.gfx.push(gfx)
+      await startAnim(gfx, Number(gfxDef.sequenceId ?? -1), true)
+      gfx.settled = true
+      // a gfx whose sequence failed to load still shows its model one cycle,
+      // then the stepper removes it (anim stays null with settled set)
+    } catch { /* gfx unavailable */ }
+  }
+
+  const removeGfx = (g: GfxRt) => {
+    g.parent.remove(g.holder)
+    g.em?.tm.dispose()
+    for (const a of g.attachments) a.remove()
+    g.attachments = []
   }
 
   // ---------------------------------------------------------------- actions
@@ -375,8 +658,15 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         e.fineY = f.y * 512 + 256
         e.plane = f.plane
         e.route = null
-        e.yaw = Math.PI + (f.direction / 16384) * Math.PI * 2
-        if (!e.anim && e.standAnimId >= 0) void startAnim(e, e.standAnimId, false)
+        // Client entity angles run CLOCKWISE FROM NORTH (PathingEntity.turn's
+        // 0x3fff units; the walk table in SystemInfo.java:312 pins the compass:
+        // +y tiles=0, east=4096, south=8192, west=12288). Our scene has north
+        // at -z, so the three.js yaw is the NEGATED angle. The old `π + angle`
+        // guess happened to match at east/west and was 180° off at north/south.
+        e.yaw = -(f.direction / 16384) * Math.PI * 2
+        // stand only when nothing is playing AND nothing newer is loading — a
+        // same-cycle ANIMATE_MOVEMENT's pose must not lose to this fallback
+        if (!e.anim && animSettled(e) && e.standAnimId >= 0) void startAnim(e, e.standAnimId, false)
         placeEntity(e)
         break
       }
@@ -396,12 +686,19 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       }
       case 'ANIMATE_MOVEMENT': {
         const e = r.entities[f.entityIndex]
-        if (e) void startAnim(e, f.movementAnimationId, true)
+        if (e) {
+          void startAnim(e, f.movementAnimationId, true)
+          // the third field is a gfx id, not a flag: the client plays the
+          // animation with that spot anim when non-zero (CutsceneAction_Sub18
+          // routes through the entity's spot-anim slots)
+          if (f.seqFlag) void startEntityGfx(e, f.seqFlag, 0, 0)
+        }
         break
       }
       case 'ROTATE_CUTSCENE_ENTITY': {
         const e = r.entities[f.cutsceneEntityPtr]
-        if (e) { e.yaw = Math.PI + (f.rotation / 16384) * Math.PI * 2; placeEntity(e) }
+        // same clockwise-from-north units as MOVEMENT's direction field
+        if (e) { e.yaw = -(f.rotation / 16384) * Math.PI * 2; placeEntity(e) }
         break
       }
       case 'RESET_CUTSCENE_ENTITY': {
@@ -410,19 +707,35 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         break
       }
       case 'REPLACE_OBJECT': {
-        const g = r.objects[f.locIndex]
-        if (g) {
-          g.visible = true
+        const o = r.objects[f.locIndex]
+        if (o) {
+          o.group.visible = true
           const fineX = f.x * 512 + 256
           const fineY = f.y * 512 + 256
-          g.position.set(fineX, groundY(fineX, fineY, f.plane), -fineY)
-          g.rotation.y = -(f.rotation * Math.PI) / 2
+          o.group.position.set(fineX, groundY(fineX, fineY, f.plane), -fineY)
+          o.group.rotation.y = -(f.rotation * Math.PI) / 2
+          // spawned objects play their def's idle sequence — cutscene 0's
+          // battle crowd is loc-spawned fighters whose combat loops ARE their
+          // idle animations; without this they stand frozen
+          if (!o.anim && o.idleAnimId >= 0) void startAnim(o, o.idleAnimId, false)
         }
         break
       }
       case 'DESTROY_OBJECT': {
-        const g = r.objects[f.cutsceneObjectPtr]
-        if (g) g.visible = false
+        const o = r.objects[f.cutsceneObjectPtr]
+        if (o) { o.group.visible = false; o.anim = null }
+        break
+      }
+      case 'ANIMATE_OBJECT': {
+        // client: Class9.animateObject(...) — play the sequence on the spawned
+        // loc, then fall back to its idle (the one-shot handling below)
+        const o = r.objects[f.objectIndex]
+        if (o) void startAnim(o, f.sequenceId, true)
+        break
+      }
+      case 'ENTITY_GFX': {
+        const e = r.entities[f.targetIndex]
+        if (e) void startEntityGfx(e, f.gfxId, f.displayHeight ?? 0, f.rotation ?? 0)
         break
       }
       case 'FADE_SCREEN': {
@@ -475,7 +788,9 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         const dx = gx - e.fineX
         const dy = gy - e.fineY
         const dist = Math.hypot(dx, dy)
-        if (dist > 1) e.yaw = Math.atan2(dx, -dy) + Math.PI
+        // gated exactly like the client (see turnsWhileWalking): an entity
+        // whose BAS can't turn keeps its scripted facing while it moves
+        if (dist > 1 && e.turnsWhileWalking) e.yaw = Math.atan2(dx, -dy) + Math.PI
         if (dist <= budget) {
           e.fineX = gx; e.fineY = gy
           budget -= dist
@@ -488,29 +803,48 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       }
       if (e.route.next >= e.route.tiles.length) {
         e.route = null
-        if (e.standAnimId >= 0) void startAnim(e, e.standAnimId, false)
+        if (animSettled(e) && e.standAnimId >= 0) void startAnim(e, e.standAnimId, false)
       }
       placeEntity(e)
     }
-    // entity animation frames (durations are client cycles)
-    for (const e of r.entities) {
-      if (!e.anim) continue
-      const durations = e.anim.def.frameDurations ?? []
-      if (durations.length === 0) continue
-      e.anim.acc++
-      if (e.anim.acc >= (durations[e.anim.frame] || 1)) {
-        e.anim.acc = 0
-        if (e.anim.frame + 1 >= durations.length) {
-          if (e.anim.oneShot) {
-            e.anim = null
-            if (e.standAnimId >= 0) void startAnim(e, e.standAnimId, false)
-            continue
+    // animation frames for entities, spawned objects and in-flight gfx
+    // (durations are client cycles). Returns true when a one-shot finished.
+    const stepAnim = (holder: { anim: AnimState | null; em: EntityMesh | null }): boolean => {
+      if (!holder.anim) return false
+      const durations = holder.anim.def.frameDurations ?? []
+      if (durations.length === 0) return false
+      holder.anim.acc++
+      if (holder.anim.acc >= (durations[holder.anim.frame] || 1)) {
+        holder.anim.acc = 0
+        if (holder.anim.frame + 1 >= durations.length) {
+          if (holder.anim.oneShot) {
+            holder.anim = null
+            return true
           }
-          e.anim.frame = 0
+          holder.anim.frame = 0
         } else {
-          e.anim.frame++
+          holder.anim.frame++
         }
-        void poseEntityFrame(e)
+        void poseEntityFrame(holder)
+      }
+      return false
+    }
+    // A finished one-shot HOLDS its last frame — the client's Animation sets
+    // its finished flag and keeps rendering the final keyframe until the next
+    // action replaces it (no server clears a cutscene sequence). Reverting to
+    // the BAS stand here was our invention, and it flashed Saradomin upright
+    // for one tick: his kneel-down (10395, 104 ticks from cycle 73) completes
+    // at 176, one tick before the kneel-loop action at 177. Same for spawned
+    // objects — a death one-shot stays down rather than popping back to its
+    // combat idle.
+    for (const e of r.entities) stepAnim(e)
+    for (const o of r.objects) if (o) stepAnim(o)
+    // gfx play once and vanish; one whose sequence failed lives a single cycle
+    for (let i = r.gfx.length - 1; i >= 0; i--) {
+      const g = r.gfx[i]
+      if (stepAnim(g) || (g.settled && !g.anim)) {
+        removeGfx(g)
+        r.gfx.splice(i, 1)
       }
     }
     r.cycle++
@@ -524,6 +858,7 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       const to = splinePoint(r.camRt.lookRows, r.camRt.lookKf, t)
       r.camera.position.set(from[0], from[1], -from[2])
       r.camera.lookAt(to[0], to[1], -to[2])
+      r.focusY = to[1]
     }
     if (fadeRef.current) {
       const c = r.fade ? fadeColorAt(r.fade, r.cycle) : [0, 0, 0, 0]
@@ -540,8 +875,21 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       r.camRt = null
       r.fade = null
       r.finished = false
-      for (const e of r.entities) { e.placed = false; e.route = null; e.anim = null; placeEntity(e) }
-      for (const g of r.objects) { if (g) g.visible = false }
+      // rest poses too — a replayed entity otherwise shows its end-of-scene
+      // pose (Zilyana standing) until its first animation lands
+      for (const e of r.entities) {
+        e.placed = false; e.route = null; e.anim = null; e.lastPosed = null
+        if (e.em) applyPose(e.em, null)
+        placeEntity(e)
+      }
+      for (const o of r.objects) {
+        if (o) {
+          o.group.visible = false; o.anim = null
+          if (o.em) applyPose(o.em, null)
+        }
+      }
+      for (const g of r.gfx) removeGfx(g)
+      r.gfx = []
     }
     while (r.cycle < target) stepCycle()
     applyCameraAndFade()
@@ -586,6 +934,12 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         // always runs with bloom on, so its `stationary` stand-ins stay hidden
         const billboards = new SceneBillboards()
         billboards.setBloomEnabled(true)
+        // HDR comes off the sprite's material — Saradomin's eye sprites
+        // (material 744, hdr ≈×2.45) glow through the bloom pass
+        billboards.setMaterialLookup(async (id) => {
+          const meta = await assets.getMaterialMeta(id)
+          return meta ? { hdrMultiplier: meta.hdrMultiplier, effectCombiner: meta.effectCombiner } : null
+        })
         r.billboards = billboards
         for (const group of billboards.groups) r.scene.add(group)
 
@@ -640,10 +994,22 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
               if (!anim) continue
               // placement is baked into the mesh transform, so the region offset
               // has to multiply in rather than sit on .position
+              const placedMatrix = new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(al.matrix)
               anim.mesh.matrixAutoUpdate = false
-              anim.mesh.matrix.copy(new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(al.matrix))
+              anim.mesh.matrix.copy(placedMatrix)
               anim.mesh.renderOrder = ORDER_OPAQUE_LOC
               r.scene.add(anim.mesh)
+              // keep the pose hook — rendered at rest, a torch's flame model is
+              // a tall authored stack of licks; the idle animation is what
+              // collapses it into a flame. Billboards ride the same pose.
+              r.animLocs.push({
+                update: anim.update,
+                model: al.model,
+                animationId: al.animationId,
+                billboards: billboards.addAnimated({
+                  model: al.model, matrix: placedMatrix, upscale: modelUpscale(al.model), plane,
+                }) ?? undefined,
+              })
             }
           }
 
@@ -677,6 +1043,28 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
           }
         }
 
+        // Resolve each distinct loc idle sequence once, preload its frames,
+        // and hand the animator to every placement that uses it (the render
+        // loop poses) — same pattern as the map scene.
+        if (r.animLocs.length > 0) {
+          setStatus('Loading loc animations…')
+          const animsDir = await resolveEntryHandle(rootHandle, getEntryPath('animations'))
+          if (animsDir) {
+            const ids = [...new Set(r.animLocs.map((a) => a.animationId))]
+            const animators = new Map<number, LocAnimator>()
+            await Promise.all(ids.map(async (id) => {
+              try {
+                const adef = JSON.parse(await (await (await animsDir.getFileHandle(`${id}.json`)).getFile()).text()) as AnimationDef
+                const animator = new LocAnimator(adef)
+                await animator.preload(rootHandle)
+                animators.set(id, animator)
+              } catch { /* animation not dumped — that loc stays at rest */ }
+            }))
+            if (cancelled) return
+            for (const rec of r.animLocs) rec.animator = animators.get(rec.animationId)
+          }
+        }
+
         // The sun's COLOUR is a tint on the built materials rather than
         // something baked into vertex colours (its direction and ambient are),
         // and HDR materials carry an overbright factor that only counts once
@@ -706,25 +1094,56 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
           const ert: EntityRt = {
             em: null, group: new THREE.Group(), placed: false,
             fineX: 0, fineY: 0, plane: 0, yaw: 0, route: null, anim: null,
-            standAnimId: -1, walkAnimId: -1,
+            animPending: 0, animCommitted: 0,
+            standAnimId: -1, walkAnimId: -1, turnsWhileWalking: true,
+            bb: null, bbMatrix: null, lastPosed: null,
           }
           try {
             if (entity.id >= 0 && npcsDir) {
               const file = await (await npcsDir.getFileHandle(`${entity.id}.json`)).getFile()
               const npcDef = JSON.parse(await file.text()) as Record<string, unknown>
               const composite = await loadModelComposite(rootHandle, npcCompositeSpec(npcDef))
-              const tm = await buildTexturedModelMesh(composite)
+              // baked with the client's model sun + the def's ambient/contrast,
+              // like every loc — unlit NPCs read flat and over-bright
+              const tm = await buildTexturedModelMesh(composite, {
+                ambient: 64 + Number(npcDef.ambient ?? 0),
+                contrast: 850 + Number(npcDef.contrast ?? 0) * 5,
+              })
               if (tm) {
                 ert.em = { tm, model: composite }
                 ert.group.add(tm.mesh)
               }
+              // NPC-model billboards (Saradomin's glowing eyes, model 58935
+              // type 115 on faces 31/1376). Their placement matrix is read by
+              // reference on every pose, so re-composing it as the entity
+              // moves keeps the eyes in the head; each posed frame re-anchors
+              // to the animated face centroids through onPosed.
+              if (composite.billboards?.length) {
+                ert.bbMatrix = new THREE.Matrix4()
+                ert.bb = billboards.addAnimated({
+                  model: composite, matrix: ert.bbMatrix, upscale: modelUpscale(composite), plane: 0,
+                }) ?? null
+                if (ert.bb) {
+                  const bb = ert.bb
+                  ert.onPosed = (posed) => {
+                    ert.lastPosed = posed
+                    bb.pose(posed)
+                  }
+                  bb.setVisible(false)
+                }
+              }
               const basId = Number(npcDef.basId ?? -1)
+              // the client only re-faces a walking entity when its BAS has a
+              // yaw acceleration or the def a non-zero contrast
+              // (PathingEntity.method15863's gate) — assume no BAS = no turning
+              ert.turnsWhileWalking = Number(npcDef.contrast ?? 0) !== 0
               if (basId >= 0 && basDir) {
                 try {
                   const basFile = await (await basDir.getFileHandle(`${basId}.json`)).getFile()
                   const bas = JSON.parse(await basFile.text()) as Record<string, unknown>
                   ert.standAnimId = Number(bas.standAnimation ?? -1)
                   ert.walkAnimId = Number(bas.walkAnimation ?? -1)
+                  ert.turnsWhileWalking ||= Number(bas.yawAcceleration ?? 0) !== 0
                 } catch { /* BAS unavailable */ }
               }
             } else {
@@ -745,22 +1164,72 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
         setStatus('Loading objects…')
         const objectsDir = await resolveEntryHandle(rootHandle, getEntryPath('objects'))
         for (const obj of def.objects) {
-          let group: THREE.Group | null = null
+          let record: ObjectRt | null = null
           try {
             if (objectsDir) {
               const file = await (await objectsDir.getFileHandle(`${obj.locId}.json`)).getFile()
               const objDef = JSON.parse(await file.text()) as Record<string, unknown>
               const composite = await loadModelComposite(rootHandle, objectCompositeSpec(objDef))
-              const tm = await buildTexturedModelMesh(composite)
+              const tm = await buildTexturedModelMesh(composite, {
+                ambient: 64 + Number(objDef.ambient ?? 0),
+                contrast: 850 + Number(objDef.contrast ?? 0) * 5,
+              })
               if (tm) {
-                group = new THREE.Group()
+                const group = new THREE.Group()
                 group.add(tm.mesh)
+                record = {
+                  group,
+                  em: { tm, model: composite },
+                  anim: null,
+                  animPending: 0,
+                  animCommitted: 0,
+                  idleAnimId: Number((objDef.animations as number[] | undefined)?.[0] ?? -1),
+                }
                 group.visible = false
                 r.scene.add(group)
               }
             }
           } catch { /* object unloadable */ }
-          r.objects.push(group)
+          r.objects.push(record)
+        }
+
+        // Prewarm every sequence the cutscene can reach — the client refuses
+        // to start until all of them are ready(), and the synchronous pose
+        // path needs them resolved for a same-tick place+animate to land
+        // together (Zilyana flashed standing before her lie-down otherwise).
+        setStatus('Loading animations…')
+        {
+          const animIds: number[] = []
+          for (const e of r.entities) animIds.push(e.standAnimId, e.walkAnimId)
+          for (const o of r.objects) if (o) animIds.push(o.idleAnimId)
+          const gfxIds: number[] = []
+          for (const a of def.actions) {
+            const f = (a.fields ?? {}) as Record<string, number>
+            if (a.type === 'ANIMATE_MOVEMENT') {
+              animIds.push(f.movementAnimationId)
+              if (f.seqFlag) gfxIds.push(f.seqFlag)
+            } else if (a.type === 'ANIMATE_OBJECT') {
+              animIds.push(f.sequenceId)
+            } else if (a.type === 'ENTITY_GFX') {
+              gfxIds.push(f.gfxId)
+            }
+          }
+          // gfx defs carry their own sequence ids — resolve those too
+          if (gfxIds.length > 0) {
+            try {
+              const gfxDir = await resolveEntryHandle(rootHandle, getEntryPath('spot_animations'))
+              if (gfxDir) {
+                await Promise.all([...new Set(gfxIds)].filter((id) => id > 0).map(async (id) => {
+                  try {
+                    const gfxDef = JSON.parse(await (await gfxDir.getFileHandle(`${id}.json`)).getFile().then((fl) => fl.text())) as Record<string, unknown>
+                    animIds.push(Number(gfxDef.sequenceId ?? -1))
+                  } catch { /* missing gfx def */ }
+                }))
+              }
+            } catch { /* no spot_animations entry */ }
+          }
+          await prewarmAnims(animIds)
+          if (cancelled) return
         }
 
         if (cancelled) return
@@ -859,6 +1328,44 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
             if (r.finished || r.cycle >= durationCycles) setPlaying(false)
           }
           applyCameraAndFade()
+          // Plane visibility for loc attachments follows the camera's FOCUS:
+          // the client buckets particles per plane band and draws them under
+          // the viewpoint's plane visibility. Without this, upper-plane
+          // emitter anchors rain their flames down the whole scene — the
+          // chapel's torch anchors are ONE plane-3 loc whose 8 carrier faces
+          // stack a spawn point per storey, and drawing all of them put a
+          // column of flames over each door torch (map viewer avoids it the
+          // same way: upper planes default hidden).
+          {
+            const band = Math.max(0, Math.min(3, Math.floor(r.focusY / 960)))
+            for (let p = 0; p < 4; p++) {
+              const vis = p <= band
+              if (r.particles) r.particles.groups[p].visible = vis
+              if (r.billboards) r.billboards.groups[p].visible = vis
+            }
+          }
+          // Loc idle animations (torch flames, flags): pose every frame, on
+          // the client's free-running 20ms tick clock like the map scene,
+          // with keyframe interpolation for tweened sequences.
+          if (r.animLocs.length > 0) {
+            const seconds = (performance.now() % 3600000) / 1000
+            for (const rec of r.animLocs) {
+              if (!rec.animator) continue
+              const posed = rec.animator.poseAt(rec.model, seconds)
+              if (posed) {
+                rec.update(posed)
+                rec.billboards?.pose(posed)
+              }
+            }
+          }
+          // Tweened entity/object/gfx sequences re-pose every render frame so
+          // the sub-tick interpolation actually shows (frame-change posing
+          // alone would step at the keyframe rate).
+          if (playingRef.current) {
+            for (const e of r.entities) if (e.anim?.def.tweened && e.placed) void poseEntityFrame(e)
+            for (const o of r.objects) if (o?.anim?.def.tweened && o.group.visible) void poseEntityFrame(o)
+            for (const g of r.gfx) if (g.anim?.def.tweened) void poseEntityFrame(g)
+          }
           r.particles?.step(dt, r.camera)
           if (r.sky) r.sky.position.copy(r.camera.position)
           if (r.composer) r.composer.render()
@@ -877,6 +1384,10 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       rr.particles?.dispose()
       rr.billboards?.dispose()
       rr.billboards = null
+      rr.animLocs = []
+      rr.gfx = []
+      rr.objects = []
+      rr.entities = []
       rr.composer?.dispose()
       rr.renderer?.dispose()
       rr.scene.traverse((o) => {

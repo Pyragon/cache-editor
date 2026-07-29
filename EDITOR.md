@@ -265,6 +265,21 @@ Emitters that fall out of range are hidden and left frozen rather than reset, so
 walking back to a fire finds it still burning. Per-plane groups hang off the
 scene's plane groups, so hiding a plane hides its fires with it.
 
+**Per-plane particle visibility (traced 2026-07-28, `Particle.java:80-130`).**
+The client re-buckets every particle to the plane band its CURRENT height
+occupies (per tile, walking the ground heightmaps) and draws it under that
+plane's visibility; `killAboveSurface` (producer opcode 34, default ON) kills a
+particle that sinks below the plane-0 surface, and anything >8 tiles above the
+top plane dies too. Why it matters: **one anchor loc can feed flames to every
+storey.** The chapel's torch anchor (obj 10397, model 8238, placed plane 3) is
+8 invisible carrier faces stacked EXACTLY one plane-step (960 units) apart —
+one spawn pair per storey — so drawing all of its systems puts a column of
+flames over each door torch. The map scene handles it by parenting systems to
+the placement plane's group (upper planes default hidden); the cutscene player
+gates the groups by the camera FOCUS height band per frame. Neither is the
+client's dynamic per-particle bucketing — a long fall through planes stays in
+its source plane's group here — but no shipped emitter seems to need that.
+
 ---
 
 ## Billboards on loc models — a fire's glow and smoke column (traced 2026-07-28, DirectX path)
@@ -324,10 +339,12 @@ Rest pose draws all 12 at full base alpha — one giant cloud burying the fire.
 `skeletalAnimation.ts` handles types 8/9/10 now (`PosedVertices.
 billboardGroups`, group id = the attachment's `depth` byte, per
 `RSMesh.method2667`); the map scene drives animated locs' sprites per posed
-frame (`SceneBillboards.addAnimated`, hidden until the first pose). Still
-open: frame tweening (100ms steps vs the client's lerp), the roll-direction
-sign (unverified against the client), and the cutscene player, which never
-animates locs, so animated-loc billboards stay hidden there.
+frame (`SceneBillboards.addAnimated`, hidden until the first pose), and the
+cutscene player runs the same LocAnimator loop (added 2026-07-28 — it used to
+render animated locs frozen at rest, which is how the chapel torches showed
+their flame models as authored stacks of licks). Still open: frame tweening
+(100ms steps vs the client's lerp) and the roll-direction sign (unverified
+against the client).
 
 **Editability.** The billboards entry has a viewer (`BillboardViewer`); the
 per-model attachments (which face carries which type, depth, distance) are mesh
