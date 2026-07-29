@@ -19,6 +19,9 @@ import TextureViewer from './components/TextureViewer'
 import ParticleViewer from './components/ParticleViewer'
 import type { TextureData } from './loaders/textures'
 import ModelPreviewModal from './components/ModelPreviewModal'
+import SettingsMenu from './components/SettingsMenu'
+import { forgetCacheRoot, getRememberedCache, rememberCacheRoot, requestCachePermission } from './loaders/cachePersist'
+import PlayerDefaultsModal from './components/PlayerDefaultsModal'
 import { resolveRetextureAssets } from './components/modelDisplay'
 import { invalidateAnimCompatIndex } from './loaders/animCompat'
 import { invalidateNpcIcon, invalidateObjectIcon } from './components/npcSnapshot'
@@ -143,7 +146,7 @@ const DONE_ENTRIES = new Set([
   'quick_chat_messages', 'quick_chat_menus', 'billboards', 'map_areas', 'config_map_areas', 'config_skybox', 'config_hitsplats', 'enums', 'font_metrics', 'sprites', 'config_map_sprites',
   'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests', 'game_tips',
-  'config_bas', 'npcs', 'cs2', 'shaders',
+  'config_bas', 'npcs', 'cs2', 'shaders', 'config_identikit',
 ])
 
 function unavailableReason(name: string): string {
@@ -289,6 +292,11 @@ function App() {
   /** Non-null while a chosen folder is being scanned, before the sidebar exists. */
   const [openingStage, setOpeningStage] = useState<string | null>(null)
   const [downloadNotice, setDownloadNotice] = useState('')
+  const [showPlayerDefaults, setShowPlayerDefaults] = useState(false)
+  // A remembered folder whose permission didn't survive the reload — Chromium
+  // needs a user gesture to re-grant, so it becomes a button rather than
+  // reopening silently.
+  const [restorable, setRestorable] = useState<FileSystemDirectoryHandle | null>(null)
   const writeCapture = useRef(new WriteCapture())
 
   const [selectedEntryId, setSelectedEntryId] = useState<number | null>(null)
@@ -999,6 +1007,80 @@ function App() {
   // Folder problems are modal rather than a line of text in the sidebar: they always
   // mean the same thing (this isn't an unpacked cache), and the explanation of what one
   // is doesn't fit on a line. Not awaited, so the loading overlay can clear behind it.
+  // Everything in the look editor except the raw numbers comes out of the
+  // cache — part previews, the colour palettes, the equipment art. Opening it
+  // without a folder just renders blank tiles, so say why up front instead.
+  function openPlayerDefaults() {
+    if (!cacheHandle) {
+      void confirmDialog(
+        'The player look is built from cache data — body-part previews, the character colour palettes and the equipment art. Open your cache folder first, then try again.',
+        { title: 'Open a cache folder first', acknowledge: true, confirmLabel: 'Got it' },
+      )
+      return
+    }
+    setShowPlayerDefaults(true)
+  }
+
+  /** Forgets the remembered folder and clears the session back to the picker.
+   *  Mirrors the state `adoptCacheRoot` sets, so nothing from the old cache
+   *  survives into the next one. */
+  async function handleCloseCache() {
+    if (!cacheHandle) return
+    if (!(await confirmLeaveItem())) return
+    const ok = await confirmDialog(
+      'This clears the current folder and forgets it, so the next load starts at the picker. Nothing on disk is touched.',
+      { title: `Close “${dirName ?? 'cache'}”?`, confirmLabel: 'Close cache' },
+    )
+    if (!ok) return
+
+    await forgetCacheRoot()
+    loadVersion.current++
+    setRestorable(null)
+    setCacheHandle(null)
+    setEntries([])
+    setDirName(null)
+    setActiveItems([])
+    setActiveContent(null)
+    setSelectedItemId(null)
+    setSelectedEntryId(null)
+    setFilter('')
+    setShowPlayerDefaults(false)
+  }
+
+  // Reopen last session's folder. Silent when the grant survived; otherwise it
+  // surfaces a button, since `requestPermission` is ignored outside a gesture.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const remembered = await getRememberedCache()
+      if (cancelled || remembered.state === 'none') return
+      if (remembered.state === 'needs-permission') {
+        setRestorable(remembered.handle)
+        return
+      }
+      try {
+        await adoptCacheRoot(remembered.handle, true)
+      } catch {
+        // Folder moved or deleted since last time — drop it and start clean.
+        void forgetCacheRoot()
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function handleRestoreCache() {
+    if (!restorable) return
+    const granted = await requestCachePermission(restorable)
+    if (!granted) return
+    try {
+      await adoptCacheRoot(restorable, true)
+    } catch {
+      void forgetCacheRoot()
+      setRestorable(null)
+    }
+  }
+
   function showFolderProblem(title: string, lead: string) {
     void confirmDialog(
       <>
@@ -1011,7 +1093,9 @@ function App() {
 
   // Everything past the picker is shared by both routes: the real handle and the
   // dropped-folder shim expose the same interface.
-  async function adoptCacheRoot(dirHandle: FileSystemDirectoryHandle) {
+  // `persist` only for real picked handles — the drag-and-drop route hands us
+  // a shim object that IndexedDB can't meaningfully store or re-permission.
+  async function adoptCacheRoot(dirHandle: FileSystemDirectoryHandle, persist = false) {
     // Resolving the ~50 entry folders takes a beat (longer over the drag-and-drop
     // shim, which reads a directory at a time), and until it finishes the sidebar is
     // still empty — so cover the whole scan rather than leaving the UI looking dead.
@@ -1048,6 +1132,10 @@ function App() {
       }
 
       const version = ++loadVersion.current
+      // Remember the folder the user actually picked, not the resolved
+      // `unpacked` child, so restoring re-runs this same resolution.
+      if (persist) void rememberCacheRoot(dirHandle)
+      setRestorable(null)
       setCacheHandle(targetHandle)
       setEntries(loaded)
       setDirName(targetHandle.name)
@@ -1175,7 +1263,7 @@ function App() {
     }
 
     try {
-      await adoptCacheRoot(await window.showDirectoryPicker!({ mode: 'readwrite' }))
+      await adoptCacheRoot(await window.showDirectoryPicker!({ mode: 'readwrite' }), true)
     } catch (e) {
       // Dismissing the picker throws AbortError — that's not a failure. Anything
       // else is, and used to be swallowed here.
@@ -1211,12 +1299,42 @@ function App() {
         </div>
       )}
 
+      {showPlayerDefaults && (
+        <PlayerDefaultsModal
+          rootHandle={cacheHandle ?? undefined}
+          onClose={() => setShowPlayerDefaults(false)}
+        />
+      )}
+
       <aside id="sidebar">
         <div className="sidebar-header">
-          <h1>Cryo Cache Editor</h1>
+          <div className="sidebar-title-row">
+            <h1>Cryo Cache Editor</h1>
+            <SettingsMenu
+              items={[
+                {
+                  label: 'Player Look…',
+                  hint: 'The look and equipment used for previews',
+                  onSelect: openPlayerDefaults,
+                },
+                {
+                  label: 'Close cache',
+                  hint: dirName ? `Forget “${dirName}” and pick another` : 'No cache open',
+                  onSelect: handleCloseCache,
+                },
+              ]}
+            />
+          </div>
           <button type="button" className="open-cache-btn" onClick={handleOpenCache}>
             {dirName ? `📁 ${dirName}` : canPickFolder ? 'Open Cache' : 'Drag your cache folder in'}
           </button>
+
+          {restorable && !dirName && (
+            <button type="button" className="restore-cache-btn" onClick={handleRestoreCache}>
+              ↻ Reopen “{restorable.name}”
+              <span className="restore-cache-hint">one click to re-grant access</span>
+            </button>
+          )}
 
           {isDownloadMode && (
             <p className="download-mode-note">

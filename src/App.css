@@ -628,3 +628,34 @@
 .rs-slider:disabled::-webkit-slider-thumb {
   background: rgba(255, 255, 255, 0.25);
 }
+
+/* Reopen last session's cache folder. Shown only when the handle was
+   remembered but its permission didn't survive the reload — Chromium needs a
+   user gesture to re-grant, so this can't happen automatically. */
+.restore-cache-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px dashed rgba(47, 143, 255, 0.45);
+  background: rgba(47, 143, 255, 0.08);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.restore-cache-btn:hover {
+  background: rgba(47, 143, 255, 0.16);
+  border-color: var(--electric-blue-bright);
+}
+
+.restore-cache-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+}

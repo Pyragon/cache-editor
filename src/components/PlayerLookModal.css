@@ -1,0 +1,142 @@
+/* Preview button — used wherever a def can be shown on the default player
+   look (identikits today, equipment later). Deliberately small: it sits in a
+   badge row next to the title, not as a full-width block. */
+.look-preview-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(47, 143, 255, 0.38);
+  background: linear-gradient(180deg, rgba(47, 143, 255, 0.18), rgba(0, 102, 255, 0.10));
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+.look-preview-btn:hover {
+  border-color: var(--electric-blue-bright);
+  background: linear-gradient(180deg, rgba(47, 143, 255, 0.30), rgba(0, 102, 255, 0.18));
+  box-shadow: 0 0 0 3px rgba(47, 143, 255, 0.12);
+}
+
+.look-preview-btn-glyph {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* Explains why an identikit preview shows colours the game never draws. */
+.tone-note {
+  border: 1px solid rgba(47, 143, 255, 0.28);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: rgba(47, 143, 255, 0.06);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tone-note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tone-note-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tone-note-swatches {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.tone-note-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* A tone that is always replaced — the loud one that causes the confusion. */
+.tone-note-swatch.is-marker {
+  outline: 2px dashed rgba(255, 255, 255, 0.55);
+  outline-offset: 1px;
+}
+
+.tone-note-body {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* The seven look parts, as chips under the modal title. */
+.look-part-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.look-part-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.look-part-chip-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.look-part-chip.is-override {
+  border-color: rgba(47, 143, 255, 0.55);
+  background: rgba(47, 143, 255, 0.14);
+  color: var(--text);
+}
+
+.look-part-chip.is-empty {
+  opacity: 0.45;
+}
+
+.look-part-chip.is-missing {
+  border-color: rgba(255, 96, 96, 0.5);
+  background: rgba(255, 96, 96, 0.10);
+  color: #ffb4b4;
+}
+
+/* Borrowed from the client rather than set by the look — visibly distinct so
+   the id doesn't read as something the stored default chose. */
+.look-part-chip.is-fallback {
+  border-style: dashed;
+}
+
+.look-part-chip-tag {
+  padding: 0 5px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.look-part-chip.is-override .look-part-chip-name::after {
+  content: ' ·';
+  color: var(--electric-blue-bright);
+}

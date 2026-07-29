@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import type { ModelData } from '../loaders/models'
 import { loadModelComposite, npcCompositeSpec, objectCompositeSpec } from '../loaders/npcComposite'
+import { applyLookPalette, buildIdentikitPart, loadRecolorPalette } from '../loaders/playerAppearance'
 import { buildTexturedModelMesh } from './modelMesh'
 
 // ---------------------------------------------------------------------------
@@ -150,6 +151,67 @@ export function getObjectIcon(
 
 export function peekModelIcon(modelId: number): string | null | undefined {
   return modelCache.get(modelId)
+}
+
+// identikit composites (body models merged + the kit's own recolours, then the
+// character colour palette), for the default-player editor's look slots.
+// Keyed by kit AND colour choices: without the palette a hairstyle previews in
+// its placeholder tones — the vivid magenta marker the game always replaces —
+// and a colour change has to invalidate the thumbnail.
+const idkCache = new Map<string, string | null>()
+const idkInFlight = new Map<string, Promise<string | null>>()
+
+const idkKey = (id: number, colour?: number[]) => `${id}:${colour?.join(',') ?? ''}`
+
+export function peekIdentikitIcon(id: number, colour?: number[]): string | null | undefined {
+  return idkCache.get(idkKey(id, colour))
+}
+
+/** Call after saving an identikit so its icon regenerates from the new def —
+ *  drops every colour variant of that kit. */
+export function invalidateIdentikitIcon(id: number): void {
+  const prefix = `${id}:`
+  for (const key of [...idkCache.keys()]) {
+    if (key.startsWith(prefix)) idkCache.delete(key)
+  }
+}
+
+/** Icon of one identikit's body composite — the same mesh the player assembler
+ *  uses for that part, so a look slot shows the actual part. Pass a look's
+ *  `colour` array to see it in the colours a player would wear it in. */
+export function getIdentikitIcon(
+  cacheRoot: FileSystemDirectoryHandle,
+  id: number,
+  colour?: number[],
+): Promise<string | null> {
+  const key = idkKey(id, colour)
+  const cached = idkCache.get(key)
+  if (cached !== undefined) return Promise.resolve(cached)
+  const pending = idkInFlight.get(key)
+  if (pending) return pending
+
+  const task = (async (): Promise<string | null> => {
+    try {
+      if (id < 0) return null
+      const model = await buildIdentikitPart(cacheRoot, id)
+      if (!model) return null
+      if (colour) {
+        // Same order as the real assembler: the part's own recolours are
+        // already baked in, the character palette goes over the top.
+        const palette = await loadRecolorPalette(cacheRoot)
+        if (palette) applyLookPalette(model, colour, palette)
+      }
+      return snapshot(model)
+    } catch {
+      return null
+    }
+  })()
+  idkInFlight.set(key, task)
+  task.then((url) => {
+    idkCache.set(key, url)
+    idkInFlight.delete(key)
+  })
+  return task
 }
 
 /** Icon of a single raw model (the NPC part-table rows) — no translations,

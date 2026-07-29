@@ -1,0 +1,738 @@
+/* Default-player editor. The panels borrow the client's own equipment-screen
+   art (sprite 170 tiles from interface 387) so both halves read as one
+   in-game-ish surface rather than a form. */
+
+.defaults-body {
+  width: min(96vw, 840px);
+}
+
+.defaults-intro {
+  margin-top: -4px;
+}
+
+/* stretch: the equipment column matches the look column's height, and its
+   panel then absorbs the slack so both sides bottom out together. */
+.defaults-columns {
+  display: flex;
+  gap: 18px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+
+.defaults-pane {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  /* Shrink to content so the two columns sit next to each other rather than
+     splitting the dialog's width between them. */
+  flex: 0 1 auto;
+}
+
+.defaults-pane-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+/* The inset the panels sit on. Deliberately the app's blue-grey rather than
+   the client's brown parchment — sprite 170's tiles are cool slate, and a warm
+   panel behind them clashed with both the sprite and the rest of the editor. */
+.rs-panel {
+  background: #14161d;
+  border: 1px solid #000;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  padding: 8px;
+}
+
+.defaults-look-rows,
+.defaults-colour-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Both panels shrink to their rows — stretching them to the pane width just
+   left dead space on the right, since neither has anything to fill it. */
+.defaults-colour-panel,
+.defaults-look-panel {
+  align-self: flex-start;
+  width: fit-content;
+}
+
+.defaults-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Fixed width rather than flex:1 — the fields then sit right beside the names
+   in one column instead of being pushed against the panel's right edge. */
+.defaults-row-label {
+  flex: none;
+  width: 54px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* NumberInput's wrapper is width:100% with its steppers absolutely positioned
+   at its right edge, so it has to be pinned to the field width too — otherwise
+   the steppers float outside the border below. */
+.defaults-row .num-input {
+  width: 82px;
+  flex: none;
+}
+
+/* The equipment field is wider: item ids reach five digits (the cache tops out
+   around 25,358) and the steppers take 41px off the right. */
+.defaults-slot-editor .num-input,
+.defaults-slot-editor .defaults-num {
+  width: 105px;
+  flex: none;
+}
+
+/* Reserve the stepper room permanently rather than adding it on hover, so the
+   digits never slide under the buttons and the field doesn't reflow. */
+/* Reserved permanently here rather than on hover, so a five-digit id can't
+   reflow under the buttons mid-edit. */
+.defaults-slot-editor .num-input-field,
+.defaults-slot-editor .num-input:hover .num-input-field,
+.defaults-slot-editor .num-input:focus-within .num-input-field {
+  transition: none;
+}
+
+/* Bordered so the editable fields read as fields — inside a dark panel an
+   unbordered input is indistinguishable from a label. */
+.defaults-num {
+  box-sizing: border-box;
+  width: 82px;
+  flex: none;
+  padding: 3px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.defaults-num:hover {
+  border-color: rgba(255, 255, 255, 0.34);
+}
+
+.defaults-num:focus {
+  outline: none;
+  border-color: var(--electric-blue-bright);
+  box-shadow: 0 0 0 2px rgba(47, 143, 255, 0.18);
+}
+
+/* Matches the number fields' footprint so the two panels line up. */
+.defaults-select {
+  box-sizing: border-box;
+  width: 82px;
+  flex: none;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.defaults-select:focus {
+  border-color: var(--electric-blue-bright);
+  box-shadow: 0 0 0 2px rgba(47, 143, 255, 0.18);
+}
+
+/* Derived from the top's outfit set — shown, not edited. */
+.defaults-num-locked {
+  border-style: dashed;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  text-align: center;
+  cursor: default;
+}
+
+/* The look panel and its note, sized by the panel alone. */
+.defaults-look-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: fit-content;
+}
+
+/* width:0 keeps the prose out of the group's intrinsic width (otherwise the
+   sentence would decide how wide the look panel is), min-width:100% then
+   stretches it to whatever the panel settled on. */
+.defaults-note {
+  width: 0;
+  min-width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.defaults-note strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* An equipment tile: the cache sprite is the whole background. */
+.rs-slot {
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 100% 100%;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  /* Shown while the sprite loads, and if the dump has no sprites at all —
+     matched to sprite 170's own slate so the panel looks the same either way
+     instead of falling back to a colour from a different palette. */
+  background-color: #2b323c;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.6);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.rs-slot-sm {
+  width: 22px;
+  height: 22px;
+}
+
+/* The kit rendered into its look slot. Sized inline from the equipment scale
+   so the two sides can't drift apart. */
+.defaults-part-icon {
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+/* Centres the fixed-size slot grid when the panel is taller than it. */
+.rs-equip-grid {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+
+/* Height is set inline, measured off the look panel so the two match exactly;
+   align-self keeps the cross axis (width) at the panel's real 190px instead of
+   stretching the client geometry sideways. */
+.rs-equip-panel {
+  position: relative;
+  padding: 0;
+  flex: none;
+  align-self: flex-start;
+}
+
+.rs-equip-slot {
+  position: absolute;
+  padding: 0;
+  cursor: pointer;
+  transition: box-shadow 0.12s, filter 0.12s;
+}
+
+.rs-equip-slot:hover {
+  filter: brightness(1.35);
+}
+
+.rs-equip-slot.is-selected {
+  box-shadow: 0 0 0 2px var(--electric-blue-bright);
+  z-index: 1;
+}
+
+.rs-equip-slot .item-icon {
+  width: 76%;
+  height: 76%;
+  object-fit: contain;
+}
+
+/* Names the slot under the cursor, in the pane heading. */
+.defaults-pane-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.defaults-pane-hint {
+  color: var(--electric-blue-bright);
+  letter-spacing: 0.04em;
+}
+
+.defaults-slot-editor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  flex-wrap: wrap;
+}
+
+.defaults-item-name {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.defaults-save-bar {
+  position: static;
+  margin-top: 4px;
+}
+
+/* Pill toggles — also used by the settings menu trigger. */
+.pill-group {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.pill-btn {
+  padding: 3px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.pill-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.pill-btn.active {
+  color: #fff;
+  background: linear-gradient(180deg, rgba(47, 143, 255, 0.55), rgba(0, 102, 255, 0.4));
+}
+
+/* ---- identikit picker ---------------------------------------------------- */
+
+.picker-body {
+  width: min(94vw, 760px);
+}
+
+.picker-count {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Scrolls rather than growing the dialog — female hair alone is 135 kits. */
+.picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 8px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.picker-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 3px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.picker-tile:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: var(--text);
+}
+
+.picker-tile.is-current {
+  border-color: var(--electric-blue-bright);
+  background: rgba(47, 143, 255, 0.14);
+  color: var(--text);
+}
+
+.picker-tile-id {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.defaults-browse {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* ---- colour dropdown ----------------------------------------------------- */
+/* Custom rather than a <select>: an <option> is plain text, so it can hold no
+   swatch, and tinting its text would tint the number with it. */
+
+.colour-select {
+  position: relative;
+  flex: none;
+}
+
+.colour-select-btn,
+.colour-select-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.colour-select-btn {
+  width: 82px;
+  min-height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.3);
+  transition: border-color 0.15s;
+}
+
+.colour-select-btn:hover {
+  border-color: rgba(255, 255, 255, 0.34);
+}
+
+.colour-select-btn.is-open {
+  border-color: var(--electric-blue-bright);
+  box-shadow: 0 0 0 2px rgba(47, 143, 255, 0.18);
+}
+
+.colour-select-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.colour-select-chip {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.colour-select-pop {
+  /* fixed, placed off the button's rect: an absolute popup still counts
+     toward the dialog's scroll extent, which gave the modal a scrollbar */
+  position: fixed;
+  z-index: 60;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #1a1d26;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+}
+
+.colour-select-opt {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.colour-select-opt:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.colour-select-opt.is-current {
+  border-color: var(--electric-blue-bright);
+  background: rgba(47, 143, 255, 0.14);
+}
+
+/* Same scrollbar as the sidebar and content panel. */
+.colour-select-pop,
+.picker-grid {
+  scrollbar-width: thin;
+  scrollbar-color: var(--grey-light) transparent;
+}
+
+.colour-select-pop::-webkit-scrollbar,
+.picker-grid::-webkit-scrollbar {
+  width: 10px;
+}
+
+.colour-select-pop::-webkit-scrollbar-button,
+.picker-grid::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.colour-select-pop::-webkit-scrollbar-track,
+.picker-grid::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.colour-select-pop::-webkit-scrollbar-thumb,
+.picker-grid::-webkit-scrollbar-thumb {
+  background: var(--grey-light);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+.colour-select-pop::-webkit-scrollbar-thumb:hover,
+.picker-grid::-webkit-scrollbar-thumb:hover {
+  background: var(--electric-blue);
+  background-clip: padding-box;
+}
+
+/* An item that doesn't belong in the slot it's been put in. */
+.rs-equip-slot.is-wrong {
+  box-shadow: 0 0 0 2px #e0574a;
+}
+
+.rs-equip-warn {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #e0574a;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.defaults-item-wrong {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 4px;
+  font-size: 11px;
+  color: #ffb4ad;
+}
+
+/* In the message the badge sits inline, not pinned to a tile corner. */
+.defaults-item-wrong .rs-equip-warn {
+  position: static;
+}
+
+/* Orbitable player preview, third column. Fixed rather than flex-growing: a
+   player is tall and narrow, so letting the column absorb the dialog's slack
+   just padded empty space either side of the model. */
+.defaults-preview-pane {
+  flex: 0 0 190px;
+  min-width: 0;
+}
+
+.defaults-preview {
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* ModelViewer sizes its canvas off a viewport-height rule; inside the panel it
+   should fill the column instead. */
+.defaults-preview .model-viewer {
+  width: 100%;
+  height: 100%;
+  gap: 6px;
+}
+
+.defaults-preview .model-canvas {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+  border: none;
+  border-radius: 3px;
+}
+
+/* Which render emote the preview resolved to. */
+.defaults-emote-note {
+  width: auto;
+  min-width: 0;
+}
+
+/* The equipped item's name, in the Equipment heading. Truncates instead of
+   widening the column — a long name here used to push the preview across. */
+.defaults-equip-title {
+  width: 0;
+  min-width: 100%;
+}
+
+.defaults-title-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.defaults-title-item.is-wrong {
+  color: #ffb4ad;
+}
+
+.defaults-title-item .rs-equip-warn {
+  position: static;
+  flex: none;
+}
+
+/* ---- identikit viewer layout --------------------------------------------- */
+
+.idk-columns {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.idk-fields {
+  flex: 1 1 380px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* The previews sit beside the fields, and stay small — they're for checking a
+   kit, not for inspecting geometry (the models page does that). */
+.idk-side {
+  flex: 1 1 520px;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.idk-side .model-canvas {
+  height: 240px;
+  min-height: 0;
+}
+
+.idk-side .model-viewer {
+  gap: 6px;
+}
+
+.idk-general {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.idk-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.idk-part-select {
+  width: 130px;
+}
+
+.idk-general-note {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding-bottom: 4px;
+}
+
+/* Five head slots in a compact row instead of the wide card grid. */
+.idk-head-grid {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.idk-head-grid .idk-field {
+  width: 96px;
+}
+
+/* Wide enough for the id plus the steppers overlaying the right. */
+.idk-head-grid .num-input {
+  width: 96px;
+}
+
+.idk-head-grid .num-input-field,
+.idk-head-grid .num-input:hover .num-input-field,
+.idk-head-grid .num-input:focus-within .num-input-field {
+  transition: none;
+}
+
+.idk-num {
+  box-sizing: border-box;
+  width: 96px;
+  padding: 3px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.idk-num:focus {
+  outline: none;
+  border-color: var(--electric-blue-bright);
+}
+
+.idk-preview-note {
+  /* Two lines reserved whether or not the text needs them, so the canvases in
+     the two cards start at the same height instead of one sitting lower when
+     its note wraps. */
+  min-height: 30px;
+  margin: -2px 0 10px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* The two previews sit side by side, dropping to stacked when the column
+   can't hold both. */
+.idk-preview-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.idk-preview-card {
+  flex: 1 1 230px;
+  min-width: 200px;
+}
+
+/* Body-model table: a narrow index column, and the note sits tight to the
+   heading rather than reserving two lines like the preview cards do. */
+.idk-index-th {
+  width: 34px;
+}
+
+.idk-inline-note {
+  min-height: 0;
+  margin-bottom: 6px;
+}

@@ -387,6 +387,276 @@ so the scales must keep flowing as ∞ and only the final coordinate is pinned.
 
 ---
 
+## Player look — identikit parts and the character colour palette (traced 2026-07-29)
+
+**What the renderer does.** Assembles a player from seven identikit "look"
+parts and ten colour choices. `PlayerLookModal` previews a def on the stored
+default look; `buildLookModel` (`loaders/playerAppearance.ts`) mirrors the
+client's order — each part recoloured with its own pairs, merged, then the
+global palette applied over the combined mesh
+(`PlayerAppearance.getBodyModel`).
+
+**The slot table.** `look[i]` lives at appearance position `IDK_PART_TABLE[i]`
+(`[8, 11, 4, 6, 9, 7, 10, 0]`). Verified three independent ways, which is
+worth knowing because none of the three is self-evident on its own:
+
+| look index | part | appearance position |
+|---|---|---|
+| 0 | Hair | 8 |
+| 1 | Beard | 11 |
+| 2 | Torso | 4 |
+| 3 | Arms | 6 |
+| 4 | Wrists | 9 |
+| 5 | Legs | 7 |
+| 6 | Feet | 10 |
+
+1. darkan-bot-refactor `PlayerAppearance.IDK_PART_TABLE`.
+2. darkan-world-server `Appearance.generateAppearanceData()` — writes
+   `lookI[2]` at the chest position, `lookI[3]` arms, `lookI[5]` legs,
+   `lookI[0]` hair, `lookI[4]` hands, `lookI[6]` feet, `lookI[1]` beard.
+3. cryogen's `renderPlayerBody()` composes the same seven meshes in that order.
+
+The table's 8th entry (position 0, the hat slot) is equipment-only.
+
+**The part names are function names, and cryogen's differ.** cryogen's
+`ModelDefinitions.getDefaultLook()` annotates the same seven ids as "face
+(minus jaw)", "jaw", "body", "(arms probably)", "hands", "legs", "feet" —
+describing what each kit's *mesh* contains. The labels above describe what the
+*slot* does, which is what the client keys on: `look[0]` is gated by the head
+equipment slot and `hideHair`, and gets swapped through the hat-hair lookup;
+`look[1]` is gated by `hideBeard` and the server's own setter is
+`setFacialHair`. Both readings fit the same data — the hair kit also carries
+the head mesh used for chatheads (kit 310 has `headModels: [46442]`) — so
+don't treat the disagreement as one of them being wrong. Note cryogen hedges
+`look[3]` as "probably"; the world-server's `hideArms`/`getOldArms` path
+settles it as arms.
+
+**Tops and arms are NOT independent — outfit "sets" pair them, and that is
+why nothing has to hide a second pair of arms.** Choosing a top does not leave
+the arms alone: `Appearance.verifyArms()` looks the top up in a set and
+*overwrites* the arms and wrists with the ones that set names. So a top either
+carries its own arm geometry (its set lists `arms: -1`) or it is sleeveless
+and its set names the arms kit that completes it. The client has no
+render-time trick for overlapping arms; the bad combination simply never
+arises. Getting this wrong in the editor produces both failure modes — an
+armless body on a sleeveless top, and two interpenetrating pairs of arms on a
+sleeved one.
+
+The chain (all in the cache, `loaders/outfitSets.ts`):
+
+```
+enum 5735       -> 20 family struct ids (Adventurer, Thief, Warrior…)
+family struct   -> up to 6 set structs per gender
+                   (male params 1169-1174, female 1175-1180); 1160 = family name
+set struct      -> 1182 top · 1183 arms · 1184 wrists · 1185 legs
+```
+
+64 sets in this cache (32 per gender); **23 list `arms: -1`** (the top has
+sleeves) and **41 name an arms kit** (sleeveless top). Set members' identikit
+categories are exactly 2/3/4/5, which is what pins param 1185 to legs and
+confirms slot 4 is wrists.
+
+**The proof this is the right model: the stock look IS a set.** Male set 1100
+("Thief") is `top 452, arms -1, wrists 371, legs 627` — the stock male look is
+`[310, 16, 452, -1, 371, 627, 433]`. Female set 1101 matches its look the same
+way. So `arms: -1` in the default look is deliberate (the Thief top has
+sleeves), **not a hole to patch** — an earlier pass here "fixed" it with
+`getOldArms` and produced exactly the double-arms clipping described above.
+
+For a top in no set, `verifyArms` falls back to the character-creation pick
+lists: arms must appear in enum **711** (male) / **693** (female) or it resets
+to `getOldArms()` = **26 / 61**; wrists must appear in **749** / **751** or
+reset to **34 / 68**. (Selectable top lists are enums 690 / 1591.)
+
+Coverage is partial and a UI has to cope: of the male kits, 32/46 tops,
+18/45 arms, 32/46 wrists and 31/43 legs appear in a set; hair, beard and feet
+are in none (they pair with nothing).
+
+**Previewing an arms kit is the one case with no client analogue**, since the
+client only ever derives arms *from* a top, never the reverse. `buildLookModel`
+works backwards: if the kit belongs to a set, that set's top and wrists are
+used. If it doesn't — the bare-arms family, which the client only shows under
+an equipped chest item — the rule (Cody's call, 2026-07-29) is **keep the
+look's own top when it is known to leave the arms visible, and substitute a
+sleeveless one otherwise**, flagged `fallback` in the UI:
+
+- `topShowsArms()` is true only when the top's set names an arms kit. A top in
+  *no* set counts as false — 14 of the 46 male tops are unplaced and nothing
+  in the data says whether they have sleeves, so "unknown" is treated as
+  "might hide the arms".
+- The substitute is the lowest-id top among sets that name arms. Sleeveless
+  tops are contiguous ranges — **457-474 male, 565-587 female** — so this is
+  stable, and the picked top's set also supplies the wrists.
+- With the stock look this always substitutes, because its top 452 (Thief) is
+  sleeved. Point a default look at a sleeveless top and its own top is kept.
+
+**The beard is male-only, and the gate is SERVER-side.** Both
+darkan-world-server's `Appearance.generateAppearanceData()` and cryogen's
+`renderPlayerBody()` open the beard test with `male &&`, so a female's beard
+position is written empty whatever `look[1]` holds. The client would draw a
+beard mesh it was handed — it simply never is. The cache agrees: category 8
+("female beard") is the one gap in an otherwise contiguous 0-13 range. Any UI
+over a female look should omit the beard field rather than offer a dead one;
+`lookPartAppliesTo` in playerLook.ts is the shared test, and `buildLookModel`
+drops the part before it can render.
+
+**`category` (identikit opcode 1) encodes gender AND body part.** The client
+reads and *discards* this byte (`IdkType.decode` opcode 1) — character
+creation groups kits through CS2/enum lookups instead — so this is empirical,
+not a decode. `category = (female ? 7 : 0) + lookIndex`, and it holds across
+all **651** dumped kits: 0-6 male, 7-13 female, with **category 8 ("female
+beard") correctly empty**, and every id in the two stock looks landing on its
+expected category. That is what lets a viewer drop a kit into the right slot
+of the right gender's look without asking. cryogen's dumper named this field
+`unused`; the editor's loader calls it `category`.
+
+**The colour palette lives in `defaults`, not in the identikits.**
+ENTITY blob opcode 7 (`defaults/entity.json`, dumped as `recolorPaletteSrc` /
+`recolorPaletteDst`): **10 groups × 4 source colours**, each source carrying
+its own replacement list. A look's `colour[g]` is an index *into that group's
+lists*, not a colour. Group meanings come from darkan-world-server's own
+setters:
+
+| group | tints | replacement choices in this cache |
+|---|---|---|
+| 0 | Hair | 25 |
+| 1 | Torso | 229 |
+| 2 | Legs | 229 |
+| 3 | Boots | 206 |
+| 4 | Skin | 14 / 14 / 12 / 12 (four source shades) |
+| 5-9 | — | none — all four source slots are -1 |
+
+**Each group is several source tones driven by ONE index.** Hair, torso, legs
+and boots carry 2 source colours each; skin carries 4. A choice `n` replaces
+*every* slot in the group at once — slot 0 with `dst[0][n]`, slot 1 with
+`dst[1][n]`, and so on. The pairs are authored as base + highlight: across all
+25 hair choices, slot 1 is the same hue and saturation as slot 0 with the
+lightness 4-21 units higher. Worked example, identikit 323 (a female
+hairstyle, visibly two-tone — both sources appear in its body mesh 46383 and
+head mesh 46414):
+
+| `colour[0]` | slot 0 `6798` | slot 1 `-10304` |
+|---|---|---|
+| 0 | h6 s5 l14 | h6 s3 l26 |
+| 2 | h10 s0 l43 | h10 s0 l64 |
+| 5 | h7 s4 l64 | h7 s4 l76 |
+
+So a two-tone region cannot be recoloured tone-by-tone **as a player look** —
+the appearance block has one byte per group, so the game cannot express it and
+an editor offering it would produce a look no server could send. It *can* be
+done **in the cache**, through the identikit's own recolour pairs (already
+editable in `IdentikitViewer`), which retints that tone for every player using
+the kit. See the ordering gotcha below before doing so.
+
+Gotchas for an editor here:
+
+- **An out-of-range choice silently becomes 0.** `PlayerEntity` clamps it
+  while reading the appearance block, and the render loop guards again per
+  source slot. This is not theoretical: **the stock looks ask for skin 110
+  against a 14-entry palette**, so every shipped character renders with skin
+  choice 0. A colour picker must clamp per group or it will show colours the
+  game never displays.
+- **The palette applies to the assembled avatar**, after per-part recolours —
+  so a part whose own pairs already moved a colour off the palette's source
+  value stops responding to the character colour. That is the client's
+  behaviour, not a bug, and it is the trap waiting for anyone retinting one
+  tone of a two-tone kit: add a pair `6798 -> X` to a hairstyle and the
+  palette can no longer find `6798`, so that tone freezes while the other
+  still follows the player's hair colour — hair that half-recolours.
+- Groups 5-9 are real in the format and empty in this cache; a UI should hide
+  them rather than offer dead sliders.
+- Palette values are signed HSL16 (`-1` = the 65535 sentinel on the source
+  side); no replacement list in this dump contains -1.
+
+**Already editable.** `IdentikitViewer` edits every field of a kit
+(bodyModels, headModels, recolour/retexture pairs, category), and the preview
+picks up the live draft so unsaved edits show.
+
+**Not surfaced.**
+
+- **The default looks themselves.** Stored in `localStorage` under
+  `cache-editor:player-look-v1`, seeded from darkan-world-server's own
+  `Appearance.male()`/`.female()`. No editor yet — the seven part ids, the
+  ten colour choices and gender all want one.
+- **The palette in `defaults/entity.json`.** `DefaultsViewer` shows the entity
+  blob as raw JSON, so the palettes are technically editable as nested arrays
+  and practically not. They deserve swatch grids per group.
+- **Equipment.** The preview covers the unequipped body only. The client's
+  full recipe (darkan-world-server `generateAppearanceData`, mirrored by
+  cryogen's `renderPlayerBody`) additionally needs: items in positions 0-3
+  drawn first; chest/legs/hands/feet each replacing their look part when
+  equipped; `hideArms`/`hideHair`/`hideBeard` tests; the **bare-arms
+  substitute kit — 26 male, 61 female** (`getOldArms`) used when a chest item
+  hides the arms; and the **hat-hair style lookup** (enums 2339/2342 style →
+  slot, 2338/2341 slot → struct, then struct params **790** with-hat / **791**
+  with-face-mask) which swaps the hair kit for a hat-compatible one.
+- **Head compositing** (`headModels`, item `maleHead1-2`/`femaleHead1-2`).
+  `renderPlayerHead` draws the hat's head mesh first, then each look part's
+  `renderHead`.
+
+---
+
+## The equipment screen — interface 387 (traced 2026-07-29)
+
+**What it gives us.** The editor's default-player panel is dressed in the
+client's own equipment art rather than an approximation:
+`loaders/equipmentSlots.ts` holds the layout, `loaders/uiSprites.ts` serves the
+sprites, `PlayerDefaultsModal` draws it.
+
+**Sprites.** Slot tile **170** (36x36), hover state **9167** — component 5's
+`onMouseOver`/`onMouseLeaveScript` swap between exactly those two. The 40x40
+tile is **1409** (the four buttons along the bottom), and **9280-9285** are the
+decorative frame edges. All are dumped as `sprites/<id>/<id>_0.png`.
+
+**Layout.** The panel (components 2 and 65) is **190x261**. Each slot is an
+anonymous 36x36 container; its `basePositionX` is an **offset from the panel's
+horizontal centre**, because `aspectXType: 1` — which is why the dumped x
+values go negative on the left. Screen position is
+`panelWidth / 2 + x - size / 2`.
+
+| slot | x | y | equipment index | drawn by us |
+|---|---|---|---|---|
+| Aura | -41 | 4 | 14 | no |
+| Head | 0 | 4 | 0 | yes |
+| Cape | -41 | 43 | 1 | yes |
+| Neck | 0 | 43 | 2 | yes |
+| Ammo | 41 | 43 | 13 | no |
+| Weapon | -56 | 82 | 3 | yes |
+| Torso | 0 | 82 | 4 | yes |
+| Shield | 57 | 82 | 5 | yes |
+| Legs | 0 | 122 | 7 | yes |
+| Hands | -56 | 162 | 9 | yes |
+| Feet | 0 | 162 | 10 | yes |
+| Ring | 56 | 162 | 12 | no |
+
+**Ring, ammo and aura are omitted from the editor's panel** (Cody,
+2026-07-29) because none of them puts geometry on the body, and this panel
+exists to dress a player we render. The client corroborates two of the three:
+`Equipment.DISABLED_SLOTS` flags exactly indices **12 and 13**, and
+`getMeshModifiers` skips a flagged slot before it even reads the item. An aura
+is a graphical effect around the player, not a worn mesh. Their coordinates
+are kept in the table above (and in a comment in `equipmentSlots.ts`) so they
+can be restored without re-reading the interface.
+
+**The slot identities are NOT in the interface.** Every container is an
+anonymous box with `typeId 0`, no `opBase` and no menu ops; its item holder
+(the 0x0 sprite child) is filled by CS2 at runtime, so the client binds slots
+by script. The geometry is unambiguous — it is the classic arrangement — and
+the indices above are darkan `Equipment`'s own constants (HEAD 0, CAPE 1,
+NECK 2, WEAPON 3, CHEST 4, SHIELD 5, LEGS 7, HANDS 9, FEET 10, RING 12,
+AMMO 13, AURA 14). Aura/Ammo are the two least certain, being the RS3
+additions. Indices **6, 8 and 11 have no box**: they are the arms, hair and
+beard positions, which only identikits ever fill.
+
+**Equipment and identikits share ONE index space** — the 15-wide appearance
+array. An equipped chest at index 4 displaces the torso kit that otherwise
+sits there, which is exactly what `Appearance.generateAppearanceData` encodes.
+A `parent` field in the dump is the packed hash `interfaceId << 16 |
+componentId` (25362436 = 387<<16 | 4), which is how the slot containers were
+matched to their item holders.
+
+---
+
 ## Region environment
 
 **What the renderer does.** Reads `maps/environments/<id>.json` for sun

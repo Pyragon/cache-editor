@@ -33,9 +33,12 @@ Open work only — completed passes live in git history and README.
 
 ## Identikits / Player Preview
 
-- **Slot semantics beyond weapon/shield aren't verified.** The remaining ~10 appearance-table positions (cape, amulet, gloves, boots, etc. by RS2 convention) aren't cross-checked against real item `wearPos` values, so the tool labels them by raw slot number rather than guessing wrong names.
-- **No global recolour palette.** `PlayerAppearance.kt`'s 10-slot `recolorDstIndices`/shared palette system (hair colour, skin tone, etc. — the character-creation colour pickers) isn't wired up; only each identikit's/item's own baked-in recolour pairs are applied.
-- **Head-specific compositing isn't in the Player Preview tool** (identikit's own `headModels`/item's `maleHead1-2`/`femaleHead1-2`) — only body meshes are assembled into the avatar.
+- **Equipment has no thumbnail browser.** Look parts have one (Settings → Player Look → Browse); equipment ids are typed or stepped. `IdentikitPickerModal` is the precedent — an item version can filter by `wearPos` the same way the steppers do.
+- **The player look isn't used outside the editor's own previews.** Cutscenes still render the player entity as a cone marker; wiring `buildLookModel` in is the point of storing a look at all.
+- **The hat-hair style swap isn't applied.** A hat that hides hair currently just removes it; the client instead swaps in a hat-compatible hairstyle via enums 2339/2342 (style → slot), 2338/2341 (slot → struct) and struct params 790 (with hat) / 791 (with face mask). Everything else in the equipment recipe is ported — see `EDITOR.md`.
+- **The remaining equipment positions aren't named.** The seven identikit slots are verified three ways now (table in `EDITOR.md`) and weapon (3) / shield (5) come from `defaults/equipment.json`; the rest of the 15-wide appearance table is still labelled by raw slot number rather than guessing.
+- **Head compositing isn't previewed** (identikit `headModels`, item `maleHead1-2`/`femaleHead1-2`) — body meshes only. The client's recipe is `renderPlayerHead`: the hat's head mesh first, then each look part's `renderHead`.
+- **The `defaults` recolour palettes are only editable as raw JSON.** `DefaultsViewer` renders the entity blob generically, so the 10 colour groups are nested arrays rather than swatch grids. See `EDITOR.md`.
 - **Not tested in a real browser session** (File System Access API limitation; typecheck/lint/build pass, Java round-trip verified independently).
 
 ## Sound / Music
