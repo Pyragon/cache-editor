@@ -147,6 +147,7 @@ const DONE_ENTRIES = new Set([
   'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests', 'game_tips',
   'config_bas', 'npcs', 'cs2', 'shaders', 'config_identikit',
+  'config_underlays', 'config_overlays',
 ])
 
 function unavailableReason(name: string): string {
@@ -1413,6 +1414,11 @@ function App() {
               const isActiveGroup = selectedEntry?.group === groupName
               const anyAvailable = members.some((m) => m.available)
               const anySpecializedAvailable = members.some((m) => m.available && SPECIALIZED_ENTRIES.has(m.name))
+              // A group is done once every member that this dump actually has
+              // is done. Members with no folder (or an empty one, like the sun
+              // index this revision never shipped) can't be worked on, so they
+              // don't hold the group back.
+              const allDone = anyAvailable && members.every((m) => !m.available || DONE_ENTRIES.has(m.name))
               // Collapsible even while a member is selected — the toggle
               // keeps its 'active' highlight so it's clear where the
               // focused entry lives.
@@ -1425,7 +1431,7 @@ function App() {
                     className={[
                       'sidebar-group-toggle',
                       isActiveGroup ? 'active' : '',
-                      !anyAvailable ? 'unavailable' : !anySpecializedAvailable ? 'generic' : '',
+                      !anyAvailable ? 'unavailable' : allDone ? 'done' : !anySpecializedAvailable ? 'generic' : '',
                     ].join(' ').trim()}
                     disabled={!anyAvailable}
                     title={anyAvailable ? undefined : 'No data found for this cache entry'}
