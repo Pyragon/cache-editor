@@ -109,23 +109,30 @@ form:
   off the atob'd string. Totals are world-wide; the per-region list is capped at
   `TOP_REGIONS` and the UI says so.
 
-**Two flags our renderer does not implement** (traced 2026-07-29 —
+**The two flags** (traced 2026-07-29 —
 `MapLoader.addUnderlayTiles`/`addOverlayTiles`/`setupCulling`, `GroundGL:875`):
 
 - **`shadowed`** (underlay opcode 4, overlay opcode 10) means "this tile
   RECEIVES the baked wall/scenery shadows". The map builder ORs it into a
   per-tile `hasShadows`, which `GroundGL` stores as `CONTAINS_SHADOW`;
-  `createShadowAt` returns early without it. Our `FluJson`/`FloJson` don't even
-  carry the field, so `buildTerrainMesh` shadows every tile equally. The preview
-  gates its own stand-in shadow band on the flag, which is faithful for a
-  single-material patch but is not the same thing as implementing it. Note the
-  client's two guards: the underlay branch needs `pathShape != 0`, and a plain
-  tile has its shape remapped to 12 first (`Class329`/`MapLoader:564`), so plain
-  ground *does* qualify; the overlay branch needs `pathShape != 12` and a real
-  tile colour.
+  `createShadowAt` returns early without it, leaving the tile evenly lit under a
+  wall. **PORTED 2026-07-29** as `tileTakesShadow` in `mapScene.ts`: both config
+  types carry `shadowed`, and `emitTile` consults the shadow grid only where the
+  tile allows it, so a non-shadowed material stays lit hard against a shadowed
+  neighbour — the client's discontinuity, not a bug. Two guards to preserve if
+  this is ever touched, both depending on the shape being **already remapped**:
+  the underlay branch needs `pathShape != 0`, and a tile with no overlay has its
+  shape remapped 0 → 12 first (`Class329`/`MapLoader:564`), which is the only
+  reason plain ground takes shadows at all; the overlay branch needs
+  `pathShape != 12` *and* a real tile colour, so a full-tile overlay (shape 0,
+  not remapped) silences its hidden underlay and decides alone.
+  Scope in this cache: **3 underlays** (37, 58, 135 — all `0xDCDCF0` snow on
+  textures 407/525) and **no overlays** turn it off, across 23 regions; the
+  biggest are 10583 (world 2624, 5568 — a full plane of 58) and 11603
+  (2880, 5312).
 - **`occlude`** (opcode 5 on both) is not visual at all — on planes above ground,
   a flat occluding tile gets `COMPLETELY_FLAT` so the level below can be skipped.
-  We do no plane-below culling, so the flag is inert here. Both pages say so
+  We do no plane-below culling, so the flag is inert here, and both pages say so
   rather than implying the toggle does something.
 
 **Not surfaced.** The remaining gap is **per-tile**, in the 3D map editor:

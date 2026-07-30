@@ -153,10 +153,11 @@ function buildPreviewTerrain(o: BuildOpts): MapTerrain {
 }
 
 /** A stand-in for the baked scenery/wall shadows: a band across one side of
- *  the subject patch, run through the client's own 5-tap blur. The client gates
- *  this per tile on the material's `shadowed` flag (MapLoader sets `hasShadows`,
- *  GroundGL turns it into CONTAINS_SHADOW), which is exactly what the caller
- *  reproduces by passing `undefined` when the flag is off. */
+ *  the subject patch, run through the client's own 5-tap blur. The grid is
+ *  always supplied — `buildTerrainMesh` decides per tile whether to sample it,
+ *  from the material's `shadowed` flag, so turning the flag off shows the real
+ *  renderer behaviour (and the hard edge against still-shadowed neighbours)
+ *  rather than a preview-only approximation. */
 function previewShadowGrid(tiles: number): Float32Array[] {
   const raw = new Uint8Array(VERTS * VERTS)
   const half = tiles >> 1
@@ -211,7 +212,6 @@ export default function GroundPreview({ rootHandle, kind, id, def, defaultNeighb
   // build, but stringifying the whole draft is simpler and always correct —
   // a redundant rebuild costs a few ms and can never show a stale scene.
   const defKey = JSON.stringify(def)
-  const shadowed = def.shadowed !== false
 
   // ---- one-time three.js setup -------------------------------------------
   useEffect(() => {
@@ -368,7 +368,7 @@ export default function GroundPreview({ rootHandle, kind, id, def, defaultNeighb
           // with here).
           const mesh = await buildTerrainMesh(terrain, 0, heights, overrides, assets, {
             lights: [],
-            shadows: shadowed ? previewShadowGrid(tiles) : undefined,
+            shadows: previewShadowGrid(tiles),
             palettes: [],
           })
           if (cancelled) {
@@ -418,7 +418,7 @@ export default function GroundPreview({ rootHandle, kind, id, def, defaultNeighb
 
     return () => { cancelled = true; window.clearTimeout(timer) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [configs, rootHandle, kind, id, defKey, neighbour, tiles, shape, rotation, sloped, shadowed])
+  }, [configs, rootHandle, kind, id, defKey, neighbour, tiles, shape, rotation, sloped])
 
   if (!rootHandle) {
     return (
@@ -498,9 +498,10 @@ export default function GroundPreview({ rootHandle, kind, id, def, defaultNeighb
       <p className="tex-op-note ground-preview-note">
         Rendered by the map view's own terrain builder, so this is exactly how the material draws
         in game — including the cross-tile colour blur, texture splatting and the client's vertex
-        lighting. Drag to orbit, scroll to zoom. The shadow band on the left is a stand-in for
-        scenery/wall shadows; it disappears when <code>shadowed</code> is off, which is what the
-        client's per-tile <code>CONTAINS_SHADOW</code> flag does.
+        lighting. Drag to orbit, scroll to zoom. The shadow band on the left stands in for the
+        scenery and wall shadows a real region bakes — the terrain builder decides per tile
+        whether to sample it from the <code>shadowed</code> flag, so turning that off leaves this
+        material evenly lit while its neighbours stay shadowed.
       </p>
     </div>
   )

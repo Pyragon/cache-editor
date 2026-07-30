@@ -476,12 +476,23 @@ function overlayCoversCorner(shape: number, rotation: number, cornerId: number):
 // Config inputs
 // ---------------------------------------------------------------------------
 
-export type FluJson = { id: number; rgb?: number; texture?: number; scale?: number }
+export type FluJson = {
+  id: number
+  rgb?: number
+  texture?: number
+  scale?: number
+  /** Opcode 4. Whether tiles of this material RECEIVE the baked scenery/wall
+   *  shadows — see `tileTakesShadow`. Absent means true (the opcode's presence
+   *  in the cache is what makes it false). */
+  shadowed?: boolean
+}
 export type FloJson = {
   id: number
   colorRgb?: number
   texture?: number
   textureScale?: number
+  /** Opcode 10 — same meaning as the underlay's opcode 4. */
+  shadowed?: boolean
   /** Opcode 7 — the client's `secondaryRGB`. `minimapColorRgb` is what dumps
    *  made before 2026-07-25 call it; `floSecondaryRgb` reads either. */
   secondaryRgb?: number
@@ -500,6 +511,35 @@ export type SceneConfigs = {
 /** Does this overlay's colour bleed into neighbouring ground vertices? */
 function isCornerBlendable(flo: FloJson | undefined): boolean {
   return flo !== undefined && flo.blendsWithUnderlay === true
+}
+
+/**
+ * Can this tile hold a baked scenery/wall shadow? Port of the client's per-tile
+ * `hasShadows`, which `MapLoader` ORs together from the two materials and hands
+ * to `Ground.addBlendedTile`; `GroundGL` turns it into `CONTAINS_SHADOW` and
+ * `createShadowAt` returns early without it, leaving the tile evenly lit.
+ *
+ * Both odd-looking shape guards are the client's (`MapLoader:1029` and `:1193`)
+ * and depend on the shape ALREADY being remapped: a tile with no overlay and
+ * shape 0 becomes shape 12 first (`MapLoader:564`), which is what lets plain
+ * ground satisfy `shape != 0` and take shadows at all. Conversely a full-tile
+ * overlay (shape 0, not remapped because an overlay exists) fails that guard,
+ * so its hidden underlay has no say and the overlay's own flag decides.
+ *
+ * @param shape the REMAPPED shape, not the raw `overlayShapeRot >> 2`
+ */
+function tileTakesShadow(
+  shape: number,
+  flo: FloJson | undefined,
+  flu: FluJson | undefined,
+  hasOverlay: boolean,
+  hasUnderlay: boolean,
+  overlayHsl: number,
+): boolean {
+  // absent flag = true; the cache stores the opcode only to turn it OFF
+  if (hasOverlay && shape !== 12 && overlayHsl !== -1 && flo?.shadowed !== false) return true
+  if (hasUnderlay && shape !== 0 && flu?.shadowed !== false) return true
+  return false
 }
 
 /** Client slot priority is a composite: (slot << 8) | overlayId (FloType.postDecode). */
@@ -1665,6 +1705,12 @@ export async function buildTerrainMesh(
       const hasUnderlay = underlayId !== 0 && (underlayHsl !== -1 || underlayTexture !== -1)
       if (!hasOverlay && !hasUnderlay) return
 
+      // Whether this tile receives the baked loc shadows at all — a per-TILE
+      // decision in the client, so the grid is consulted only where the
+      // materials allow it and a non-shadowed material stays evenly lit right
+      // up against a shadowed neighbour.
+      const takesShadow = tileTakesShadow(shape, flo, flu, hasOverlay, hasUnderlay, overlayHsl)
+
       // `overlaySupportsBlending`: the client only treats an overlay as blending
       // when the tile actually has an underlay to blend INTO and a real shape
       // (method5848's `initialOverlay.blendsWithUnderlay` guard).
@@ -1871,7 +1917,7 @@ export async function buildTerrainMesh(
           // to (74 − staticShadow)/128 — shadows deepen the base colour, they
           // don't scale the light.
           const f53 = Math.max(0, lightAt(light, sceneX, sceneY))
-          const shadowVal = shadow ? lightAt(shadow, sceneX, sceneY) : 0
+          const shadowVal = shadow && takesShadow ? lightAt(shadow, sceneX, sceneY) : 0
           const strength = Math.max(0, GROUND_STRENGTH_BASE - shadowVal)
           const forced = vertHsl?.[vi]
           const vHsl = forced !== undefined && forced !== null ? forced
