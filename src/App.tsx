@@ -147,7 +147,7 @@ const DONE_ENTRIES = new Set([
   'particles', 'textures', 'texture_definitions', 'items', 'config_light_intensities',
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests', 'game_tips',
   'config_bas', 'npcs', 'cs2', 'shaders', 'config_identikit',
-  'config_underlays', 'config_overlays',
+  'config_underlays', 'config_overlays', 'objects',
 ])
 
 function unavailableReason(name: string): string {
