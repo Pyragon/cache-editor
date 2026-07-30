@@ -597,6 +597,41 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter, activeItems, virtualizer])
 
+  // Arrow keys move the SELECTION through the item list rather than scrolling
+  // it — the list is a picker, and scrolling the highlight off-screen is never
+  // what's wanted. Held arrows repeat, and each step loads an item, so a step
+  // already in flight swallows the next one; that also stops a held key from
+  // stacking up unsaved-changes prompts.
+  const itemNavPendingRef = useRef(false)
+
+  async function handleItemListKeyDown(e: React.KeyboardEvent<HTMLUListElement>) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    e.preventDefault() // take over the scroll container's native arrow scrolling
+    if (itemNavPendingRef.current) return
+
+    const items = filteredItemsRef.current
+    if (items.length === 0) return
+    const down = e.key === 'ArrowDown'
+    const current = items.findIndex((i) => i.id === selectedItemId)
+    // Nothing selected yet: enter the list from whichever end was asked for.
+    const next = current === -1
+      ? (down ? 0 : items.length - 1)
+      : current + (down ? 1 : -1)
+    if (next < 0 || next >= items.length || next === current) return
+
+    itemNavPendingRef.current = true
+    try {
+      // Goes through the same path as a click, so the unsaved-changes guard
+      // still runs and a cancelled switch leaves the selection alone.
+      await handleSelectItem(items[next].id)
+    } finally {
+      itemNavPendingRef.current = false
+    }
+    // Keep the keyboard on the list: focus may be sitting on the row button
+    // that was just clicked, and the virtualizer recycles those as it scrolls.
+    itemListRef.current?.focus({ preventScroll: true })
+  }
+
   // Keep the selected row in view when it's changed programmatically
   // (Add / Clone appends off-screen, Remove auto-selects a neighbour).
   // align 'auto' only scrolls when the row is actually out of view, so
@@ -1475,7 +1510,15 @@ function App() {
                 onChange={(e) => setFilter(e.target.value)}
               />
             </div>
-            <ul ref={itemListRef} className="item-list">
+            <ul
+              ref={itemListRef}
+              className="item-list"
+              // Focusable so the list can own the arrow keys — clicking a row
+              // already puts focus inside it, this covers clicking the list
+              // itself and tabbing to it.
+              tabIndex={0}
+              onKeyDown={handleItemListKeyDown}
+            >
               <div
                 style={{
                   height: virtualizer.getTotalSize(),

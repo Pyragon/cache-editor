@@ -240,6 +240,19 @@
   scrollbar-color: var(--grey-light) transparent;
 }
 
+/* The item list is focusable so it can own the arrow keys (see
+   handleItemListKeyDown). A click shouldn't paint a focus ring around the whole
+   panel, but keyboard users still need to see where they are. */
+.item-list:focus {
+  outline: none;
+}
+
+.item-list:focus-visible {
+  outline: 1px solid var(--electric-blue-bright);
+  outline-offset: -1px;
+  border-radius: 6px;
+}
+
 /* Entries list (top-level cache entry nav) — #sidebar itself has no
    border-radius, so this is just a breathing-room inset, not corner
    matching like the panels below. */
