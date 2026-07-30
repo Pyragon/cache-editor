@@ -186,8 +186,10 @@
   gap: 4px;
 }
 
+/* Wide enough that a four-digit model id isn't clipped once the number input's
+   hover steppers claim their padding on the right. */
 .object-model-chip .cell-input {
-  width: 80px;
+  width: 88px;
 }
 
 /* NPC right-click menu preview (Options section) */
