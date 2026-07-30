@@ -149,6 +149,15 @@ export function HexColorInput({ value, onChange, className = 'hex-input', disabl
   )
 }
 
+/**
+ * A field in a NumGrid / ToggleGrid. The optional third element explains what
+ * the field does, in one of two weights:
+ *
+ * - a **string** becomes a hover `title` on the whole cell — cheap, unobtrusive,
+ *   and the right choice for pages with dozens of fields (objects, npcs, items).
+ * - **JSX** becomes a "?" disclosure that expands under the input, for pages
+ *   where a field needs real prose (the ground editors).
+ */
 export type NumFieldDef = [key: string, label: string, help?: ReactNode]
 
 // A field's "?" disclosure. Definition pages carry a lot of hard-won meaning
@@ -247,13 +256,16 @@ export function NumGrid({ fields, values, onChange, links, fieldExtra }: {
         const value = Number(values[key] ?? 0)
         const link = links?.[key]
         const extra = fieldExtra?.[key]
+        // string help = hover tooltip on the cell; JSX help = "?" disclosure
+        const tip = typeof help === 'string' ? help : undefined
+        const rich = typeof help === 'string' ? undefined : help
         const helpOpen = openHelp === key
-        const Wrapper = extra != null || help != null ? 'div' : 'label'
+        const Wrapper = extra != null || rich != null ? 'div' : 'label'
         return (
-          <Wrapper key={key} className="item-field">
+          <Wrapper key={key} className="item-field" title={tip}>
             <span
-              className={`item-field-label${link ? ' field-link-label' : ''}${help != null ? ' has-help' : ''}`}
-              title={label}
+              className={`item-field-label${link ? ' field-link-label' : ''}${rich != null ? ' has-help' : ''}`}
+              title={tip ? undefined : label}
             >
               {link ? (
                 <>
@@ -269,18 +281,18 @@ export function NumGrid({ fields, values, onChange, links, fieldExtra }: {
                     </button>
                   )}
                 </>
-              ) : help != null ? (
+              ) : rich != null ? (
                 <span className="field-label-text">{label}</span>
               ) : (
                 label
               )}
-              {help != null && (
+              {rich != null && (
                 <HelpToggle open={helpOpen} onToggle={() => setOpenHelp(helpOpen ? null : key)} />
               )}
             </span>
             <NumberInput value={value} onChange={(v) => onChange(key, v)} />
             {extra}
-            {helpOpen && help != null && <div className="field-help-text">{help}</div>}
+            {helpOpen && rich != null && <div className="field-help-text">{rich}</div>}
           </Wrapper>
         )
       })}
@@ -298,18 +310,21 @@ export function ToggleGrid({ fields, values, onChange }: {
     <div className="item-grid">
       {fields.map(([key, label, help]) => {
         const helpOpen = openHelp === key
+        const tip = typeof help === 'string' ? help : undefined
+        const rich = typeof help === 'string' ? undefined : help
         // The checkbox itself is `display: none` — something must be a <label>
-        // for a click to reach it. Without help that's the whole cell (the
-        // long-standing behaviour); with help the cell has to be a <div>,
+        // for a click to reach it. Without a "?" that's the whole cell (the
+        // long-standing behaviour); with one the cell has to be a <div>,
         // because a help button nested in a label would toggle the flag, so
-        // the switch carries its own label instead.
-        const Wrapper = help != null ? 'div' : 'label'
-        const ToggleTag = help != null ? 'label' : 'span'
+        // the switch carries its own label instead. A plain string tooltip
+        // doesn't add anything interactive, so it keeps the label cell.
+        const Wrapper = rich != null ? 'div' : 'label'
+        const ToggleTag = rich != null ? 'label' : 'span'
         return (
-          <Wrapper key={key} className="item-field def-toggle-field">
-            <span className={`item-field-label${help != null ? ' has-help' : ''}`} title={label}>
-              {help != null ? <span className="field-label-text">{label}</span> : label}
-              {help != null && (
+          <Wrapper key={key} className="item-field def-toggle-field" title={tip}>
+            <span className={`item-field-label${rich != null ? ' has-help' : ''}`} title={tip ? undefined : label}>
+              {rich != null ? <span className="field-label-text">{label}</span> : label}
+              {rich != null && (
                 <HelpToggle open={helpOpen} onToggle={() => setOpenHelp(helpOpen ? null : key)} />
               )}
             </span>
@@ -321,7 +336,7 @@ export function ToggleGrid({ fields, values, onChange }: {
               />
               <span className="sprite-toggle-track" />
             </ToggleTag>
-            {helpOpen && help != null && <div className="field-help-text">{help}</div>}
+            {helpOpen && rich != null && <div className="field-help-text">{rich}</div>}
           </Wrapper>
         )
       })}

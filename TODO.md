@@ -311,6 +311,44 @@ real cache, in rough risk order:
 
 ## General Editor
 
+- **Explain every field, viewer by viewer.** Cody's ask (2026-07-29): a lot of
+  pages are just a label and a box, and names like "Supports Items" don't say
+  what they do. `NumFieldDef`'s optional third element now carries the
+  explanation — a **string** renders as a hover `title` on the cell (the cheap
+  option, right for pages with dozens of fields), **JSX** renders as the "?"
+  disclosure the ground editors use. `ObjectViewer` is done as the reference:
+  the non-obvious fields were traced against darkan-bot-refactor's
+  `ObjectType.kt` and its consumers, and the obvious ones just got a plain
+  sentence. Still to do, roughly by how much they'd benefit: `npcs`, `items`,
+  `spot_animations`, `animations`, `interfaces`, `texture_definitions`,
+  `particles`, `billboards`, `cutscenes`, `sound_effects`, the BAS page, and the
+  map scene's own loc/light panels. Trace anything whose meaning isn't obvious
+  rather than inventing it; where cryogen's dumped name disagrees with the
+  client, say so in the tooltip instead of repeating the wrong name.
+- **Object field renames in cryogen (one batch, one re-dump).** All traced
+  2026-07-29 against darkan's `ObjectType.kt` and its consumers; the objects
+  viewer already shows the corrected labels and meanings, so this is about the
+  dumped JSON catching up. Server-code blast radius checked and noted per item.
+  1. **`obstructsGround` → `forceDisplayDecoration`** (opcode 73). darkan's
+     name. `SceneGraph` lines 87/219 use it to draw a ground decoration even
+     when the player has ground decorations switched **off** — nothing to do
+     with obstructing ground. **No usages outside `ObjectDefinitions.java`**, so
+     this one is a free rename.
+  2. **`blocks` → `blocksProjectiles`** (opcodes 17/18). darkan's name, and it
+     resolves a genuine trap: the class also has a `blocks()` **method** that
+     returns something else entirely (`clipType != 0`, i.e. blocks *movement*),
+     and `Region.java` calls that method in four places. Renaming the field
+     leaves the method alone and kills the collision.
+  3. **`hasAnimation` → our own name, e.g. `forceNonStationary`** (opcode 98).
+     **Note this one differs from the other two:** darkan calls it
+     `hasAnimation` as well, so this is a coinage rather than adopting the
+     reference name, and it will read as a divergence to anyone diffing against
+     darkan later. It is worth it because the name is actively wrong — the idle
+     animation comes from opcodes 24/106, and opcode 98 is one of five
+     independent ways to fail `SceneGraph`'s stationary test. Cody signed this
+     off 2026-07-29. One usage to update: `WorldObject.java:72`, a debug string
+     that prints `animProbs` when the flag is set, which is itself built on the
+     wrong reading.
 - **REMINDER: set up proper production hosting when the editor is nearly feature-complete** (user asked 2026-07-14 to be reminded "much later once we get almost everything finished"). The app is backend-less, so production = `npm run build` + Caddy `file_server` on `dist/` (no Node process at runtime, nothing to restart — unlike the dev server, whose week-old instance developed 20-second event-loop stalls). Content-hashed assets can take the same `immutable` caching the `/icons/*` Caddy route already has.
 - **Label known params in the params tables** — items' param 644 and the NPC combat params are labeled; do the same for as many other param keys as we can identify, sourcing meanings from cryogen/darkan param usages (`ItemDefinitions`-style getters, server lookups). The `ParamsTable` `rowAnnotation` hook is the extension point.
 - **Open Cache button** shows `📁 folderName` — consider a cleaner label or breadcrumb.

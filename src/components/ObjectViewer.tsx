@@ -24,96 +24,101 @@ type Props = {
   cacheRoot?: FileSystemDirectoryHandle | null
 }
 
+// Field descriptions. The non-obvious ones are traced against
+// darkan-bot-refactor's ObjectType.kt (the authoritative decoder) and its
+// consumers in SceneGraph/MapLoader rather than guessed — where cryogen's
+// dumped name disagrees with what the client actually does, the tooltip says
+// so instead of quietly repeating the wrong name.
 const GENERAL_FIELDS: NumFieldDef[] = [
-  ['sizeX', 'Size X'],
-  ['sizeY', 'Size Y'],
-  ['clipType', 'Clip Type'],
-  ['interactable', 'Interactable'],
-  ['supportsItems', 'Supports Items'],
-  ['decorDisplacement', 'Decor Displacement'],
-  ['occludes', 'Occludes'],
-  ['accessBlockFlag', 'Access Block Flag'],
-  ['ambient', 'Ambient'],
-  ['contrast', 'Contrast'],
+  ['sizeX', 'Size X', 'Opcode 14. Footprint width in tiles. Swapped with Size Y when the placement rotation is odd.'],
+  ['sizeY', 'Size Y', 'Opcode 15. Footprint depth in tiles. Swapped with Size X when the placement rotation is odd.'],
+  ['clipType', 'Clip Type', "Opcodes 17 and 27 — darkan's blocksMovement. 2 (default) blocks walking, 1 blocks but still draws ground decoration under it, 0 doesn't block at all. Also the fallback that decides Supports Items."],
+  ['interactable', 'Interactable', "Opcode 19 — darkan's hasActions: does this object give a right-click menu? -1 means unset, and the client resolves it after decoding (an object with a real name or any option becomes 1)."],
+  ['supportsItems', 'Supports Items', 'Opcode 75. Whether dropped ground items sit ON TOP of this object instead of on the floor — tables, counters, altars. 1 = yes. Left unset it defaults from Clip Type (anything that blocks supports items).'],
+  ['decorDisplacement', 'Decor Displacement', 'Opcode 28, stored <<2, default 64. How far a wall DECORATION mounted on this wall is pushed out from it — the gap between a torch or a sign and the wall behind it.'],
+  ['occludes', 'Occludes', "Opcodes 23 and 103 — darkan's occlusionMode. Whether the object hides what's behind it for visibility culling. -1 = unset, 1 = occludes, 0 = never."],
+  ['accessBlockFlag', 'Access Block Flag', "Opcode 69, a per-side bitmask (cryogen's name — darkan's decoder reads the byte and throws it away, so its exact effect is unverified here)."],
+  ['ambient', 'Ambient', 'Opcode 29, signed. Brightens or darkens the whole model at bake time: base lightness is scaled by (64 + ambient)/128, so 0 is neutral and negatives darken.'],
+  ['contrast', 'Contrast', 'Opcode 39, stored x5 by the client at decode (cryogen keeps the raw byte). Flattens or sharpens the directional shading — the light term is divided by (850 + contrast*5)/768, so higher values mean less contrast.'],
 ]
 
 const FLAG_FIELDS: NumFieldDef[] = [
-  ['blocks', 'Blocks'],
-  ['obstructsGround', 'Obstructs Ground'],
-  ['ignoreClipOnAltRoute', 'Ignore Clip (Alt Route)'],
-  ['members', 'Members'],
-  ['delayShading', 'Delay Shading'],
-  ['inverted', 'Inverted'],
-  ['staticShadow', 'Static Shadow'],
-  ['dynamicShadow', 'Dynamic Shadow'],
-  ['replaySequence', 'Replay Sequence'],
-  ['requiresTextures', 'Requires Textures'],
-  ['hasAnimation', 'Has Animation'],
-  ['adjustMapSceneRotation', 'Map Scene Rotates'],
-  ['flipMapSprite', 'Flip Map Sprite'],
-  ['instrumentSoundEffect', 'Instrument Sound FX'],
-  ['instrumentAmbientSound', 'Instrument Ambient'],
-  ['transforms', 'Transforms'],
-  ['dynamicTint', 'Dynamic Tint'],
+  ['blocks', 'Blocks Projectiles', "Opcodes 17 and 18 — darkan's blocksProjectiles. Whether arrows and spells are stopped by this object, which is separate from whether you can walk through it (that's Clip Type)."],
+  ['obstructsGround', 'Force Show Decoration', "Opcode 73 — darkan calls this forceDisplayDecoration, and cryogen's \"obstructsGround\" is a misnomer. It forces a ground decoration to draw even when the player has ground decorations turned off (SceneGraph checks it alongside hasActions and blocksMovement)."],
+  ['ignoreClipOnAltRoute', 'Ignore Clip (Alt Route)', 'Opcode 74. Lets path-finding route through this object when taking an alternative route.'],
+  ['members', 'Members', 'Opcode 79 era flag — the object only appears on members worlds.'],
+  ['delayShading', 'Delay Shading', 'Opcode 22. Defers the object\'s shading pass; set on walls whose lighting is resolved later.'],
+  ['inverted', 'Inverted', 'Opcode 62. Mirrors the model. The client also forces this on for whole-corner wall shapes rotated past 3.'],
+  ['staticShadow', 'Static Shadow', 'Whether the object drops the cheap baked shadow onto the tile beneath it — always placed the same way, unlike the sun-following one.'],
+  ['dynamicShadow', 'Dynamic Shadow', 'Opcode 88 clears this. Whether the object casts the GPU sun-following shadow.'],
+  ['replaySequence', 'Replay Sequence', 'Opcode 89 clears this. Whether the idle animation loops; off means it plays once and stops.'],
+  ['requiresTextures', 'Requires Textures', 'Opcode 82. The object is only drawn when the client is running with textures enabled.'],
+  ['hasAnimation', 'Force Non-Stationary', "Opcode 98 — despite cryogen's name it does NOT mean \"this object has an idle animation\"; that comes from the Animations list below (opcodes 24/106), which the client reads separately. This is an extra way to force the object out of the static scene batch. SceneGraph treats a placement as stationary only when it has no sequence AND no animation list AND no Transform To list AND neither this flag nor Transforms — so any one of them is enough, and an object that already animates leaves this false."],
+  ['adjustMapSceneRotation', 'Map Scene Rotates', "Whether the object's map-scene icon turns with the placement rotation instead of staying upright."],
+  ['flipMapSprite', 'Flip Map Sprite', 'Mirrors the minimap sprite horizontally.'],
+  ['instrumentSoundEffect', 'Instrument Sound FX', 'The ambient sound is played through the MIDI instrument path rather than as a plain sound effect.'],
+  ['instrumentAmbientSound', 'Instrument Ambient', 'As above, for the looping ambient sound.'],
+  ['transforms', 'Transforms', 'Opcode 177. Like the flag above, a marker that keeps the object out of the static scene batch. The client also derives it at load time from an animation list or a Transform To list, so a stored true is only needed when the object has neither.'],
+  ['dynamicTint', 'Dynamic Tint', "Opcode 189. The object takes the current scene's tint (the Tint section below) instead of rendering with its own colours."],
 ]
 
 const TRANSFORM_FIELDS: NumFieldDef[] = [
-  ['scaleX', 'Scale X'],
-  ['scaleY', 'Scale Y'],
-  ['scaleZ', 'Scale Z'],
-  ['offsetX', 'Offset X'],
-  ['offsetY', 'Offset Y'],
-  ['offsetZ', 'Offset Z'],
+  ['scaleX', 'Scale X', 'Opcode 65, 128 = 1x. Model scale along X before placement.'],
+  ['scaleY', 'Scale Y', 'Opcode 66, 128 = 1x. Vertical model scale.'],
+  ['scaleZ', 'Scale Z', 'Opcode 67, 128 = 1x. Model scale along Z.'],
+  ['offsetX', 'Offset X', 'Opcode 70, stored <<2. Shifts the model off its tile centre along X.'],
+  ['offsetY', 'Offset Y', 'Opcode 71, stored <<2. Raises or lowers the model — RS Y is negative-up, so a negative value lifts it.'],
+  ['offsetZ', 'Offset Z', 'Opcode 72, stored <<2. Shifts the model off its tile centre along Z.'],
 ]
 
 const CONTOUR_FIELDS: NumFieldDef[] = [
-  ['groundContourType', 'Contour Type'],
-  ['groundContourModifier', 'Contour Modifier'],
-  ['groundDecorationHeight', 'Decoration Height'],
-  ['cullY', 'Cull Y'],
-  ['cullXZ', 'Cull XZ'],
+  ['groundContourType', 'Contour Type', 'How the model is bent to follow sloping ground (contourToGround). 0 = none, 1 = follow the tile heights, 2/3/4/5 = the variants set by opcodes 81/82-ish/94/96 — bridges, paths and ramps need one of these or they float and clip.'],
+  ['groundContourModifier', 'Contour Modifier', 'The parameter for the contour type above (a height, an angle or a target level depending on the type). The client ignores contouring entirely when this is 16384 or more.'],
+  ['groundDecorationHeight', 'Decoration Height', 'Height offset applied to ground-decoration placements of this object.'],
+  ['cullY', 'Cull Y', 'Opcode 170, default 960. Vertical extent used for visibility culling — how tall the client assumes this object is.'],
+  ['cullXZ', 'Cull XZ', 'Opcode 171, default 0. Horizontal extent used for visibility culling.'],
 ]
 
 const MAP_FIELDS: NumFieldDef[] = [
-  ['mapSpriteId', 'Map Sprite ID'],
-  ['mapSpriteRotation', 'Map Sprite Rotation'],
-  ['mapCategoryId', 'Map Category ID'],
+  ['mapSpriteId', 'Map Sprite ID', 'The minimap sprite drawn for this object (a config/map_sprites id), or -1 for none.'],
+  ['mapSpriteRotation', 'Map Sprite Rotation', 'Rotation applied to that minimap sprite.'],
+  ['mapCategoryId', 'Map Category ID', 'The world-map category this object belongs to (config/areas), which decides its world-map icon and label. -1 = none.'],
 ]
 
 const CURSOR_FIELDS: NumFieldDef[] = [
-  ['primaryCursorActionIndex', 'Primary Op'],
-  ['primaryCursor', 'Primary Cursor'],
-  ['secondaryCursorActionIndex', 'Secondary Op'],
-  ['secondaryCursor', 'Secondary Cursor'],
+  ['primaryCursorActionIndex', 'Primary Op', 'Which right-click option (0-4, matching the Options boxes) uses the primary cursor below. -1 = none.'],
+  ['primaryCursor', 'Primary Cursor', 'The config/cursors id shown when hovering for that option — the magnifying glass, the ladder, the door hand.'],
+  ['secondaryCursorActionIndex', 'Secondary Op', 'A second option index that gets its own cursor. -1 = none.'],
+  ['secondaryCursor', 'Secondary Cursor', 'The config/cursors id for that second option.'],
 ]
 
 const SOUND_FIELDS: NumFieldDef[] = [
-  ['ambientSoundId', 'Ambient Sound ID'],
-  ['ambientSoundVolume', 'Volume'],
-  ['ambientSoundHearDistance', 'Hear Distance'],
-  ['ambientSoundMaxHearDistance', 'Max Hear Distance'],
-  ['soundMinInterval', 'Min Interval'],
-  ['soundMaxInterval', 'Max Interval'],
-  ['ambientSoundMinDelay', 'Min Delay'],
-  ['ambientSoundMaxDelay', 'Max Delay'],
+  ['ambientSoundId', 'Ambient Sound ID', 'The looping sound this object emits into the world — a fire crackling, a wheel turning. -1 = silent.'],
+  ['ambientSoundVolume', 'Volume', 'Playback volume for that ambient sound.'],
+  ['ambientSoundHearDistance', 'Hear Distance', 'Tile radius within which the sound plays at full volume.'],
+  ['ambientSoundMaxHearDistance', 'Max Hear Distance', 'Tile radius at which the sound fades out entirely. (darkan flags its own decode of this one as unconfirmed.)'],
+  ['soundMinInterval', 'Min Interval', 'Shortest gap between repeats when the object picks randomly from its sound list.'],
+  ['soundMaxInterval', 'Max Interval', 'Longest gap between those repeats.'],
+  ['ambientSoundMinDelay', 'Min Delay', 'Shortest delay before the ambient loop restarts, default 256.'],
+  ['ambientSoundMaxDelay', 'Max Delay', 'Longest delay before it restarts, default 256.'],
 ]
 
 const TINT_FIELDS: NumFieldDef[] = [
-  ['tintHue', 'Hue'],
-  ['tintSaturation', 'Saturation'],
-  ['tintLightness', 'Lightness'],
-  ['tintOpacity', 'Opacity'],
+  ['tintHue', 'Hue', 'Scene tint applied to the whole model when Dynamic Tint is on — hue component.'],
+  ['tintSaturation', 'Saturation', 'Saturation component of that tint.'],
+  ['tintLightness', 'Lightness', 'Lightness component of that tint.'],
+  ['tintOpacity', 'Opacity', 'How strongly the tint is mixed in; 0 leaves the model untinted.'],
 ]
 
 const SHADOW_FIELDS: NumFieldDef[] = [
-  ['shadowOffsetX', 'Shadow Offset X'],
-  ['shadowOffsetY', 'Shadow Offset Y'],
-  ['shadowOffsetZ', 'Shadow Offset Z'],
+  ['shadowOffsetX', 'Shadow Offset X', 'Shifts the baked shadow off the model along X.'],
+  ['shadowOffsetY', 'Shadow Offset Y', 'Vertical shadow offset. A non-zero value also forces the client down its ground-contour path.'],
+  ['shadowOffsetZ', 'Shadow Offset Z', 'Shifts the baked shadow off the model along Z.'],
 ]
 
 const VAR_FIELDS: NumFieldDef[] = [
-  ['varp', 'Varp'],
-  ['varpBit', 'Varbit'],
+  ['varp', 'Varp', "Opcodes 77/92 — the player variable whose value picks which entry of Transform To is shown. -1 = none."],
+  ['varpBit', 'Varbit', 'Opcodes 77/92 — the varbit (a packed slice of a varp) used for the same job, and checked first. -1 = none.'],
 ]
 
 /** What the model preview modal is showing (null = closed). */
