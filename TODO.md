@@ -211,136 +211,30 @@ real cache, in rough risk order:
   **Lumbridge fountain (model 24520, texture 54, one face)**: check its basin
   floor doesn't now carry a smear of the fish sheet.
 
-### HANDOFF 2026-07-29 (overnight): particles + the brightness question
-
-State when Cody went to bed: flames looked right, but (a) smoke grey not black,
-(b) particles vanishing by distance/angle, (c) fire's ground-glow missing,
-(d) whole viewer brighter than the client, all regions. What was done overnight,
-each with the reasoning, so testing can be targeted:
-
-1. **Vanishing fixed (real cause found).** The chapel region holds **68 emitter
-   systems** (5×8 candles + 4×2 + 4×2 smoke + 2×6 fires) against a nearest-32
-   budget ranked from the CAMERA — orbiting away let the candles nearest the
-   camera evict the fire in the middle of the screen. Ranking is now against
-   the **orbit target** (what you look at), `MAX_ACTIVE` raised to 64. There is
-   no distance cut-off at all any more.
-2. **`adjustsLightIntensity` traced properly** (DirectX `Class54`, after a
-   wrong guess the day before — EDITOR.md corrected): it means "lit by the
-   scene ambient like geometry", NOT "lights its surroundings". Ported as
-   `uAmbient`. The chapel's ambient is ≈1.01 so the visual effect there is
-   small; it matters in dark regions.
-3. **The ground pool = HDR × bloom, and the numbers now line up.** Material
-   1585's hdr op is a constant fill 401 → multiplier ≈**4.03**; with the
-   bloom gate added last round the flame renders ~4× overbright and the bloom
-   composite should spread it into the pool. **Cody never saw a build with the
-   gate + this multiplier active** — retest bloom on/off before assuming the
-   pool is still missing.
-4. **`premultiplyAlpha: 'none'` added to the particle texture load** — the
-   project-wide bitmap gotcha (see memory/ImageBitmap note); without it every
-   soft-alpha sprite has its rgb darkened by its own alpha at upload.
-5. **Smoke: capacity was already fixed** (per-producer rate×lifetime; the plume
-   wants ~2,600, one 512 cap starved it). If it is STILL grey after this build,
-   the remaining suspect is not the particles: it is (d).
-
-### FOLLOW-UP 2026-07-28: (b) fixed earlier; (a)/(c) were BILLBOARDS — TEST
-
-Cody retested with bloom on: smoke still grey, no light behind the fire, scene
-still too bright. Tracing (c) found the real mechanism and it isn't bloom at
-all: **the glow behind a fire's flames and its dense smoke column are billboard
-sprites** — camera-facing quads pinned to model faces (model 58392: 4 glow
-sprites ~500 units wide + 12 near-black smoke sprites stacked ~1.6 tiles high,
-next to its 6 particle emitters) — which neither 3D scene rendered at all. Full
-trace in `EDITOR.md` ("Billboards on loc models"); the overnight item 3 above
-("the ground pool = HDR × bloom") is superseded by it.
-
-Done (typecheck/lint/build pass, untested in a browser):
-
-- **`sceneBillboards.ts`** renders them in the map scene and the cutscene
-  player, per the DX path: quad at the host-face centroid pulled `distance`
-  units toward the camera, 2×size2d wide, tinted by the raw face colour with
-  alpha `255 − faceAlpha`, material texture on top, alpha-blended, z-write off.
-  `stationary` types draw only while Bloom is off (that is what the flag
-  means); `hasUid` host faces are now skipped by both scene mesh builders
-  (`billboardHiddenFaces`), matching the client dropping them from the mesh.
-- **Check:** the fire by the God Wars chapel shows a warm glow sprite behind
-  its flames and a tall dark smoke column; candles/torches around the chapel
-  for their own sprites; no stray coloured triangles where fires stand (the
-  hidden host faces); plane toggles still hide a fire wholly; Bloom Off makes
-  any `stationary` stand-in sprites appear, not disappear.
-- **Billboard ANIMATION is ported too (2026-07-28, round 2).** Cody's first
-  test showed the fire buried under a giant static cloud: at rest pose all 12
-  smoke sprites draw at once at full base alpha. Decoding animation 12409
-  proved the client look depends on the animation — type 5 fades most puffs to
-  INVISIBLE at any instant (verified offline: 2-4 of 6 per cluster at alpha 0
-  per frame), type 10 breathes each group 0.5×-1.66×, type 9 rolls them, and
-  type 1 raises the carrier faces. `skeletalAnimation.ts` now handles 8/9/10
-  (group id = the attachment's `depth`), and animated locs' sprites are driven
-  per posed frame through the animated-loc records (`addAnimated`), hidden
-  until their first pose. Check: the smoke is now sparse wisps that rise and
-  flicker; the glow pulses; nothing lingers after deleting a fire placement or
-  painting terrain under it (the rebuild/removal paths call
-  `billboards.remove()`).
-- **Not ported:** any HDR on billboard materials (the fire's two are
-  `hdr: false`); frame TWEENING (we step 5-tick keyframes, the client lerps —
-  smoke moves in 100ms steps); the roll direction sign is unverified (pick by
-  eye against the client if it reads wrong); the cutscene player never
-  animates locs, so animated-loc billboards stay hidden there (static-loc
-  torches still show).
-- **Round 3 (2026-07-28): order + colour space.** Cody's second test: the glow
-  drew as a near-opaque ball OVER the particles (in-game it sits faintly
-  behind), and the smoke was still too much. Two causes, both fixed:
-  (1) `RA()` is z-write (D3D render state 14), not blending — billboards draw
-  in the OBJECT pass with their host model and the client draws particles
-  LATER, over them; ours shared renderOrder 2 and the glow's 100-unit
-  camera-pull made three sort it nearer and draw it LAST. Billboards are now
-  renderOrder 2, particles 3. (2) The billboard/particle tints are sRGB
-  palette values written into our LINEAR buffer, so the OutputPass re-encode
-  brightened them (~#32312e smoke displayed ~2.4× lighter, the glow washed out
-  pale); both shaders now linearize the tint (`pow 2.2`). NOTE: the rest of
-  the scene still writes raw — that global gap is (d); these two passes are
-  now colour-correct in isolation, so if the fire looks right but the ground
-  behind it is still bright, that is (d), not the fire.
-- **Round 4 (2026-07-28): fog on sprites; footprint MEASURED as matching.**
-  Cody's third test: "billboards still a bit much, almost too large."
-  Cross-section profiles of his two captures (warmth through the fire centre,
-  GIF-frame-averaged) came out nearly identical — horizontal FWHM 47% in-game
-  vs 48% ours, vertical 36% vs 29%, peaks 225 vs 198 — so the quad SIZE math
-  (full width 2×size2d) is right; verified the client's particle quads too
-  (Class54 corners = pos ± (right±up)·(size>>12) → full width 2s, matches our
-  gl_PointSize). What WAS missing: the client's "Particle" effect is
-  fixed-function (the shader dump is just a 4-entry param table), so D3D
-  vertex FOG applies to billboards and particles exactly as to geometry, and
-  ours ignored scene.fog — a distant glow rendered full-vividness instead of
-  muted toward the backdrop. Both runtimes now take `setFog` (wired to
-  applyFog in the map viewer, live with the draw-distance slider, and to the
-  cutscene's fixed fog), fading the FINAL colour toward the raw fog colour so
-  fully-fogged sprites converge to the same backdrop meshes do. If the glow
-  still reads strong CLOSE UP (fog ≈ 0 there), the remaining suspects are
-  flame prominence (no tweening, camera angle foreshortening the flame column
-  against a camera-facing glow) — compare at the client's own camera angle
-  before touching the traced sizes.
-- If the smoke reads blacker but the scene behind it is still washed out, the
-  remainder is (d) below, as suspected.
-
-**(d) is the real morning item — the global brightness gap.** `docs/lighting.md`
-documents it as ONE interlocking job (env sun runs to ~2.75×, compressed by the
-client in a post pass, gated by "lighting detail"), with TWO reverted attempts
-and an explicit lesson: any change here shifts the whole scene and must land
-with a same-commit calibration against a live-client screenshot. That
-calibration needs Cody at the client, so it was deliberately NOT attempted
-overnight. The dark ground behind the smoke in his screenshot is this issue;
-the smoke alpha-blends against whatever is behind it, so it can never look as
-black as the client's while the ground behind it is too bright.
-
-- **VERIFY the scene particle runtime (2026-07-28).** `sceneParticles.ts` runs
-  the client's emitter sim per loc emitter face in both 3D scenes; fires, torches
-  and waterfalls should now burn (object 61761 by the God Wars chapel is the
-  test case). Untested in a browser. Worth checking: flames sit ON their loc
-  rather than under/beside it (the placement matrix and the y/z negation),
-  particle SIZE looks right at different camera distances (point size is a world
-  diameter converted to pixels), the frame rate holds in a dense region (budget:
-  192 particles each, nearest 48 emitters, 40-tile cull), and hiding a plane
-  hides its fires. Producers with no material fall back to a soft dot.
+- **VERIFY the scene particle runtime.** `sceneParticles.ts` runs the client's
+  emitter sim per loc emitter face in both 3D scenes; fires, torches and
+  waterfalls burn (object 61761 by the God Wars chapel is the test case). Worth
+  checking: flames sit ON their loc rather than under/beside it (the placement
+  matrix and the y/z negation), particle SIZE looks right at different camera
+  distances (point size is a world diameter converted to pixels), the frame rate
+  holds in a dense region, and hiding a plane hides its fires. Producers with no
+  material fall back to a soft dot.
+  - **Current budget (corrected 2026-07-29 — the old note here said "192 each,
+    nearest 48, 40-tile cull", none of which is still true).** Per-emitter ring
+    = `maximumParticleRate × maximumLifetime`, clamped to **[128, 4096]** — the
+    chapel flames settle near 500, the smoke plume near 2,600, and the clamp is
+    a memory guard, not a look control. **`MAX_ACTIVE = 64`** emitters simulate
+    at once, ranked by distance to the **orbit target** (not the camera), with
+    **no distance cut-off**; losers are frozen, not reset, so walking back finds
+    a fire still burning. Per-system geometry sets `frustumCulled = false`.
+  - **Suspect for any "particles vanish / wrong fire is live" report:** that
+    ranking. `step(dt, camera, focus?)` falls back to `camera.position` when no
+    focus is passed, and only `MapSceneViewer` passes one (`controls.target`,
+    deliberately dropped in POV mode where the camera IS the viewpoint).
+    **`CutscenePlayerModal` passes no focus at all** (`r.particles?.step(dt,
+    r.camera)`), so cutscenes still rank from the camera — the exact eviction
+    that made the map scene's chapel fire cut out when the camera orbited away,
+    and a cutscene camera is routinely far from its subject.
 
 ## Cutscenes
 
