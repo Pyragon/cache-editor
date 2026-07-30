@@ -1600,9 +1600,9 @@ function App() {
                 : clanVarSettingsContent != null
                 ? <ClanVarViewer data={clanVarSettingsContent} title="Clan Setting" onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenVar={(id) => handleNavigateToItem('config_clan_var_settings', id)} />
                 : underlayContent != null
-                ? <UnderlayViewer data={underlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <UnderlayViewer data={underlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} rootHandle={cacheHandle ?? undefined} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : overlayContent != null
-                ? <OverlayViewer data={overlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <OverlayViewer data={overlayContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} rootHandle={cacheHandle ?? undefined} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : gameTipContent != null
                 ? <GameTipViewer data={gameTipContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onOpenTip={(id) => handleNavigateToItem('game_tips', id)} />
                 : interfaceContent != null

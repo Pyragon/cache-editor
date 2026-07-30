@@ -39,7 +39,10 @@
   font-family: inherit;
 }
 
-.def-toggle-field {
+/* Only when the whole cell IS the label — a toggle field carrying a "?" help
+   button is a plain div whose switch has its own label, so a cell-wide pointer
+   there would advertise a click that does nothing. */
+label.def-toggle-field {
   cursor: pointer;
 }
 

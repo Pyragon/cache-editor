@@ -296,6 +296,68 @@
   text-overflow: ellipsis;
 }
 
+/* A field that carries a "?" explanation puts the label and the toggle on one
+   row; the label text keeps the ellipsis behaviour the plain label has. */
+.item-field-label.has-help {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.field-label-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-help-btn {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.field-help-btn:hover {
+  color: var(--text);
+  border-color: var(--electric-blue-bright);
+}
+
+.field-help-btn.open {
+  background: var(--electric-blue-bright);
+  border-color: var(--electric-blue-bright);
+  color: #06121f;
+}
+
+.field-help-text {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: normal;
+}
+
+.field-help-text code {
+  font-size: 10.5px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+
 .item-field-input {
   font-size: 15px;
   font-weight: 600;

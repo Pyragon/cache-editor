@@ -112,7 +112,86 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
   )
 }
 
-export type NumFieldDef = [key: string, label: string]
+// A 24-bit colour as `#RRGGBB`. The cache stores these as plain integers, and
+// nobody reads 12047514 as a colour — hex is what the value actually means.
+// Free text while focused (same reason as NumberInput: a controlled field that
+// re-canonicalises every keystroke can't be edited), committing only on a full
+// six digits, so half-typed values can never reach the draft.
+export function HexColorInput({ value, onChange, className = 'hex-input', disabled, title }: {
+  value: number
+  onChange: (value: number) => void
+  className?: string
+  disabled?: boolean
+  title?: string
+}) {
+  const [text, setText] = useState<string | null>(null)
+  const canonical = `#${(value & 0xffffff).toString(16).padStart(6, '0').toUpperCase()}`
+
+  return (
+    <input
+      className={className}
+      type="text"
+      spellCheck={false}
+      autoComplete="off"
+      disabled={disabled}
+      title={title}
+      value={text ?? canonical}
+      onFocus={() => setText(canonical)}
+      onBlur={() => setText(null)}
+      onChange={(e) => {
+        const raw = e.target.value.trim()
+        if (!/^#?[0-9a-fA-F]{0,6}$/.test(raw)) return // reject non-hex keystrokes
+        const digits = raw.replace('#', '')
+        setText(`#${digits.toUpperCase()}`)
+        if (digits.length === 6) onChange(parseInt(digits, 16))
+      }}
+    />
+  )
+}
+
+export type NumFieldDef = [key: string, label: string, help?: ReactNode]
+
+// A field's "?" disclosure. Definition pages carry a lot of hard-won meaning
+// per field (which opcode wrote it, what the client actually does with it,
+// which values are sentinels) and a `title` tooltip is too small a surface for
+// it — this keeps the grid scannable but puts the explanation one click away.
+export function HelpToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      className={`field-help-btn${open ? ' open' : ''}`}
+      title={open ? 'Hide explanation' : 'What does this field do?'}
+      aria-expanded={open}
+      onClick={(e) => { e.preventDefault(); e.stopPropagation(); onToggle() }}
+    >
+      ?
+    </button>
+  )
+}
+
+/** One labelled field cell with an optional "?" explanation. Renders as a
+ *  `<label>` (so clicking the label focuses the input) unless it holds
+ *  something interactive — a help toggle or an extra — because nested
+ *  interactive elements fight a label's click-to-focus. */
+export function Field({ label, help, children, className }: {
+  label: string
+  help?: ReactNode
+  children?: ReactNode
+  className?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const Wrapper = help != null ? 'div' : 'label'
+  return (
+    <Wrapper className={`item-field${className ? ` ${className}` : ''}`}>
+      <span className={`item-field-label${help != null ? ' has-help' : ''}`}>
+        <span className="field-label-text" title={label}>{label}</span>
+        {help != null && <HelpToggle open={open} onToggle={() => setOpen((o) => !o)} />}
+      </span>
+      {children}
+      {open && help != null && <div className="field-help-text">{help}</div>}
+    </Wrapper>
+  )
+}
 
 // Clickable sorting header for read-only tables: first click sorts ascending,
 // clicking the active column flips direction. (Editable tables deliberately
@@ -161,16 +240,21 @@ export function NumGrid({ fields, values, onChange, links, fieldExtra }: {
       inside a label would fight its click-to-focus behaviour. */
   fieldExtra?: Record<string, ReactNode | undefined>
 }) {
+  const [openHelp, setOpenHelp] = useState<string | null>(null)
   return (
     <div className="item-grid">
-      {fields.map(([key, label]) => {
+      {fields.map(([key, label, help]) => {
         const value = Number(values[key] ?? 0)
         const link = links?.[key]
         const extra = fieldExtra?.[key]
-        const Wrapper = extra != null ? 'div' : 'label'
+        const helpOpen = openHelp === key
+        const Wrapper = extra != null || help != null ? 'div' : 'label'
         return (
           <Wrapper key={key} className="item-field">
-            <span className={`item-field-label${link ? ' field-link-label' : ''}`} title={label}>
+            <span
+              className={`item-field-label${link ? ' field-link-label' : ''}${help != null ? ' has-help' : ''}`}
+              title={label}
+            >
               {link ? (
                 <>
                   <span>{label}</span>
@@ -185,12 +269,18 @@ export function NumGrid({ fields, values, onChange, links, fieldExtra }: {
                     </button>
                   )}
                 </>
+              ) : help != null ? (
+                <span className="field-label-text">{label}</span>
               ) : (
                 label
+              )}
+              {help != null && (
+                <HelpToggle open={helpOpen} onToggle={() => setOpenHelp(helpOpen ? null : key)} />
               )}
             </span>
             <NumberInput value={value} onChange={(v) => onChange(key, v)} />
             {extra}
+            {helpOpen && help != null && <div className="field-help-text">{help}</div>}
           </Wrapper>
         )
       })}
@@ -203,21 +293,38 @@ export function ToggleGrid({ fields, values, onChange }: {
   values: Record<string, unknown>
   onChange: (key: string, value: boolean) => void
 }) {
+  const [openHelp, setOpenHelp] = useState<string | null>(null)
   return (
     <div className="item-grid">
-      {fields.map(([key, label]) => (
-        <label key={key} className="item-field def-toggle-field">
-          <span className="item-field-label" title={label}>{label}</span>
-          <span className="sprite-toggle">
-            <input
-              type="checkbox"
-              checked={Boolean(values[key])}
-              onChange={(e) => onChange(key, e.target.checked)}
-            />
-            <span className="sprite-toggle-track" />
-          </span>
-        </label>
-      ))}
+      {fields.map(([key, label, help]) => {
+        const helpOpen = openHelp === key
+        // The checkbox itself is `display: none` — something must be a <label>
+        // for a click to reach it. Without help that's the whole cell (the
+        // long-standing behaviour); with help the cell has to be a <div>,
+        // because a help button nested in a label would toggle the flag, so
+        // the switch carries its own label instead.
+        const Wrapper = help != null ? 'div' : 'label'
+        const ToggleTag = help != null ? 'label' : 'span'
+        return (
+          <Wrapper key={key} className="item-field def-toggle-field">
+            <span className={`item-field-label${help != null ? ' has-help' : ''}`} title={label}>
+              {help != null ? <span className="field-label-text">{label}</span> : label}
+              {help != null && (
+                <HelpToggle open={helpOpen} onToggle={() => setOpenHelp(helpOpen ? null : key)} />
+              )}
+            </span>
+            <ToggleTag className="sprite-toggle">
+              <input
+                type="checkbox"
+                checked={Boolean(values[key])}
+                onChange={(e) => onChange(key, e.target.checked)}
+              />
+              <span className="sprite-toggle-track" />
+            </ToggleTag>
+            {helpOpen && help != null && <div className="field-help-text">{help}</div>}
+          </Wrapper>
+        )
+      })}
     </div>
   )
 }

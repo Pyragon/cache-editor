@@ -48,6 +48,20 @@ Open work only — completed passes live in git history and README.
 
 ## Maps
 
+- **The ground `shadowed` flag isn't honoured by the terrain builder.** Traced
+  2026-07-29: underlay opcode 4 / overlay opcode 10 mean "this tile RECEIVES the
+  baked wall and scenery shadows" — `MapLoader` ORs the flag into a per-tile
+  `hasShadows`, `GroundGL` stores it as `CONTAINS_SHADOW`, and `createShadowAt`
+  bails without it. Our `FluJson`/`FloJson` don't carry the field at all, so
+  `buildTerrainMesh` shadows every tile equally and materials that should stay
+  evenly lit under a wall don't. Fix = carry `shadowed` on both config types and
+  zero the shadow contribution per tile in `emitTile`. Watch the client's two
+  guards (full note in `EDITOR.md`): a plain tile's shape is remapped to 12
+  before the underlay branch tests `pathShape != 0`, and the overlay branch also
+  needs a real tile colour. The underlay/overlay preview already gates its own
+  stand-in shadow on the flag, so the editor claims the behaviour the renderer
+  doesn't yet have.
+
 ### TEST: the region environment tab (2026-07-28)
 
 The 3D view's **Env** tab edits the environment record — the tail of the

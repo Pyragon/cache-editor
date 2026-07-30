@@ -1,0 +1,126 @@
+/* Long-form ground-pipeline explainer (underlay / overlay editors). */
+
+.ground-explainer {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #1a1d26;
+  color: var(--text);
+  width: min(760px, 92vw);
+  max-width: 760px;
+  max-height: 86vh;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+.ground-explainer::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.ground-explainer-body {
+  display: flex;
+  flex-direction: column;
+  max-height: 86vh;
+}
+
+.ground-explainer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ground-explainer-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ground-explainer-close {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ground-explainer-close:hover {
+  color: var(--text);
+  border-color: var(--electric-blue-bright);
+}
+
+.ground-explainer-scroll {
+  overflow-y: auto;
+  padding: 4px 20px 8px;
+}
+
+.ground-explainer-scroll section {
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ground-explainer-scroll section:last-child {
+  border-bottom: none;
+}
+
+/* The section matching the page you opened this from. */
+.ground-explainer-scroll section.ground-explainer-focus {
+  margin: 14px -12px;
+  padding: 14px 12px;
+  border: 1px solid rgba(90, 170, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(90, 170, 255, 0.06);
+}
+
+.ground-explainer-scroll h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--electric-blue-bright);
+}
+
+.ground-explainer-scroll p,
+.ground-explainer-scroll li {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.ground-explainer-scroll p:last-child,
+.ground-explainer-scroll li:last-child {
+  margin-bottom: 0;
+}
+
+.ground-explainer-scroll ul {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+
+.ground-explainer-scroll strong {
+  color: var(--text);
+}
+
+.ground-explainer-scroll code {
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+
+.ground-explainer-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+}

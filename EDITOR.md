@@ -82,9 +82,53 @@ Per-tile map data — the `maps` entry: `overlayIds`, `underlayIds`, and
 0-12ish, rotation 0-3.
 
 **Already editable.** `OverlayViewer` and `UnderlayViewer` expose every field
-above, and both save. Nothing new is needed at the *definition* level.
+above, and both save.
 
-**Not surfaced.** The gap is entirely **per-tile**, in the 3D map editor:
+**Explained and previewed (2026-07-29).** Both pages were rebuilt from bare
+field grids into teaching pages, because none of the above is guessable from a
+form:
+
+- **`GroundPreview.tsx`** — a live 3D preview that synthesises a slab of terrain
+  and runs it through the map view's own `buildTerrainMesh`, with the draft def
+  swapped into the `SceneConfigs`. It is deliberately *not* a reimplementation:
+  whatever the map draws, the preview draws, so it cannot drift. The subject
+  material sits in the middle of a field of a chosen neighbour, which is the
+  only way the corner blur is visible at all. Controls: neighbour material,
+  overlay shape + rotation, field size, sloped ground.
+- **`GroundExplainer.tsx`** — the long-form "how ground works" modal behind the
+  header button (two layers, the neighbour blur, shape/rotation, the master
+  switch, slot packing, `secondaryRgb`'s three jobs, textures, the two flags,
+  water).
+- **Per-field `?` help** via `defFields`' `NumFieldDef` third element and the
+  new `Field`/`HelpToggle` exports — opcode, default, sentinel and gotcha per
+  field.
+- **`GroundUsagePanel.tsx` + `loaders/groundUsage.ts`** — "where in the world is
+  this used": an on-demand scan of every region dump counting tiles per
+  definition, cached in IndexedDB. It reads only the head slice of each region
+  JSON (the two channels sit at the top, ~44 KB of ~340 KB) and tallies straight
+  off the atob'd string. Totals are world-wide; the per-region list is capped at
+  `TOP_REGIONS` and the UI says so.
+
+**Two flags our renderer does not implement** (traced 2026-07-29 —
+`MapLoader.addUnderlayTiles`/`addOverlayTiles`/`setupCulling`, `GroundGL:875`):
+
+- **`shadowed`** (underlay opcode 4, overlay opcode 10) means "this tile
+  RECEIVES the baked wall/scenery shadows". The map builder ORs it into a
+  per-tile `hasShadows`, which `GroundGL` stores as `CONTAINS_SHADOW`;
+  `createShadowAt` returns early without it. Our `FluJson`/`FloJson` don't even
+  carry the field, so `buildTerrainMesh` shadows every tile equally. The preview
+  gates its own stand-in shadow band on the flag, which is faithful for a
+  single-material patch but is not the same thing as implementing it. Note the
+  client's two guards: the underlay branch needs `pathShape != 0`, and a plain
+  tile has its shape remapped to 12 first (`Class329`/`MapLoader:564`), so plain
+  ground *does* qualify; the overlay branch needs `pathShape != 12` and a real
+  tile colour.
+- **`occlude`** (opcode 5 on both) is not visual at all — on planes above ground,
+  a flat occluding tile gets `COMPLETELY_FLAT` so the level below can be skipped.
+  We do no plane-below culling, so the flag is inert here. Both pages say so
+  rather than implying the toggle does something.
+
+**Not surfaced.** The remaining gap is **per-tile**, in the 3D map editor:
 
 - No tile inspector. Selecting a ground tile should show its overlay id,
   underlay id, shape and rotation — and, because it is genuinely hard to
@@ -94,9 +138,10 @@ above, and both save. Nothing new is needed at the *definition* level.
   answer to "how could I have fixed that hard arc by hand" — the arc is shape
   10, and being able to try shape 9 or a different rotation on one tile is the
   most useful single thing this section could gain.
-- The blend is rebuilt wholesale. A live preview while dragging a slot or
-  toggling `blendsWithUnderlay` would need the terrain rebuild to be
-  incremental; today it isn't.
+- In the **map view** the blend is still rebuilt wholesale, so editing a
+  definition there can't preview live — that would need an incremental terrain
+  rebuild. (The definition pages sidestep this: `GroundPreview` builds a small
+  synthetic slab instead, which is cheap enough to rebuild on every keystroke.)
 
 **Gotchas.**
 

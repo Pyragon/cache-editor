@@ -1,11 +1,19 @@
+/* Swatch columns line up on their tops: each is a 48×32 box with its caption
+   underneath, so "uploaded" and "in-game" read as a matched pair. */
 .underlay-color-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
-.underlay-swatch-label,
-.underlay-swatch-static {
+/* A colour cell carries two swatches, a hex field and the sentinel pill — far
+   more than the grid's ~175px track. Give it two tracks so it doesn't spill. */
+.ground-color-field {
+  grid-column: span 2;
+}
+
+.underlay-swatch-label {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -13,6 +21,7 @@
 }
 
 .underlay-color-input {
+  display: block;
   width: 48px;
   height: 32px;
   padding: 0;
@@ -22,11 +31,91 @@
   cursor: pointer;
 }
 
+/* Chromium draws the colour area inset inside the control with its own padding
+   and border, which made the "uploaded" swatch a small square floating in a box
+   next to the solid "in-game" one. Strip both so the two read as a matched
+   pair. */
+.underlay-color-input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.underlay-color-input::-webkit-color-swatch {
+  border: none;
+  border-radius: 5px;
+}
+
+.underlay-color-input::-moz-color-swatch {
+  border: none;
+  border-radius: 5px;
+}
+
 .underlay-swatch-static {
+  display: block;
   width: 48px;
   height: 32px;
   border-radius: 6px;
   border: 1px solid var(--border);
+}
+
+/* The row now aligns to the top for the swatch columns, so the overlay pages'
+   colour/no-colour pill needs nudging down to sit level with the swatches
+   rather than with their captions. */
+.underlay-color-row .badge-toggle {
+  align-self: flex-start;
+  margin-top: 7px;
+}
+
+/* "No colour" — show the slot rather than collapsing the column. */
+.underlay-swatch-empty {
+  border-style: dashed;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.05) 0 4px,
+    transparent 4px 8px
+  );
+}
+
+/* The raw value, styled like the app's other bordered inputs and kept narrow —
+   it holds a 24-bit integer, not a sentence. */
+.underlay-value-field {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 118px;
+  flex: none;
+}
+
+.underlay-color-row .underlay-rgb-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.underlay-color-row .underlay-rgb-input:focus {
+  border-color: var(--electric-blue-bright);
+  background: rgba(0, 102, 255, 0.08);
+}
+
+.underlay-color-row .underlay-rgb-input:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Sitting straight in the row (the water colour) rather than in a captioned
+   column, it has to claim its own width — a flex item with width:100% would
+   otherwise resolve against the whole row. */
+.underlay-color-row > .underlay-rgb-input {
+  flex: none;
+  width: 118px;
 }
 
 .underlay-swatch-caption {
@@ -34,4 +123,75 @@
   text-transform: uppercase;
   letter-spacing: 0.4px;
   color: var(--text-dim);
+}
+
+/* --- ground editors: explanation + preview furniture --------------------- */
+
+/* Pushes the explain button to the right of the id badges. */
+.item-viewer .item-header:has(.ground-explain-btn) {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ground-explain-btn {
+  flex: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.ground-explain-btn:hover {
+  color: var(--text);
+  border-color: var(--electric-blue-bright);
+  background: rgba(90, 170, 255, 0.1);
+}
+
+.ground-intro {
+  max-width: 900px;
+  margin: 10px 0 4px;
+  line-height: 1.6;
+}
+
+.ground-warning {
+  max-width: 900px;
+  margin: 10px 0 4px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 170, 60, 0.4);
+  background: rgba(255, 170, 60, 0.08);
+  color: #ffcf95;
+  line-height: 1.6;
+}
+
+.ground-texture-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ground-texture-row .num-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ground-derived {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.ground-derived code {
+  font-size: 10px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
 }

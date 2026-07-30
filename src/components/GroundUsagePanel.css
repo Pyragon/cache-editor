@@ -1,0 +1,48 @@
+/* World usage index for the ground-material editors. */
+
+.ground-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 900px;
+}
+
+.ground-usage-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ground-usage-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ground-usage-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.ground-usage-progress-fill {
+  height: 100%;
+  background: var(--electric-blue-bright);
+  transition: width 0.2s linear;
+}
+
+.ground-usage-error {
+  color: #ff9c9c;
+}
+
+/* The list can be long — keep it scrollable inside the section instead of
+   pushing the save bar off the page. */
+.ground-usage-wrap {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.ground-usage-coords {
+  color: var(--text-dim);
+}
