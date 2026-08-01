@@ -4,6 +4,7 @@ import type { CutsceneDef } from '../loaders/cutscenes'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getLoader } from '../loaders'
 import { SIZE } from '../loaders/maps'
+import type { MapTerrain } from '../loaders/maps'
 import type { ModelData } from '../loaders/models'
 import { applyPoseToMesh, buildTexturedModelMesh } from './modelMesh'
 import type { TexturedModelMesh } from './modelMesh'
@@ -19,7 +20,8 @@ import { applyAnimationFrame } from '../loaders/skeletalAnimation'
 import type { PosedVertices } from '../loaders/skeletalAnimation'
 import {
   DEFAULT_SUN, LocAssets, SceneMosaic, averageHeight, blurShadowGrid, buildAnimatedLocMesh, buildLightGrid,
-  buildLocsMesh, buildSkyboxMesh, buildTerrainMesh, loadRegionEnvironment, loadSceneConfigs, sunTintFor,
+  buildLocsMesh, buildSkyboxMesh, buildTerrainMesh, isBridgeTile, loadRegionEnvironment, loadSceneConfigs,
+  sunTintFor,
 } from './mapScene'
 import type { RegionEnvironment, SunConfig } from './mapScene'
 import { ClientBloomPass } from './clientBloom'
@@ -348,6 +350,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     scene: THREE.Scene
     camera: THREE.PerspectiveCamera
     heightsByCell: Map<string, Int32Array[]>
+    /** the same cells' terrain, for the bridge-flag lookup in groundY */
+    terrainByCell: Map<string, MapTerrain>
     entities: EntityRt[]
     objects: (ObjectRt | null)[]
     gfx: GfxRt[]
@@ -376,6 +380,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       // fovScale) with fovScale clamped to 334 → vertical FOV = 2·atan(0.25).
       camera: new THREE.PerspectiveCamera(2 * Math.atan(0.25) * 180 / Math.PI, 4 / 3, 50, 60000),
       heightsByCell: new Map(),
+      terrainByCell: new Map(),
       entities: [],
       objects: [],
       gfx: [],
@@ -474,9 +479,26 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     const r = rt.current
     const rx = Math.min(Math.max(fineX >> 9 >> 6, 0), 1)
     const ry = Math.min(Math.max(fineY >> 9 >> 6, 0), 1)
-    const heights = r.heightsByCell.get(`${rx},${ry}`)
+    const key = `${rx},${ry}`
+    const heights = r.heightsByCell.get(key)
     if (!heights) return 0
-    const h = averageHeight(heights[plane], fineX - rx * REGION_UNITS, fineY - ry * REGION_UNITS)
+    const localX = fineX - rx * REGION_UNITS
+    const localY = fineY - ry * REGION_UNITS
+    // Bridge columns: a tile flagged 0x2 on DECODED plane 1 puts its deck at
+    // render plane 0, and buildTerrainMesh already draws it that way — so the
+    // ground you stand on there is one decoded plane up from the plane the
+    // action names. The client does exactly this when placing an entity:
+    // `collisionPlane + 1` if SettingsBits.areRoofsHidden (NpcEntity.move),
+    // which is the same flag read on the same plane. Without it every entity
+    // on a bridge tile stands on whatever is UNDER the deck — cutscene 7's
+    // dancers were buried to the neck in the carpet they dance on.
+    const terrain = r.terrainByCell.get(key)
+    const tileX = localX >> 9
+    const tileY = localY >> 9
+    const onBridge = terrain != null
+      && tileX >= 0 && tileY >= 0 && tileX < SIZE && tileY < SIZE
+      && isBridgeTile(terrain, tileX, tileY)
+    const h = averageHeight(heights[onBridge ? Math.min(plane + 1, 3) : plane], localX, localY)
     return -h
   }
 
@@ -1167,6 +1189,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     // transport, and whatever the last cutscene was still playing, since the
     // audio outlives this effect, being keyed only on the cache handle.
     r.heightsByCell.clear()
+    r.terrainByCell.clear()
     audioRef.current?.stopAll()
     setCycle(0)
     setReady(false)
@@ -1224,6 +1247,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
           if (cancelled) return
           const { heights, lights } = mosaic.slicesFor(cell.rx, cell.ry)
           r.heightsByCell.set(`${cell.rx},${cell.ry}`, heights)
+          r.terrainByCell.set(`${cell.rx},${cell.ry}`, cell.terrain)
           const palettes = [0, 1, 2, 3].map((p) => mosaic.paletteFor(cell.rx, cell.ry, p))
           const overlayCorners = [0, 1, 2, 3].map((p) => mosaic.overlayCornerFor(cell.rx, cell.ry, p))
           const underlayCorners = [0, 1, 2, 3].map((p) => mosaic.underlayCornerFor(cell.rx, cell.ry, p))
