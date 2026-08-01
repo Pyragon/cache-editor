@@ -150,6 +150,7 @@ const DONE_ENTRIES = new Set([
   'config_varc', 'config_varc_string', 'config_clan_var', 'config_clan_var_settings', 'config_quests', 'game_tips',
   'config_bas', 'npcs', 'cs2', 'shaders', 'config_identikit',
   'config_underlays', 'config_overlays', 'objects',
+  'spot_animations', 'music', 'music2',
 ])
 
 function unavailableReason(name: string): string {

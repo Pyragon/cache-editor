@@ -4,9 +4,7 @@ Open work only — completed passes live in git history and README.
 
 ## Spot Animations ("gfx")
 
-- **`scaleXZ`/`scaleY` aren't applied in the preview** — the model renders at its native size regardless of the def's scale fields. Cosmetic only, straightforward to add (a uniform scale on the posed geometry before handing it to `ModelViewer`).
 - **Ground-contour blending isn't previewed** — needs real terrain height data the model previewer doesn't have; same deferral as `animations`.
-- **Not verified in a live client or browser session** — no headless-browser tool available here, and no way to compare the transform math's output against real client rendering without one.
 
 ## Animations
 
@@ -157,7 +155,7 @@ real cache, in rough risk order:
 - **EDITOR SURFACES and editor gaps — see `EDITOR.md`.** Cody's rule: *"this is an editor, we need to be able to edit absolutely everything"* — read-only is a bug. `EDITOR.md` holds two things: the cache-field knowledge our render traces produced (ground blending, loc models/textures, per-texture material fields, region environments, point lights, face-level data), so building the UI doesn't mean re-deriving the trace; and the running list of map-editor gaps requested 2026-07-25 — loc panel detail + live preview + dirty/unsaved warnings + `transformTo` preview, editable sound emitters and a sound-emitter table, a map icon/sprite table showing which objects display each, sliders on light fields, and terrain material/colour painting. **Add an entry there whenever a render change teaches us how a cache field behaves, or a panel shows something it can't edit.**
 - **REVISIT: what the 'barrier' marker actually means (Cody, 2026-07-25).** The red marker kind is *our* inference, not a client concept: `isMarkerModel` treats any 1–4 face model painted entirely in HSL16 **29113** (teal) or **20287** (green) as an invisible marker loc, and a green one with no sound/`mapCategoryId`/`mapSpriteId` on its def falls through to `'barrier'`. Introduced with the original 3D scene viewer (7571ff5). Worth checking against the client/darkan: is green really a collision-only blocker (bridge edges, ledge guards), and should the kind require `blocks`/`clipType` from the object def rather than resting on the sentinel colour alone? Also confirm the two sentinel colours are the complete set. **Context (2026-07-25): the long-open question of how the client HIDES these is answered — it's plain back-face culling.** Marker quads are single-sided and face downwards (all 6 green faces in model 68757, both faces of teal marker 1105), and the client culls back faces unconditionally: `DirectXRenderer` sets `D3DRS_CULLMODE = D3DCULL_CW` once at init, `OpenGLRenderer` does `glEnable(GL_CULL_FACE); glCullFace(GL_BACK)`, and neither is toggled anywhere. There is no `20287`/`29113`/`33728` constant in the client at all — the colours are an authoring convention, not something the engine reads. So `isMarkerModel` is now purely an EDITOR affordance (it puts a diamond where a marker is); the client-correct hiding comes for free from culling. That also means a sentinel-coloured face mixed into a real model — the Lumbridge signpost sign, loc 69787 model 68757, 6 green faces among 942 — needs no special case.
 - **ALL LIGHTING WORK LIVES IN `docs/lighting.md`** (moved there 2026-07-26). The sun formula and its reverted port, tone mapping and why the bake clamp starves it, the lighting-detail trace, loc and ground point lights, the agreed plan to move point lights into the shader, per-object `ambient`/`contrast`, ModelViewer's contrast base, HDR materials and texture gamma. They are one interlocking job — two attempts have been reverted for taking an item on its own — so they are not tracked as separate entries here.
-- **Pre-13 mesh upscale before posing — check the other animation previews (2026-07-25).** Fixed for map-scene locs: a frame's type-0/1 origins and translations are authored in the `<<2` upscaled space (the client runs `RSMesh.upscale()` at mesh build, BEFORE `Animation.rasterize`), so posing a raw pre-13 mesh and scaling the result afterwards makes every translation 4× too far — rotations/scales are ratios and survive, which is why it looked *nearly* right. `upscaleModel()` in models.ts now bakes it in for animated locs. The same pattern is still unfixed in `useSequencePlayback` (ModelViewer preview) and `SpotAnimationViewer`, which pose the raw model: each needs `upscaleModel(model)` at the pose call, but check their camera/fit first — geometry becomes 4× larger, which matters if the view doesn't auto-fit. **Not `CutscenePlayerModal`** (checked 2026-07-28): its entities come from `loadModelComposite`, which already upscales pre-13 parts in place and marks them v13 so no renderer double-applies it — adding `upscaleModel` there would make every entity 4× too big.
+- **Pre-13 mesh upscale before posing — check the other animation previews (2026-07-25).** Fixed for map-scene locs: a frame's type-0/1 origins and translations are authored in the `<<2` upscaled space (the client runs `RSMesh.upscale()` at mesh build, BEFORE `Animation.rasterize`), so posing a raw pre-13 mesh and scaling the result afterwards makes every translation 4× too far — rotations/scales are ratios and survive, which is why it looked *nearly* right. `upscaleModel()` in models.ts now bakes it in for animated locs. `SpotAnimationViewer` is fixed too (2026-07-30) — it now loads its preview mesh through `loadModelComposite`, which upscales pre-13 parts in place. Any *new* `useSequencePlayback` caller that loads a model by hand rather than through `loadModelComposite` needs `upscaleModel(model)` at the pose call, but check its camera/fit first — geometry becomes 4× larger, which matters if the view doesn't auto-fit. **Not `CutscenePlayerModal`** (checked 2026-07-28): its entities come from `loadModelComposite`, which already upscales pre-13 parts in place and marks them v13 so no renderer double-applies it — adding `upscaleModel` there would make every entity 4× too big.
 - **"Remove roofs" is a per-TILE rule, not a per-plane one — don't let it eat the bridge railings.** We don't implement the client's setting at all today; `MapSceneViewer`'s feature table says as much ("We use per-plane toggles instead of the client's roof-removal rule"). Whenever it does get built, the naive version — hide everything on plane >= N — is wrong, and the Lumbridge bridge is the case that proves it: its **railings are locs on plane 1** (45143/45146/45147/45148 on tile rows y=24 and y=27), so a per-plane cull deletes them while leaving the deck, which sits on rows y=25/26 and gets shifted down to renderPlane 0 by the bridge flag. The bridge would render as a floating walkway with no sides. How the client actually does it:
   - `Preferences.removeRoofs` / `removeRoofsOptionOverride` are tri-state: 0 never, 1 the contextual mode ("when you walk under one"), 2 always. `MapRegion.handleRoofDisplay()` only runs its sweep when the override is 2.
   - The test is a **per-tile mask**, `tileFunctionMasks[plane][x][y] & 0x4`, checked at the camera/player tile; `calculateVisibilityAdjustments` then flood-fills outward over the enclosed area and writes a per-tile `settingsBits` byte the renderer consults tile by tile. Nothing anywhere hides a whole plane.
@@ -360,30 +358,17 @@ real cache, in rough risk order:
   map scene's own loc/light panels. Trace anything whose meaning isn't obvious
   rather than inventing it; where cryogen's dumped name disagrees with the
   client, say so in the tooltip instead of repeating the wrong name.
-- **Object field renames in cryogen (one batch, one re-dump).** All traced
-  2026-07-29 against darkan's `ObjectType.kt` and its consumers; the objects
-  viewer already shows the corrected labels and meanings, so this is about the
-  dumped JSON catching up. Server-code blast radius checked and noted per item.
-  1. **`obstructsGround` → `forceDisplayDecoration`** (opcode 73). darkan's
-     name. `SceneGraph` lines 87/219 use it to draw a ground decoration even
-     when the player has ground decorations switched **off** — nothing to do
-     with obstructing ground. **No usages outside `ObjectDefinitions.java`**, so
-     this one is a free rename.
-  2. **`blocks` → `blocksProjectiles`** (opcodes 17/18). darkan's name, and it
-     resolves a genuine trap: the class also has a `blocks()` **method** that
-     returns something else entirely (`clipType != 0`, i.e. blocks *movement*),
-     and `Region.java` calls that method in four places. Renaming the field
-     leaves the method alone and kills the collision.
-  3. **`hasAnimation` → our own name, e.g. `forceNonStationary`** (opcode 98).
-     **Note this one differs from the other two:** darkan calls it
-     `hasAnimation` as well, so this is a coinage rather than adopting the
-     reference name, and it will read as a divergence to anyone diffing against
-     darkan later. It is worth it because the name is actively wrong — the idle
-     animation comes from opcodes 24/106, and opcode 98 is one of five
-     independent ways to fail `SceneGraph`'s stationary test. Cody signed this
-     off 2026-07-29. One usage to update: `WorldObject.java:72`, a debug string
-     that prints `animProbs` when the flag is set, which is itself built on the
-     wrong reading.
+- **RE-DUMP `objects` BEFORE the next pack** (renames applied in cryogen
+  2026-07-29 — `blocks`→`blocksProjectiles`, `obstructsGround`→
+  `forceDisplayDecoration`, `hasAnimation`→`forceNonStationary`). Order matters:
+  Gson silently ignores JSON keys the class no longer has, and
+  `ObjectDefinitions`' no-arg constructor supplies the defaults, so packing an
+  OLD dump with the renamed class resets those three fields to
+  `blocksProjectiles = true`, `forceDisplayDecoration = false`,
+  `forceNonStationary = false`. Any object whose real value differed loses it —
+  objects that let projectiles through would start blocking them. Re-dumping
+  first makes the keys match and the risk disappears. The editor already reads
+  either spelling (`migrateObjectDef`), so it is fine before or after.
 - **REMINDER: set up proper production hosting when the editor is nearly feature-complete** (user asked 2026-07-14 to be reminded "much later once we get almost everything finished"). The app is backend-less, so production = `npm run build` + Caddy `file_server` on `dist/` (no Node process at runtime, nothing to restart — unlike the dev server, whose week-old instance developed 20-second event-loop stalls). Content-hashed assets can take the same `immutable` caching the `/icons/*` Caddy route already has.
 - **Label known params in the params tables** — items' param 644 and the NPC combat params are labeled; do the same for as many other param keys as we can identify, sourcing meanings from cryogen/darkan param usages (`ItemDefinitions`-style getters, server lookups). The `ParamsTable` `rowAnnotation` hook is the extension point.
 - **Open Cache button** shows `📁 folderName` — consider a cleaner label or breadcrumb.
