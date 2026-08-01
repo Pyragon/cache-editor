@@ -245,6 +245,10 @@ export class InterfaceAssets {
 
   dispose() {
     this.threeRenderer?.dispose()
+    // dispose() frees three's GPU objects but NOT the WebGL context — the
+    // browser only reclaims that whenever the canvas is collected, and one
+    // asset store is built per interface/cutscene session.
+    this.threeRenderer?.forceContextLoss()
     this.threeRenderer = null
   }
 

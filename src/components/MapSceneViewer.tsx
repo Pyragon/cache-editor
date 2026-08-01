@@ -3297,6 +3297,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       composer.dispose()
       renderer.dispose()
       mount.removeChild(renderer.domElement)
+      // dispose() frees three's GPU objects but NOT the WebGL context — the
+      // browser only reclaims that whenever the canvas is collected, so every
+      // remount would otherwise leave a live context behind.
+      renderer.forceContextLoss()
       clearLocHighlight()
       ghostClearRef.current?.()
       highlightClearRef.current = null

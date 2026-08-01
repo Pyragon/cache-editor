@@ -1390,6 +1390,10 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
       rr.entities = []
       rr.composer?.dispose()
       rr.renderer?.dispose()
+      // dispose() frees three's GPU objects but NOT the WebGL context — the
+      // browser only reclaims that whenever the canvas is collected, so every
+      // open/close of this modal would otherwise leave a live context behind.
+      rr.renderer?.forceContextLoss()
       rr.scene.traverse((o) => {
         if (o instanceof THREE.Mesh) {
           o.geometry.dispose()

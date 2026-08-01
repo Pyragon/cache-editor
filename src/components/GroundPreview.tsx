@@ -295,6 +295,10 @@ export default function GroundPreview({ rootHandle, kind, id, def, defaultNeighb
       composer.dispose()
       renderer.dispose()
       if (renderer.domElement.parentNode === mount) mount.removeChild(renderer.domElement)
+      // dispose() frees three's GPU objects but NOT the WebGL context — the
+      // browser only reclaims that whenever the canvas is collected, so every
+      // remount would otherwise leave a live context behind.
+      renderer.forceContextLoss()
     }
   }, [])
 
