@@ -119,8 +119,9 @@ const SHADOW_FIELDS: NumFieldDef[] = [
   ['shadowAlphaDst', 'Alpha Dst'],
 ]
 
-// The four sound fields holding sound_effects ids (index 4) — they get the
-// View jump link and the inline mini-player.
+// The four sound fields holding a sound id. Which index that id names is not
+// fixed: opcode 162 (`instrumentSoundEffect`) switches the lookup from
+// sound_effects to midi_instruments — see AmbientSound:145 / SoundEffectPlayer.
 const SOUND_ID_KEYS = ['walkingSoundEffect', 'runningSoundEffect', 'idleSoundEffect', 'teleportSoundEffect'] as const
 
 const SOUND_FIELDS: NumFieldDef[] = [
@@ -182,6 +183,12 @@ const NPC_PARAM_LABELS: Record<string, string> = {
 
 export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate, cacheRoot }: Props) {
   const [draft, setDraft] = useState<NpcDef>(data.npc)
+
+  // Opcode 162 redirects these sound ids into midi_instruments; without it
+  // they name sound_effects entries. The synth mini-player only understands
+  // the latter, so it is hidden when the flag is set.
+  const soundIsInstrument = draft.instrumentSoundEffect === true
+  const soundEntry = soundIsInstrument ? 'midi_instruments' : 'sound_effects'
   const [paramRows, setParamRows] = useState<ParamRow[]>(() => toParamRows(data.npc.parameters))
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -693,9 +700,9 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate, cac
           onChange={(k, v) => set(k, v)}
           links={Object.fromEntries(SOUND_ID_KEYS.map((key) => [
             key,
-            onNavigate && { label: 'View', onOpen: (id: number) => onNavigate('sound_effects', id) },
+            onNavigate && { label: 'View', onOpen: (id: number) => onNavigate(soundEntry, id) },
           ]))}
-          fieldExtra={cacheRoot ? Object.fromEntries(SOUND_ID_KEYS.map((key) => {
+          fieldExtra={cacheRoot && !soundIsInstrument ? Object.fromEntries(SOUND_ID_KEYS.map((key) => {
             const id = Number(draft[key] ?? -1)
             return [key, id >= 0 && id !== 65535 ? <SoundPlayerCell key={key} cacheRoot={cacheRoot} soundId={id} /> : undefined]
           })) : undefined}

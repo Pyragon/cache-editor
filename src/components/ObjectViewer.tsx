@@ -401,6 +401,14 @@ export default function ObjectViewer({ data, onSave, onDirtyChange, onNavigate, 
 
   const transformTo = (draft.transformTo as number[] | undefined) ?? []
   const soundGroupIds = (draft.soundGroupIds as number[] | undefined) ?? []
+
+  // A sound id here is read from sound_effects OR from midi_instruments — the
+  // client picks the index off these flags (opcodes 168/169), not off the id.
+  // SoundEffectPlayer:233 for the ambient sound, :268 for the group.
+  const ambientIsInstrument = draft.instrumentSoundEffect === true
+  const groupIsInstrument = draft.instrumentAmbientSound === true
+  const ambientSoundEntry = ambientIsInstrument ? 'midi_instruments' : 'sound_effects'
+  const groupSoundEntry = groupIsInstrument ? 'midi_instruments' : 'sound_effects'
   const quests = (draft.quests as number[] | undefined) ?? []
 
   function setListValue(key: string, index: number, value: number) {
@@ -621,9 +629,11 @@ export default function ObjectViewer({ data, onSave, onDirtyChange, onNavigate, 
           fields={SOUND_FIELDS}
           values={draft}
           onChange={(k, v) => set(k, v)}
-          links={{ ambientSoundId: onNavigate && { label: 'View', onOpen: (id: number) => onNavigate('sound_effects', id) } }}
+          links={{ ambientSoundId: onNavigate && { label: 'View', onOpen: (id: number) => onNavigate(ambientSoundEntry, id) } }}
           fieldExtra={cacheRoot ? {
-            ambientSoundId: Number(draft.ambientSoundId ?? -1) >= 0
+            // the synth player only understands index 4 — with the instrument
+            // flag set this id is an ogg in midi_instruments instead
+            ambientSoundId: Number(draft.ambientSoundId ?? -1) >= 0 && !ambientIsInstrument
               ? <SoundPlayerCell key="ambientSoundId" cacheRoot={cacheRoot} soundId={Number(draft.ambientSoundId)} />
               : undefined,
           } : undefined}
@@ -639,12 +649,12 @@ export default function ObjectViewer({ data, onSave, onDirtyChange, onNavigate, 
                   <tr key={i}>
                     <td><NumberInput className="cell-input" value={soundId} onChange={(v) => setListValue('soundGroupIds', i, v)} /></td>
                     <td>
-                      {cacheRoot && soundId >= 0 && <SoundPlayerCell cacheRoot={cacheRoot} soundId={soundId} />}
+                      {cacheRoot && soundId >= 0 && !groupIsInstrument && <SoundPlayerCell cacheRoot={cacheRoot} soundId={soundId} />}
                     </td>
                     <td>
                       <span className="anim-fit-actions">
                         {onNavigate && soundId >= 0 && (
-                          <button type="button" className="field-link-btn" title={`Open sound effect ${soundId}`} onClick={() => onNavigate('sound_effects', soundId)}>
+                          <button type="button" className="field-link-btn" title={`Open sound ${soundId}`} onClick={() => onNavigate(groupSoundEntry, soundId)}>
                             View
                           </button>
                         )}
