@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AnimationData, AnimationDef } from '../loaders/animations'
 import { frameFileId, setFrameRef } from '../loaders/animations'
 import { buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
+import { scanLabel } from '../loaders/scan'
+import type { ScanProgress } from '../loaders/scan'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { NumberInput, NumGrid, IntListInput } from './defFields'
 import type { NumFieldDef } from './defFields'
@@ -40,7 +42,7 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
   // (App does this for anim/bas/npc/item/spot saves) falls back to the scan
   // button instead of reading a vanished cache.
   const [compatVersion, setCompatVersion] = useState(0)
-  const [compatProgress, setCompatProgress] = useState<{ done: number; total: number } | null>(null)
+  const [compatProgress, setCompatProgress] = useState<ScanProgress | null>(null)
 
   useEffect(() => {
     setDraft(data.def)
@@ -83,9 +85,9 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
 
   async function handleCompatScan() {
     if (!data.rootHandle) return
-    setCompatProgress({ done: 0, total: 0 })
+    setCompatProgress({ phase: 'indexing', done: 0, total: 0 })
     try {
-      await buildAnimCompatIndex(data.rootHandle, (done, total) => setCompatProgress({ done, total }))
+      await buildAnimCompatIndex(data.rootHandle, setCompatProgress)
       setCompatVersion((v) => v + 1)
     } finally {
       setCompatProgress(null)
@@ -346,7 +348,7 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
         {skeleton != null && skeleton >= 0 && (
           compatProgress != null ? (
             <p className="map-sprite-none">
-              Scanning… {compatProgress.done.toLocaleString()}{compatProgress.total > 0 ? ` / ${compatProgress.total.toLocaleString()}` : ''}
+              {scanLabel(compatProgress)}
             </p>
           ) : peekAnimCompatIndex() == null ? (
             <div className="map-sprite-uses-scan">

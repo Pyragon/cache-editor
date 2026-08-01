@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import type { BasData, BasDef } from '../loaders/config/bas'
 import { OBJ_SLOT_COUNT } from '../loaders/config/bas'
 import { DEFAULT_PLAYER_BAS, RENDER_ANIM_PARAM, buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
+import { scanLabel } from '../loaders/scan'
+import type { ScanProgress } from '../loaders/scan'
 import type { ItemUse, NpcUse } from '../loaders/animCompat'
 import type { ModelDisplayParams } from './ModelViewer'
 import ModelPreviewModal from './ModelPreviewModal'
@@ -130,7 +132,7 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
   const [draft, setDraft] = useState<BasDef>(data.def)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
-  const [compatProgress, setCompatProgress] = useState<{ done: number; total: number } | null>(null)
+  const [compatProgress, setCompatProgress] = useState<ScanProgress | null>(null)
   const [preview, setPreview] = useState<{ animation: AnimationDef; modelIds: number[] } | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   // Item row "View Model": the item's inventory model, posed, in a modal.
@@ -177,9 +179,9 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
 
   async function handleCompatScan() {
     if (!cacheRoot) return
-    setCompatProgress({ done: 0, total: 0 })
+    setCompatProgress({ phase: 'indexing', done: 0, total: 0 })
     try {
-      await buildAnimCompatIndex(cacheRoot, (done, total) => setCompatProgress({ done, total }))
+      await buildAnimCompatIndex(cacheRoot, setCompatProgress)
     } finally {
       // also the post-scan re-render that reveals the tables (compat is
       // re-peeked every render)
@@ -406,9 +408,7 @@ export default function BasViewer({ data, onSave, onDirtyChange, onOpenAnimation
       <section className="item-section">
         <h3>Used By</h3>
         {compatProgress != null ? (
-          <p className="map-sprite-none">
-            Scanning… {compatProgress.done.toLocaleString()}{compatProgress.total > 0 ? ` / ${compatProgress.total.toLocaleString()}` : ''}
-          </p>
+          <p className="map-sprite-none">{scanLabel(compatProgress)}</p>
         ) : compat == null ? (
           <div className="map-sprite-uses-scan">
             <button type="button" className="cursor-pick-btn" disabled={!cacheRoot} onClick={handleCompatScan}>

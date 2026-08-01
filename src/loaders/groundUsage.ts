@@ -14,6 +14,8 @@
 //  - counting runs straight off the atob'd binary string, so no per-region
 //    typed arrays are allocated.
 import { getEntryPath, resolveEntryHandle } from './entryOrder'
+import { indexEntries, readPooled, throttleProgress } from './scan'
+import type { ScanReporter } from './scan'
 
 /** One region's use of a definition. */
 export type UsageRegion = { region: number; rx: number; ry: number; tiles: number }
@@ -183,7 +185,7 @@ function finish(accum: Accum): Record<number, UsageEntry> {
   return out
 }
 
-export type ScanProgress = { done: number; total: number }
+export type { ScanProgress } from './scan'
 
 /**
  * Reads every region dump and builds the usage index. `onProgress` fires as
@@ -192,21 +194,22 @@ export type ScanProgress = { done: number; total: number }
  */
 export async function scanGroundUsage(
   rootHandle: FileSystemDirectoryHandle,
-  onProgress?: (p: ScanProgress) => void,
+  onProgress?: ScanReporter,
   signal?: AbortSignal,
 ): Promise<GroundUsage> {
   const mapsDir = await resolveEntryHandle(rootHandle, getEntryPath('maps'))
   if (!mapsDir) throw new Error('This cache has no maps/ dump, so usage cannot be scanned.')
 
-  const files: FileSystemFileHandle[] = []
-  for await (const handle of mapsDir.values()) {
-    if (handle.kind === 'file' && handle.name.endsWith('.json')) files.push(handle as FileSystemFileHandle)
-  }
+  const emit = throttleProgress(onProgress)
+  const files = await indexEntries(
+    [mapsDir],
+    (handle) => (handle.kind === 'file' && handle.name.endsWith('.json') ? handle as FileSystemFileHandle : null),
+    emit,
+  )
   files.sort((a, b) => a.name.localeCompare(b.name))
 
   const underlay: Accum = new Map()
   const overlay: Accum = new Map()
-  let done = 0
   let skipped = 0
 
   async function scanOne(handle: FileSystemFileHandle): Promise<void> {
@@ -241,22 +244,10 @@ export async function scanGroundUsage(
     }
   }
 
-  // Bounded parallelism: the browser will happily queue 2,400 file reads and
-  // then thrash. Eight in flight keeps the disk busy without the pile-up.
-  const WORKERS = 8
-  let next = 0
-  await Promise.all(
-    Array.from({ length: WORKERS }, async () => {
-      for (;;) {
-        if (signal?.aborted) throw new DOMException('Scan cancelled', 'AbortError')
-        const i = next++
-        if (i >= files.length) return
-        await scanOne(files[i])
-        done++
-        if (done % 16 === 0 || done === files.length) onProgress?.({ done, total: files.length })
-      }
-    }),
-  )
+  // Eight in flight, not the shared default of 32: region dumps are far larger
+  // than the def files that default was tuned on, and queuing 2,400 of them
+  // makes the browser thrash rather than go faster.
+  await readPooled(files, scanOne, emit, { concurrency: 8, signal })
 
   const usage: GroundUsage = {
     scannedAt: Date.now(),

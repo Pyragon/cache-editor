@@ -1,4 +1,6 @@
 import { getEntryPath, resolveEntryHandle } from './entryOrder'
+import { indexEntries, readPooled, throttleProgress } from './scan'
+import type { ScanReporter } from './scan'
 
 // ---------------------------------------------------------------------------
 // Billboard-usage index: billboard type id -> the model ids that attach it.
@@ -106,7 +108,7 @@ function extractBillboardTypeIds(d: Uint8Array): number[] | null {
 
 export function buildBillboardUsage(
   cacheRoot: FileSystemDirectoryHandle,
-  onProgress: (done: number, total: number) => void,
+  onProgress: ScanReporter,
 ): Promise<BillboardUsageIndex> {
   if (cached) return Promise.resolve(cached)
   if (building) return building
@@ -114,34 +116,29 @@ export function buildBillboardUsage(
     const modelsDir = await resolveEntryHandle(cacheRoot, getEntryPath('models'))
     if (!modelsDir) throw new Error('models entry not found in this cache')
 
-    const modelIds: number[] = []
-    for await (const handle of modelsDir.values()) {
-      if (handle.kind !== 'directory' || !/^\d+$/.test(handle.name)) continue
-      modelIds.push(parseInt(handle.name, 10))
-    }
-    modelIds.sort((a, b) => a - b)
+    const emit = throttleProgress(onProgress)
+    // keep the directory handle from the walk — re-deriving it per model was a
+    // second round-trip across all ~74,000 of them
+    const models = await indexEntries(
+      [modelsDir],
+      (handle) => (handle.kind === 'directory' && /^\d+$/.test(handle.name)
+        ? { id: parseInt(handle.name, 10), dir: handle as FileSystemDirectoryHandle }
+        : null),
+      emit,
+    )
+    models.sort((a, b) => a.id - b.id)
 
-    let done = 0
     const usage = new Map<number, number[]>()
-    const CHUNK = 128
-    for (let i = 0; i < modelIds.length; i += CHUNK) {
-      const chunk = modelIds.slice(i, i + CHUNK)
-      await Promise.all(chunk.map(async (modelId) => {
-        try {
-          const dir = await modelsDir.getDirectoryHandle(String(modelId))
-          const file = await (await dir.getFileHandle('model.dat')).getFile()
-          const typeIds = extractBillboardTypeIds(new Uint8Array(await file.arrayBuffer()))
-          if (!typeIds) return
-          for (const typeId of typeIds) {
-            const list = usage.get(typeId)
-            if (list) { if (!list.includes(modelId)) list.push(modelId) }
-            else usage.set(typeId, [modelId])
-          }
-        } catch { /* missing/unreadable model.dat — skip */ }
-      }))
-      done += chunk.length
-      onProgress(done, modelIds.length)
-    }
+    await readPooled(models, async ({ id: modelId, dir }) => {
+      const file = await (await dir.getFileHandle('model.dat')).getFile()
+      const typeIds = extractBillboardTypeIds(new Uint8Array(await file.arrayBuffer()))
+      if (!typeIds) return
+      for (const typeId of typeIds) {
+        const list = usage.get(typeId)
+        if (list) { if (!list.includes(modelId)) list.push(modelId) }
+        else usage.set(typeId, [modelId])
+      }
+    }, emit)
 
     for (const list of usage.values()) list.sort((a, b) => a - b)
     cached = usage

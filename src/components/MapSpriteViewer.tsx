@@ -1,4 +1,6 @@
 import { NumberInput, SortableTh } from './defFields'
+import { indexEntries, readPooled, throttleProgress, scanLabel } from '../loaders/scan'
+import type { ScanProgress, ScanReporter } from '../loaders/scan'
 import type { SortState } from './defFields'
 import { useEffect, useRef, useState } from 'react'
 import { useZoom } from './useZoom'
@@ -30,36 +32,31 @@ let usesIndexPromise: Promise<Map<number, SpriteUse[]>> | null = null
 
 function buildUsesIndex(
   objectsDir: FileSystemDirectoryHandle,
-  onProgress: (done: number, total: number) => void,
+  onProgress: ScanReporter,
 ): Promise<Map<number, SpriteUse[]>> {
   if (usesIndexPromise) return usesIndexPromise
   usesIndexPromise = (async () => {
-    const ids: number[] = []
-    for await (const handle of objectsDir.values()) {
-      if (handle.kind !== 'file' || !handle.name.endsWith('.json')) continue
-      const id = parseInt(handle.name.slice(0, -5), 10)
-      if (!isNaN(id)) ids.push(id)
-    }
-    ids.sort((a, b) => a - b)
+    const emit = throttleProgress(onProgress)
+    const files = await indexEntries(
+      [objectsDir],
+      (handle) => (handle.kind === 'file' && handle.name.endsWith('.json') && !isNaN(parseInt(handle.name, 10))
+        ? handle as FileSystemFileHandle
+        : null),
+      emit,
+    )
 
     const index = new Map<number, SpriteUse[]>()
-    const CHUNK = 128
-    for (let i = 0; i < ids.length; i += CHUNK) {
-      const chunk = ids.slice(i, i + CHUNK)
-      await Promise.all(chunk.map(async (id) => {
-        try {
-          const file = await (await objectsDir.getFileHandle(`${id}.json`)).getFile()
-          const def = JSON.parse(await file.text()) as { name?: string; mapSpriteId?: number }
-          const msId = def.mapSpriteId ?? -1
-          if (msId >= 0) {
-            let list = index.get(msId)
-            if (!list) index.set(msId, list = [])
-            list.push({ id, name: def.name ?? 'null' })
-          }
-        } catch { /* unreadable def — skip */ }
-      }))
-      onProgress(Math.min(i + CHUNK, ids.length), ids.length)
-    }
+    await readPooled(files, async (handle) => {
+      const id = parseInt(handle.name, 10)
+      const def = JSON.parse(await (await handle.getFile()).text()) as { name?: string; mapSpriteId?: number }
+      const msId = def.mapSpriteId ?? -1
+      if (msId >= 0) {
+        let list = index.get(msId)
+        if (!list) index.set(msId, list = [])
+        list.push({ id, name: def.name ?? 'null' })
+      }
+    }, emit)
+
     usesIndex = index
     return index
   })()
@@ -97,7 +94,7 @@ export default function MapSpriteViewer({ data, onSave, onDirtyChange, onOpenObj
   const [usesReady, setUsesReady] = useState(usesIndex != null)
   const [usesFilter, setUsesFilter] = useState('')
   const [usesSort, setUsesSort] = useState<SortState>({ key: 'id', dir: 1 })
-  const [scanProgress, setScanProgress] = useState<{ done: number; total: number } | null>(usesIndexPromise && !usesIndex ? { done: 0, total: 0 } : null)
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(usesIndexPromise && !usesIndex ? { phase: 'indexing', done: 0, total: 0 } : null)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -119,8 +116,8 @@ export default function MapSpriteViewer({ data, onSave, onDirtyChange, onOpenObj
 
   async function handleScanUses() {
     if (!data.objectsDir) return
-    setScanProgress({ done: 0, total: 0 })
-    await buildUsesIndex(data.objectsDir, (done, total) => setScanProgress({ done, total }))
+    setScanProgress({ phase: 'indexing', done: 0, total: 0 })
+    await buildUsesIndex(data.objectsDir, setScanProgress)
     setScanProgress(null)
     setUsesReady(true)
   }
@@ -428,7 +425,7 @@ export default function MapSpriteViewer({ data, onSave, onDirtyChange, onOpenObj
           <p className="map-sprite-none">No objects entry in this cache — usage scan unavailable.</p>
         ) : scanProgress != null ? (
           <p className="map-sprite-none">
-            Scanning object defs… {scanProgress.done.toLocaleString()}{scanProgress.total > 0 ? ` / ${scanProgress.total.toLocaleString()}` : ''}
+            {scanLabel(scanProgress, 'object defs')}
           </p>
         ) : !usesReady ? (
           <div className="map-sprite-uses-scan">

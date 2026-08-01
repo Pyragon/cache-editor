@@ -1,4 +1,6 @@
 import { getEntryPath, resolveEntryHandle } from './entryOrder'
+import { indexEntries, readPooled, throttleProgress } from './scan'
+import type { ScanProgress, ScanReporter } from './scan'
 
 // ---------------------------------------------------------------------------
 // Animation-compatibility index.
@@ -68,43 +70,24 @@ export function invalidateAnimCompatIndex(): void {
   building = null
 }
 
-async function listJsonIds(dir: FileSystemDirectoryHandle): Promise<number[]> {
-  const ids: number[] = []
-  for await (const handle of dir.values()) {
-    if (handle.kind !== 'file' || !handle.name.endsWith('.json')) continue
+type JsonFile = { id: number; handle: FileSystemFileHandle }
+
+/** List `<id>.json` files, keeping the handle the walk already produced. */
+async function listJsonFiles(
+  dir: FileSystemDirectoryHandle | null | undefined,
+  emit: (p: ScanProgress, force?: boolean) => void,
+): Promise<JsonFile[]> {
+  const files = await indexEntries([dir], (handle) => {
+    if (handle.kind !== 'file' || !handle.name.endsWith('.json')) return null
     const id = parseInt(handle.name.slice(0, -5), 10)
-    if (!isNaN(id)) ids.push(id)
-  }
-  return ids.sort((a, b) => a - b)
-}
-
-async function readJson(dir: FileSystemDirectoryHandle, name: string): Promise<unknown> {
-  const file = await (await dir.getFileHandle(name)).getFile()
-  return JSON.parse(await file.text())
-}
-
-/** Chunked parallel scan over `<id>.json` files with progress reporting. */
-async function scanJsons(
-  dir: FileSystemDirectoryHandle,
-  ids: number[],
-  each: (id: number, json: unknown) => void,
-  tick: (count: number) => void,
-): Promise<void> {
-  const CHUNK = 128
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    const chunk = ids.slice(i, i + CHUNK)
-    await Promise.all(chunk.map(async (id) => {
-      try {
-        each(id, await readJson(dir, `${id}.json`))
-      } catch { /* unreadable file — skip */ }
-    }))
-    tick(chunk.length)
-  }
+    return isNaN(id) ? null : { id, handle: handle as FileSystemFileHandle }
+  }, emit)
+  return files.sort((a, b) => a.id - b.id)
 }
 
 export function buildAnimCompatIndex(
   cacheRoot: FileSystemDirectoryHandle,
-  onProgress: (done: number, total: number) => void,
+  onProgress: ScanReporter,
 ): Promise<AnimCompatIndex> {
   if (cached) return Promise.resolve(cached)
   if (building) return building
@@ -117,36 +100,40 @@ export function buildAnimCompatIndex(
     const itemsDir = await resolveEntryHandle(cacheRoot, getEntryPath('items'))
     if (!animationsDir || !frameSetsDir) throw new Error('animations / frame_sets entries not found in this cache')
 
-    const animIds = await listJsonIds(animationsDir)
-    const basIds = basDir ? await listJsonIds(basDir) : []
-    const npcIds = npcsDir ? await listJsonIds(npcsDir) : []
-    const spotIds = spotsDir ? await listJsonIds(spotsDir) : []
-    const itemIds = itemsDir ? await listJsonIds(itemsDir) : []
+    // One indexing pass over all five entries, so the count climbs while the
+    // directories are walked instead of the button sitting at zero.
+    const emit = throttleProgress(onProgress)
+    const animFiles = await listJsonFiles(animationsDir, emit)
+    const basFiles = await listJsonFiles(basDir, emit)
+    const npcFiles = await listJsonFiles(npcsDir, emit)
+    const spotFiles = await listJsonFiles(spotsDir, emit)
+    const itemFiles = await listJsonFiles(itemsDir, emit)
 
-    // frame set count only becomes known after phase 1, so estimate it into
-    // the total up front (revised down if fewer distinct sets exist)
-    let done = 0
-    let total = animIds.length + basIds.length + npcIds.length + spotIds.length + itemIds.length
-    const tick = (n: number) => { done += n; onProgress(done, total) }
+    // Phase totals are tracked by hand because the frame-set count only becomes
+    // known after phase 1 — readPooled owns the within-phase progress, and this
+    // offsets it so the bar spans the whole job rather than restarting.
+    let base = 0
+    let total = animFiles.length + basFiles.length + npcFiles.length + spotFiles.length + itemFiles.length
+    const phase = (p: ScanProgress, force?: boolean) =>
+      emit({ phase: 'reading', done: base + p.done, total }, force)
+
+    const readJsonFile = async (f: JsonFile) => JSON.parse(await (await f.handle.getFile()).text()) as unknown
 
     // 1. sequence -> its first frame set
     const seqFirstSet = new Map<number, number>()
-    await scanJsons(animationsDir, animIds, (id, json) => {
-      const def = json as { frameSetIds?: number[] }
+    await readPooled(animFiles, async (f) => {
+      const def = await readJsonFile(f) as { frameSetIds?: number[] }
       const first = def.frameSetIds?.[0]
-      seqFirstSet.set(id, first != null && first >= 0 ? first : -1)
-    }, tick)
+      seqFirstSet.set(f.id, first != null && first >= 0 ? first : -1)
+    }, phase)
+    base += animFiles.length
 
     // 2. frame set -> frame base (read one frame file per distinct set)
     const distinctSets = [...new Set([...seqFirstSet.values()].filter((s) => s >= 0))]
     total += distinctSets.length
-    onProgress(done, total)
     const setBase = new Map<number, number>()
-    const CHUNK = 128
-    for (let i = 0; i < distinctSets.length; i += CHUNK) {
-      const chunk = distinctSets.slice(i, i + CHUNK)
-      await Promise.all(chunk.map(async (setId) => {
-        try {
+    {
+      await readPooled(distinctSets, async (setId) => {
           const setDir = await frameSetsDir.getDirectoryHandle(String(setId))
           // Direct lookups first: 99% of sets contain frame 0 (or 1), and
           // enumerating these folders is what made this phase crawl — each
@@ -166,19 +153,18 @@ export function buildAnimCompatIndex(
             }
           }
           if (frame?.frameBaseId != null) setBase.set(setId, frame.frameBaseId)
-        } catch { /* missing set dir — leave unmapped */ }
-      }))
-      tick(chunk.length)
+      }, phase)
+      base += distinctSets.length
     }
 
     const seqBase = new Map<number, number>()
     const baseSeqs = new Map<number, number[]>()
     for (const [seq, set] of seqFirstSet) {
-      const base = set >= 0 ? (setBase.get(set) ?? -1) : -1
-      seqBase.set(seq, base)
-      if (base >= 0) {
-        let list = baseSeqs.get(base)
-        if (!list) baseSeqs.set(base, list = [])
+      const baseId = set >= 0 ? (setBase.get(set) ?? -1) : -1
+      seqBase.set(seq, baseId)
+      if (baseId >= 0) {
+        let list = baseSeqs.get(baseId)
+        if (!list) baseSeqs.set(baseId, list = [])
         list.push(seq)
       }
     }
@@ -186,7 +172,9 @@ export function buildAnimCompatIndex(
     // 3. bas -> distinct sequence ids -> distinct skeleton bases
     const basBases = new Map<number, Set<number>>()
     if (basDir) {
-      await scanJsons(basDir, basIds, (id, json) => {
+      await readPooled(basFiles, async (f) => {
+        const id = f.id
+        const json = await readJsonFile(f)
         const def = json as Record<string, unknown> & { randomStandSequences?: number[] }
         const seqs = new Set<number>()
         for (const field of BAS_SEQ_FIELDS) {
@@ -202,14 +190,17 @@ export function buildAnimCompatIndex(
           if (base != null && base >= 0) bases.add(base)
         }
         basBases.set(id, bases)
-      }, tick)
+      }, phase)
+      base += basFiles.length
     }
 
     // 4. npcs
     const npcsByBas = new Map<number, NpcUse[]>()
     const npcsByBase = new Map<number, NpcUse[]>()
     if (npcsDir) {
-      await scanJsons(npcsDir, npcIds, (id, json) => {
+      await readPooled(npcFiles, async (f) => {
+        const id = f.id
+        const json = await readJsonFile(f)
         const def = json as { name?: string; modelIds?: number[]; basId?: number }
         const basId = def.basId ?? -1
         if (basId < 0) return
@@ -222,13 +213,16 @@ export function buildAnimCompatIndex(
           if (!baseList) npcsByBase.set(base, baseList = [])
           baseList.push(use)
         }
-      }, tick)
+      }, phase)
+      base += npcFiles.length
     }
 
     // 5. spot anims
     const spotsByBase = new Map<number, SpotUse[]>()
     if (spotsDir) {
-      await scanJsons(spotsDir, spotIds, (id, json) => {
+      await readPooled(spotFiles, async (f) => {
+        const id = f.id
+        const json = await readJsonFile(f)
         const def = json as { modelId?: number; sequenceId?: number }
         const seq = def.sequenceId ?? -1
         if (seq < 0) return
@@ -237,13 +231,16 @@ export function buildAnimCompatIndex(
         let list = spotsByBase.get(base)
         if (!list) spotsByBase.set(base, list = [])
         list.push({ id, modelId: def.modelId ?? -1, sequenceId: seq })
-      }, tick)
+      }, phase)
+      base += spotFiles.length
     }
 
     // 6. items — the render-anim param is the weapon-stance BAS reference
     const itemsByBas = new Map<number, ItemUse[]>()
     if (itemsDir) {
-      await scanJsons(itemsDir, itemIds, (id, json) => {
+      await readPooled(itemFiles, async (f) => {
+        const id = f.id
+        const json = await readJsonFile(f)
         const def = json as { name?: string; clientScriptData?: Record<string, unknown>; params?: Record<string, unknown> }
         const params = def.clientScriptData ?? def.params
         const bas = params?.[RENDER_ANIM_PARAM]
@@ -251,7 +248,8 @@ export function buildAnimCompatIndex(
         let list = itemsByBas.get(bas)
         if (!list) itemsByBas.set(bas, list = [])
         list.push({ id, name: def.name ?? 'null' })
-      }, tick)
+      }, phase)
+      base += itemFiles.length
     }
 
     for (const list of npcsByBase.values()) list.sort((a, b) => a.id - b.id)

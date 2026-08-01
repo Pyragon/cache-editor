@@ -19,6 +19,8 @@
 import { getEntryPath, resolveEntryHandle } from './entryOrder'
 import { resolveSample } from './sound_effects_midi'
 import type { SoundEffectMidiDef } from './sound_effects_midi'
+import { indexEntries, readPooled, throttleProgress } from './scan'
+import type { ScanProgress } from './scan'
 
 export type InstrumentUse =
   | {
@@ -103,9 +105,33 @@ async function build(root: FileSystemDirectoryHandle): Promise<UsageIndex> {
 // The ambient-sound half: object and NPC defs whose sound id points at index 14
 // ---------------------------------------------------------------------------
 
-export type DeepScan = { index: UsageIndex; objects: number; npcs: number }
+export type DeepScan = {
+  index: UsageIndex
+  /** defs read, so the UI can say what the scan actually covered */
+  scanned: number
+}
+
+/** Has the deep scan already run for this cache? Lets a remounted viewer show
+ *  the full picture instead of offering a button that would return instantly. */
+export function deepScanReady(root: FileSystemDirectoryHandle): boolean {
+  return deepCache.has(root)
+}
 
 const deepCache = new WeakMap<FileSystemDirectoryHandle, Promise<DeepScan>>()
+
+/**
+ * Called while the scan runs.
+ *
+ * Two phases, because listing the defs is itself slow enough to sit through:
+ * every directory entry has to be walked before the first file can be read, and
+ * reporting "0 / …" through all of it looks stalled.
+ *
+ * `index` is the LIVE index, still filling — read from it to show results as
+ * they arrive rather than only at the end.
+ */
+/** The shared scan progress plus the LIVE index — read from it to show results
+ *  as they arrive rather than only at the end. */
+export type InstrumentScanProgress = (p: ScanProgress & { index: UsageIndex }) => void
 
 /**
  * Fold object and NPC ambient sounds into the index.
@@ -119,7 +145,7 @@ const deepCache = new WeakMap<FileSystemDirectoryHandle, Promise<DeepScan>>()
  */
 export function deepInstrumentUsage(
   root: FileSystemDirectoryHandle,
-  onProgress?: (done: number, total: number) => void,
+  onProgress?: InstrumentScanProgress,
 ): Promise<DeepScan> {
   let p = deepCache.get(root)
   if (!p) {
@@ -142,7 +168,7 @@ type SoundDef = {
 
 async function buildDeep(
   root: FileSystemDirectoryHandle,
-  onProgress?: (done: number, total: number) => void,
+  onProgress?: InstrumentScanProgress,
 ): Promise<DeepScan> {
   // start from the bank index so the result is the complete picture
   const base = await instrumentUsage(root)
@@ -156,53 +182,37 @@ async function buildDeep(
     else index.set(id, [use])
   }
 
-  let objects = 0
-  let npcs = 0
-  let done = 0
+  const emit = throttleProgress(onProgress && ((p) => onProgress({ ...p, index })))
 
-  // Enumerate BOTH entries before reading any of them, so the reported total is
-  // the real one from the first tick — counting per directory would make the
-  // denominator jump partway through, which reads as the job getting bigger.
-  const work: { entry: 'objects' | 'npcs'; dir: FileSystemDirectoryHandle; name: string }[] = []
-  for (const entry of ['objects', 'npcs'] as const) {
-    const dir = await resolveEntryHandle(root, getEntryPath(entry))
-    if (!dir) continue
-    for await (const handle of dir.values()) {
-      if (handle.kind === 'file' && handle.name.endsWith('.json')) work.push({ entry, dir, name: handle.name })
-    }
-  }
-  const total = work.length
-  onProgress?.(0, total)
+  const objectsDir = await resolveEntryHandle(root, getEntryPath('objects'))
+  const npcsDir = await resolveEntryHandle(root, getEntryPath('npcs'))
+  const work = await indexEntries(
+    [objectsDir, npcsDir],
+    (handle, dirIndex) => (handle.kind === 'file' && handle.name.endsWith('.json')
+      ? { entry: dirIndex === 0 ? ('objects' as const) : ('npcs' as const), handle: handle as FileSystemFileHandle }
+      : null),
+    emit,
+  )
 
-  for (const { entry, dir, name } of work) {
-    const defId = Number.parseInt(name, 10)
-    let def: SoundDef
-    try {
-      def = JSON.parse(await (await (await dir.getFileHandle(name)).getFile()).text()) as SoundDef
-    } catch {
-      done++
-      continue
-    }
+  await readPooled(work, async ({ entry, handle }) => {
+    const defId = Number.parseInt(handle.name, 10)
+    const def = JSON.parse(await (await handle.getFile()).text()) as SoundDef
     if (entry === 'objects') {
       if (def.instrumentSoundEffect) {
         add(def.ambientSoundId, { kind: 'object', id: defId, field: 'ambientSoundId' })
-        objects++
       }
       if (def.instrumentAmbientSound && Array.isArray(def.soundGroupIds)) {
         for (const g of def.soundGroupIds) add(g, { kind: 'object', id: defId, field: 'soundGroupIds' })
-        objects++
       }
     } else if (def.instrumentSoundEffect) {
       for (const field of ['idleSoundEffect', 'walkingSoundEffect', 'runningSoundEffect', 'teleportSoundEffect'] as const) {
         add(def[field], { kind: 'npc', id: defId, field })
       }
-      npcs++
     }
-    if (++done % 250 === 0) onProgress?.(done, total)
-  }
+  }, emit)
 
-  onProgress?.(done, total)
-  return { index, objects, npcs }
+  const total = work.length
+  return { index, scanned: total }
 }
 
 /** "27", "36-40", "36-40, 52" — drum kits map long runs of consecutive keys. */

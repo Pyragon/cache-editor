@@ -43,7 +43,7 @@ export default function GroundUsagePanel({ rootHandle, kind, id, onOpenRegion }:
     const controller = new AbortController()
     abortRef.current = controller
     setError(null)
-    setProgress({ done: 0, total: 0 })
+    setProgress({ phase: 'indexing', done: 0, total: 0 })
     try {
       await clearCachedUsage()
       const next = await scanGroundUsage(rootHandle, setProgress, controller.signal)
@@ -75,7 +75,9 @@ export default function GroundUsagePanel({ rootHandle, kind, id, onOpenRegion }:
         )}
         {scanning && (
           <span className="ground-usage-meta">
-            {progress.total > 0 ? `${progress.done.toLocaleString()} / ${progress.total.toLocaleString()} regions (${pct}%)` : 'listing regions…'}
+            {progress.phase === 'indexing'
+              ? `Indexing ${progress.done.toLocaleString()} regions…`
+              : `${progress.done.toLocaleString()} / ${progress.total.toLocaleString()} regions (${pct}%)`}
           </span>
         )}
       </div>

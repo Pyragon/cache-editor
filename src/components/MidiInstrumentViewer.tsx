@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MidiInstrumentData, MidiInstrumentDef } from '../loaders/midi_instruments'
 import { loopEnabled, withLoopEnabled } from '../loaders/midi_instruments'
-import { instrumentUsage, deepInstrumentUsage, formatNotes, bankAddress } from '../loaders/midiInstrumentUsage'
-import type { InstrumentUse } from '../loaders/midiInstrumentUsage'
+import { instrumentUsage, deepInstrumentUsage, deepScanReady, formatNotes, bankAddress } from '../loaders/midiInstrumentUsage'
+import type { InstrumentUse, DeepScan } from '../loaders/midiInstrumentUsage'
+import { scanLabel } from '../loaders/scan'
+import type { ScanProgress } from '../loaders/scan'
 import { NumberInput } from './defFields'
 import './MidiInstrumentViewer.css'
 
@@ -158,8 +160,10 @@ export default function MidiInstrumentViewer({ data, onSave, onDirtyChange, onNa
   const [uses, setUses] = useState<InstrumentUse[] | null>(null)
   // ambient-sound references need every object and NPC read, so that pass is
   // opt-in; once run it is cached for the session and applies to every item
-  const [deep, setDeep] = useState(false)
-  const [scanning, setScanning] = useState<{ done: number; total: number } | null>(null)
+  // seeded from the cache: a remount shouldn't re-offer a scan that already ran
+  const [deep, setDeep] = useState(() => (data.rootHandle ? deepScanReady(data.rootHandle) : false))
+  const [scanning, setScanning] = useState<ScanProgress | null>(null)
+  const [scanResult, setScanResult] = useState<DeepScan | null>(null)
 
   const ctxRef = useRef<AudioContext | null>(null)
   const gainRef = useRef<GainNode | null>(null)
@@ -178,6 +182,12 @@ export default function MidiInstrumentViewer({ data, onSave, onDirtyChange, onNa
   }, [data])
 
   useEffect(() => { onDirtyChange?.(isDirty) }, [isDirty, onDirtyChange])
+
+  // the useState seed only runs on first mount, so re-check when the cache
+  // itself changes — otherwise a reopened cache re-offers a finished scan
+  useEffect(() => {
+    if (data.rootHandle && deepScanReady(data.rootHandle)) setDeep(true)
+  }, [data.rootHandle])
 
   const stop = useCallback(() => {
     cancelAnimationFrame(rafRef.current)
@@ -235,7 +245,7 @@ export default function MidiInstrumentViewer({ data, onSave, onDirtyChange, onNa
     const root = data.rootHandle
     if (!root) return
     const load = deep
-      ? deepInstrumentUsage(root).then((r) => r.index)
+      ? deepInstrumentUsage(root).then((r) => { if (!cancelled) setScanResult(r); return r.index })
       : instrumentUsage(root)
     void load
       .then((index) => { if (!cancelled) setUses(index.get(data.id) ?? []) })
@@ -246,9 +256,13 @@ export default function MidiInstrumentViewer({ data, onSave, onDirtyChange, onNa
   async function runDeepScan() {
     const root = data.rootHandle
     if (!root) return
-    setScanning({ done: 0, total: 0 })
+    setScanning({ phase: 'indexing', done: 0, total: 0 })
     try {
-      await deepInstrumentUsage(root, (done, total) => setScanning({ done, total }))
+      setScanResult(await deepInstrumentUsage(root, ({ phase, done, total, index }) => {
+        setScanning({ phase, done, total })
+        // the index is live, so the table fills in as matches are found
+        setUses([...(index.get(data.id) ?? [])])
+      }))
       setDeep(true)
     } finally {
       setScanning(null)
@@ -346,6 +360,10 @@ export default function MidiInstrumentViewer({ data, onSave, onDirtyChange, onNa
     setOggFile(null)
     setIsDirty(false)
   }
+
+  // the scan summary counts only what the scan itself found, so bank
+  // references (already listed before it ran) are excluded
+  const ambientUses = uses?.filter((u) => u.kind !== 'bank').length ?? 0
 
   const fill = (pct: number) => ({ '--fill': `${Math.max(0, Math.min(100, pct))}%` } as React.CSSProperties)
 
@@ -534,16 +552,27 @@ export default function MidiInstrumentViewer({ data, onSave, onDirtyChange, onNa
 
         {uses != null && uses.length === 0 && (
           <p className="tex-op-note">
-            Nothing in {deep ? 'this cache' : 'any instrument bank'} references this sample.
+            No {deep ? 'bank, object or NPC in this cache' : 'instrument bank'} references this sample.
+          </p>
+        )}
+
+        {/* After a scan, say what it covered and what it added. Without this the
+            button just disappears and an instrument with no ambient-sound users
+            looks identical to one where the scan never ran. */}
+        {deep && scanResult && (
+          <p className="tex-op-note">
+            Searched <strong>{scanResult.scanned.toLocaleString()}</strong> object and NPC defs
+            {' — '}
+            {ambientUses === 0
+              ? <>none reference this instrument.</>
+              : <><strong>{ambientUses}</strong> reference{ambientUses === 1 ? 's' : ''} this instrument.</>}
           </p>
         )}
 
         {data.rootHandle && !deep && (
           <div className="mi-scan">
             <button type="button" className="add-row-btn" disabled={scanning != null} onClick={() => void runDeepScan()}>
-              {scanning
-                ? `Searched ${scanning.done.toLocaleString()} / ${scanning.total ? scanning.total.toLocaleString() : '…'}`
-                : 'Scan objects & NPCs'}
+              {scanning ? scanLabel(scanning, 'defs') : 'Scan objects & NPCs'}
             </button>
             <p className="tex-op-note">
               The table above covers instrument banks only. An object or NPC can also point straight at a sample

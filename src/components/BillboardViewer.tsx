@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { useZoom } from './useZoom'
 import type { BillboardData, BillboardDef } from '../loaders/billboards'
 import { buildBillboardUsage, invalidateBillboardUsage, isBillboardUsageBuilding, peekBillboardUsage } from '../loaders/billboardUsage'
+import { scanLabel } from '../loaders/scan'
+import type { ScanProgress } from '../loaders/scan'
 import { NumGrid, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
 import './BillboardViewer.css'
@@ -42,13 +44,13 @@ export default function BillboardViewer({ data, onSave, onDirtyChange, onNavigat
   // Used-by-models: session-wide scan of every model binary (billboardUsage.ts),
   // opt-in via button like the BAS/animation compat index.
   const [usageReady, setUsageReady] = useState(peekBillboardUsage() != null)
-  const [usageProgress, setUsageProgress] = useState<{ done: number; total: number } | null>(null)
+  const [usageProgress, setUsageProgress] = useState<ScanProgress | null>(null)
 
   async function handleUsageScan() {
     if (!data.rootHandle) return
-    setUsageProgress({ done: 0, total: 0 })
+    setUsageProgress({ phase: 'indexing', done: 0, total: 0 })
     try {
-      await buildBillboardUsage(data.rootHandle, (done, total) => setUsageProgress({ done, total }))
+      await buildBillboardUsage(data.rootHandle, setUsageProgress)
       setUsageReady(true)
     } finally {
       setUsageProgress(null)
@@ -161,9 +163,7 @@ export default function BillboardViewer({ data, onSave, onDirtyChange, onNavigat
       <section className="item-section">
         <h3>Used By Models</h3>
         {usageProgress != null ? (
-          <p className="map-sprite-none">
-            Scanning models… {usageProgress.done.toLocaleString()}{usageProgress.total > 0 ? ` / ${usageProgress.total.toLocaleString()}` : ''}
-          </p>
+          <p className="map-sprite-none">{scanLabel(usageProgress, 'models')}</p>
         ) : !usageReady ? (
           <div className="map-sprite-uses-scan">
             <button type="button" className="cursor-pick-btn" disabled={!data.rootHandle} onClick={handleUsageScan}>
