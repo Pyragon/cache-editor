@@ -1,18 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SpotAnimationData, SpotAnimationDef } from '../loaders/spot_animations'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
-import { getLoader } from '../loaders'
+import { loadModelComposite } from '../loaders/npcComposite'
 import type { ModelData } from '../loaders/models'
-import { applyRecolor } from '../loaders/models'
 import type { AnimationDef } from '../loaders/animations'
-import { frameFileId } from '../loaders/animations'
-import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
-import type { AnimationFrameSetData } from '../loaders/animation_frame_sets'
-import { applyAnimationFrame } from '../loaders/skeletalAnimation'
-import type { PosedVertices } from '../loaders/skeletalAnimation'
 import ModelViewer from './ModelViewer'
+import type { CameraState, WorldRenderParams } from './ModelViewer'
+import ModelPreviewModal from './ModelPreviewModal'
+import { useSequencePlayback } from './useSequencePlayback'
 import { NumberInput, NumGrid, PairTable } from './defFields'
 import type { NumFieldDef } from './defFields'
+import './SpotAnimationViewer.css'
 
 const GENERAL_FIELDS: NumFieldDef[] = [
   ['scaleXZ', 'Scale XZ'],
@@ -38,17 +36,15 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
   const [draft, setDraft] = useState<SpotAnimationDef>(data.def)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [modelModal, setModelModal] = useState(false)
 
-  const [baseModel, setBaseModel] = useState<ModelData | null>(null)
-  // Animated vertex positions applied in place by ModelViewer — the scene
-  // itself is only rebuilt when baseModel changes, not per frame.
-  const [posedVertices, setPosedVertices] = useState<PosedVertices | null>(null)
-  const [frameIndex, setFrameIndex] = useState(0)
+  const [model, setModel] = useState<ModelData | null>(null)
+  const [modelError, setModelError] = useState<string | null>(null)
   const [sequence, setSequence] = useState<AnimationDef | null>(null)
-  const [status, setStatus] = useState('')
-
-  const frameSetCache = useRef(new Map<number, AnimationFrameSetData>())
-  const frameBaseCache = useRef(new Map<number, AnimationFrameBaseDef>())
+  // Keeps the orbit across scene rebuilds — every scale/rotation/ambient edit
+  // rebuilds the preview, and snapping back to the default view each keystroke
+  // makes the panel unusable.
+  const cameraStateRef = useRef<CameraState | null>(null)
 
   useEffect(() => {
     setDraft(data.def)
@@ -104,149 +100,247 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
     setIsDirty(false)
   }
 
-  async function loadPreview() {
-    if (!data.rootHandle) return
-    setStatus('Loading model…')
-    setBaseModel(null)
-    setPosedVertices(null)
-    setSequence(null)
-    try {
-      const modelsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('models'))
-      const modelsLoader = getLoader('models')
-      if (!modelsDir || !modelsLoader) throw new Error('models entry not available')
-      const model = await modelsLoader.loadItem(modelsDir, { id: draft.modelId, name: `${draft.modelId}` }, data.rootHandle) as ModelData
+  // --- Live preview -------------------------------------------------------
+  // The mesh, with the def's recolour/retexture pairs baked in (the client
+  // applies those to the rasterizer). Scale and rotation deliberately stay OUT
+  // of the vertices: the client resizes and rotates AFTER posing, so they ride
+  // ModelViewer's render transform instead.
+  const modelKey = [
+    draft.modelId,
+    (draft.originalColours ?? []).join(','),
+    (draft.modifiedColours ?? []).join(','),
+    (draft.originalTextures ?? []).join(','),
+    (draft.modifiedTextures ?? []).join(','),
+  ].join('|')
 
-      if (draft.originalColours) {
-        applyRecolor(model, draft.originalColours, draft.modifiedColours ?? [], draft.originalTextures ?? [], draft.modifiedTextures ?? [])
-      }
-      setBaseModel(model)
-
-      if (draft.sequenceId >= 0) {
-        const seqDir = await resolveEntryHandle(data.rootHandle, getEntryPath('animations'))
-        const seqLoader = getLoader('animations')
-        if (seqDir && seqLoader) {
-          const seqData = await seqLoader.loadItem(seqDir, { id: draft.sequenceId, name: `${draft.sequenceId}` }, data.rootHandle) as { def: AnimationDef }
-          setSequence(seqData.def)
-          setFrameIndex(0)
+  const rootHandle = data.rootHandle
+  useEffect(() => {
+    if (!rootHandle) return
+    let cancelled = false
+    // Typing an id commits a digit at a time; without this every prefix
+    // (1, 12, 123…) would fetch and decode a whole model.
+    const timer = setTimeout(() => {
+      ;(async () => {
+        try {
+          const merged = await loadModelComposite(rootHandle, {
+            modelIds: [draft.modelId],
+            recolor: {
+              from: draft.originalColours,
+              to: draft.modifiedColours,
+              textureFrom: draft.originalTextures,
+              textureTo: draft.modifiedTextures,
+            },
+          })
+          if (cancelled) return
+          setModel(merged)
+          setModelError(null)
+        } catch {
+          if (cancelled) return
+          setModel(null)
+          setModelError(`Couldn't load model ${draft.modelId}.`)
         }
-      }
-      setStatus('')
-    } catch {
-      setStatus(`Couldn't load model ${draft.modelId}.`)
-    }
-  }
-
-  async function poseFrame(index: number) {
-    if (!baseModel || !sequence || !data.rootHandle) { setPosedVertices(null); return }
-    const setId = sequence.frameSetIds?.[index]
-    if (setId == null) return
-    const fileId = frameFileId(sequence, index)
-
-    try {
-      let frameSet = frameSetCache.current.get(setId)
-      if (!frameSet) {
-        const dir = await resolveEntryHandle(data.rootHandle, getEntryPath('animation_frame_sets'))
-        const loader = getLoader('animation_frame_sets')
-        if (!dir || !loader) throw new Error('animation_frame_sets entry not available')
-        frameSet = await loader.loadItem(dir, { id: setId, name: `${setId}` }, data.rootHandle) as AnimationFrameSetData
-        frameSetCache.current.set(setId, frameSet)
-      }
-      const frame = frameSet.frames.get(fileId)
-      if (!frame || frame.rawFallbackBytes) { setStatus('Frame unavailable.'); setPosedVertices(null); return }
-
-      let frameBase = frameBaseCache.current.get(frame.frameBaseId)
-      if (!frameBase) {
-        const dir = await resolveEntryHandle(data.rootHandle, getEntryPath('animation_frame_bases'))
-        const loader = getLoader('animation_frame_bases')
-        if (!dir || !loader) throw new Error('animation_frame_bases entry not available')
-        const fbData = await loader.loadItem(dir, { id: frame.frameBaseId, name: `${frame.frameBaseId}` }, data.rootHandle) as { def: AnimationFrameBaseDef }
-        frameBase = fbData.def
-        frameBaseCache.current.set(frame.frameBaseId, frameBase)
-      }
-
-      const posed = applyAnimationFrame(baseModel, frameBase, frame)
-      setPosedVertices(posed)
-    } catch {
-      setPosedVertices(null)
-    }
-  }
+      })()
+    }, 200)
+    return () => { cancelled = true; clearTimeout(timer) }
+    // the pairs participate through modelKey
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelKey, rootHandle])
 
   useEffect(() => {
-    if (baseModel) poseFrame(frameIndex)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseModel, sequence, frameIndex])
+    if (!rootHandle) return
+    let cancelled = false
+    setSequence(null)
+    if (draft.sequenceId < 0) return
+    ;(async () => {
+      try {
+        const dir = await resolveEntryHandle(rootHandle, getEntryPath('animations'))
+        if (!dir) return
+        const file = await (await dir.getFileHandle(`${draft.sequenceId}.json`)).getFile()
+        const def = JSON.parse(await file.text()) as AnimationDef
+        if (!cancelled) setSequence(def)
+      } catch { /* unresolvable sequence — the preview stays static */ }
+    })()
+    return () => { cancelled = true }
+  }, [draft.sequenceId, rootHandle])
 
-  const frameCount = sequence?.frameDurations?.length ?? 0
+  const { posedVertices, status, frameIndex, setFrameIndex, frameCount, playing, setPlaying } =
+    useSequencePlayback(sequence, model, rootHandle, true)
+
+  function stepFrame(delta: number) {
+    if (frameCount === 0) return
+    setPlaying(false)
+    setFrameIndex((i) => (i + delta + frameCount) % frameCount)
+  }
+
+  // Client SpotAnimationDefinitions.rasterize: createMeshRasterizer(…, ambient
+  // + 64, contrast + 850), then resize(scaleXZ, scaleY, scaleXZ) and a 90/180/
+  // 270-degree yaw — all after the animation pose.
+  const world: WorldRenderParams = {
+    ambient: draft.ambient,
+    contrast: draft.contrast,
+    scaleX: draft.scaleXZ,
+    scaleY: draft.scaleY,
+    scaleZ: draft.scaleXZ,
+    rotation: draft.rotation,
+  }
 
   return (
-    <div className="item-viewer">
+    <div className="item-viewer spotanim-viewer">
       <div className="item-header">
         <div className="item-badges">
           <span className="enum-title">Spot Animation {data.id}</span>
         </div>
       </div>
 
-      <section className="item-section">
-        <h3>Model &amp; Sequence</h3>
-        <div className="item-grid">
-          <label className="item-field">
-            <span className="item-field-label">Model ID</span>
-            <NumberInput value={draft.modelId} onChange={(v) => set('modelId', v)} />
-          </label>
-          <label className="item-field">
-            <span className={`item-field-label${onNavigate ? ' field-link-label' : ''}`}>
-              <span>Sequence ID</span>
-              {onNavigate && draft.sequenceId >= 0 && (
-                <button type="button" className="field-link-btn" onClick={() => onNavigate('animations', draft.sequenceId)}>View</button>
-              )}
-            </span>
-            <NumberInput value={draft.sequenceId} onChange={(v) => set('sequenceId', v)} />
-          </label>
-          <label className="item-field def-toggle-field">
-            <span className="item-field-label">Replay</span>
-            <span className="sprite-toggle">
-              <input type="checkbox" checked={draft.replay} onChange={(e) => set('replay', e.target.checked)} />
-              <span className="sprite-toggle-track" />
-            </span>
-          </label>
+      <div className="spotanim-layout">
+        <div className="spotanim-main">
+          <section className="item-section">
+            <h3>Model &amp; Sequence</h3>
+            <div className="item-grid">
+              <label className="item-field">
+                <span className={`item-field-label${rootHandle ? ' field-link-label' : ''}`}>
+                  <span>Model ID</span>
+                  {rootHandle && (
+                    <button type="button" className="field-link-btn" onClick={() => setModelModal(true)}>View</button>
+                  )}
+                </span>
+                <NumberInput value={draft.modelId} onChange={(v) => set('modelId', v)} />
+              </label>
+              <label className="item-field">
+                <span className={`item-field-label${onNavigate ? ' field-link-label' : ''}`}>
+                  <span>Sequence ID</span>
+                  {onNavigate && draft.sequenceId >= 0 && (
+                    <button type="button" className="field-link-btn" onClick={() => onNavigate('animations', draft.sequenceId)}>View</button>
+                  )}
+                </span>
+                <NumberInput value={draft.sequenceId} onChange={(v) => set('sequenceId', v)} />
+              </label>
+              <label className="item-field def-toggle-field">
+                <span className="item-field-label">Replay</span>
+                <span className="sprite-toggle">
+                  <input type="checkbox" checked={draft.replay} onChange={(e) => set('replay', e.target.checked)} />
+                  <span className="sprite-toggle-track" />
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <section className="item-section">
+            <h3>Display</h3>
+            <p className="tex-op-note">
+              Scales are 128ths. Rotation is degrees — only 90/180/270 do anything. Ambient brightens
+              (<code>+64</code>); contrast <em>divides</em> the sun (<code>768/(contrast+850)</code>), so higher = flatter.
+            </p>
+            <NumGrid fields={GENERAL_FIELDS} values={draft as unknown as Record<string, unknown>} onChange={(k, v) => set(k, v)} />
+          </section>
+
+          <section className="item-section">
+            <h3>Ground Contour</h3>
+            <p className="tex-op-note">How the mesh height-blends to terrain (blood, scorch marks). Type 0 = none. Not previewed.</p>
+            <NumGrid fields={CONTOUR_FIELDS} values={draft as unknown as Record<string, unknown>} onChange={(k, v) => set(k, v)} />
+          </section>
+
+          <PairTable
+            title="Recolour Pairs"
+            srcLabel="Original HSL"
+            dstLabel="Replacement HSL"
+            src={draft.originalColours ?? []}
+            dst={draft.modifiedColours ?? []}
+            onSet={setRecolorPair}
+            onAdd={addRecolorPair}
+            onRemove={removeRecolorPair}
+          />
         </div>
-      </section>
 
-      <section className="item-section">
-        <h3>Display</h3>
-        <NumGrid fields={GENERAL_FIELDS} values={draft as unknown as Record<string, unknown>} onChange={(k, v) => set(k, v)} />
-      </section>
-
-      <section className="item-section">
-        <h3>Ground Contour</h3>
-        <p className="tex-op-note">How the mesh height-blends to terrain (blood, scorch marks). Type 0 = none.</p>
-        <NumGrid fields={CONTOUR_FIELDS} values={draft as unknown as Record<string, unknown>} onChange={(k, v) => set(k, v)} />
-      </section>
-
-      <PairTable
-        title="Recolour Pairs"
-        srcLabel="Original HSL"
-        dstLabel="Replacement HSL"
-        src={draft.originalColours ?? []}
-        dst={draft.modifiedColours ?? []}
-        onSet={setRecolorPair}
-        onAdd={addRecolorPair}
-        onRemove={removeRecolorPair}
-      />
-
-      <section className="item-section">
-        <h3>Preview</h3>
-        <button type="button" className="add-row-btn" onClick={loadPreview}>Load Preview</button>
-        {status && <p className="tex-op-note">{status}</p>}
-        {sequence && frameCount > 0 && (
-          <div className="model-toolbar">
-            <span className="item-stack-index">Frame {frameIndex + 1} / {frameCount}</span>
-            <button type="button" className="model-toolbar-btn" disabled={frameIndex === 0} onClick={() => setFrameIndex((i) => Math.max(0, i - 1))}>◂ Prev</button>
-            <button type="button" className="model-toolbar-btn" disabled={frameIndex >= frameCount - 1} onClick={() => setFrameIndex((i) => Math.min(frameCount - 1, i + 1))}>Next ▸</button>
+        <aside className="spotanim-preview">
+          {/* A peer of the field sections' headings, NOT of the page title —
+              same font and same 10px gap to its body, so the card's top edge
+              lands level with the first row of field cells. */}
+          <div className="spotanim-preview-head">
+            <h3>Preview</h3>
           </div>
-        )}
-        {baseModel && <ModelViewer data={baseModel} posedVertices={posedVertices} />}
-      </section>
+
+          <div className="spotanim-preview-body">
+            {!rootHandle && <p className="tex-op-note">Reopen the cache to enable the preview.</p>}
+            {modelError && <p className="tex-op-note">{modelError}</p>}
+            {rootHandle && !model && !modelError && <p className="tex-op-note">Loading model {draft.modelId}…</p>}
+            {model && (
+              <ModelViewer
+                data={model}
+                world={world}
+                posedVertices={posedVertices}
+                cameraStateRef={cameraStateRef}
+                fitScale={2.8}
+                hideHeader
+              />
+            )}
+            <div className="model-toolbar spotanim-playback">
+              <button
+                type="button"
+                className="model-toolbar-btn"
+                disabled={frameCount === 0}
+                title="Previous frame"
+                onClick={() => stepFrame(-1)}
+              >
+                ◂◂
+              </button>
+              <button
+                type="button"
+                className={`model-toolbar-btn spotanim-play-btn${playing ? ' active' : ''}`}
+                disabled={frameCount === 0}
+                onClick={() => setPlaying((p) => !p)}
+              >
+                {playing ? '⏸ Pause' : '▶ Play'}
+              </button>
+              <button
+                type="button"
+                className="model-toolbar-btn"
+                disabled={frameCount === 0}
+                title="Next frame"
+                onClick={() => stepFrame(1)}
+              >
+                ▸▸
+              </button>
+              {/* Beside the transport, not off in a corner — this is the one
+                  number you watch while scrubbing. */}
+              <span className="spotanim-frame-count">
+                {frameCount > 0
+                  ? `Frame ${frameIndex + 1} / ${frameCount}`
+                  : draft.sequenceId < 0
+                  ? 'Static'
+                  : 'No frames'}
+              </span>
+            </div>
+            <p className="spotanim-preview-meta">
+              {frameCount > 0
+                ? `Sequence ${draft.sequenceId}`
+                : draft.sequenceId < 0
+                ? 'No sequence — static model.'
+                : `Sequence ${draft.sequenceId} has no frames.`}
+              {status && ` · ${status}`}
+            </p>
+          </div>
+        </aside>
+      </div>
+
+      {modelModal && rootHandle && (
+        <ModelPreviewModal
+          title={`Spot animation ${data.id} — model ${draft.modelId}`}
+          modelIds={[draft.modelId]}
+          recolor={{
+            from: draft.originalColours,
+            to: draft.modifiedColours,
+            textureFrom: draft.originalTextures,
+            textureTo: draft.modifiedTextures,
+          }}
+          scale={{ x: draft.scaleXZ, y: draft.scaleY, z: draft.scaleXZ }}
+          sequenceId={draft.sequenceId >= 0 ? draft.sequenceId : undefined}
+          rootHandle={rootHandle}
+          openLabel={onNavigate ? 'Open in Models' : undefined}
+          onOpen={onNavigate ? () => { setModelModal(false); onNavigate('models', draft.modelId) } : undefined}
+          onClose={() => setModelModal(false)}
+        />
+      )}
 
       {isDirty && (
         <div className="save-bar">

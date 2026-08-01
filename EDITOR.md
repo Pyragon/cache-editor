@@ -1008,6 +1008,38 @@ guessed before checking:
   ~10% over-lit, shrinking as contrast rises. Spot animations want
   `768 / (850 + contrast)` with no multiplier at all.
 
+## Spot animation display fields — the full render recipe (TRACED 2026-07-30)
+
+`SpotAnimationDefinitions.rasterize` (darkan-game-client) is short enough to
+read end to end, and it settles the *order* the five display fields apply in —
+which is what a preview has to get right, because scaling before posing is not
+the same as scaling after.
+
+| dumped (cryogen) | client field | opcode | decode | applied |
+| --- | --- | --- | --- | --- |
+| `modelId` | `defaultModel` | 1 | bigsmart | `RSMesh.decodeMesh`, then `upscale()` when `version < 13` |
+| `sequenceId` | `animationId` | 2 | bigsmart | `animation.rasterize(rasterizer, 0)` |
+| `scaleXZ` | `anInt6976` | 4 | ushort, default 128 | `resize(scaleXZ, scaleY, scaleXZ)` — **X and Z share one value** |
+| `scaleY` | `anInt6971` | 5 | ushort, default 128 | same call |
+| `rotation` | `anInt6978` | 6 | ushort | whole **degrees**, and only 90 / 180 / 270 do anything (`f(4096 / 8192 / 12288)` — 16384 units to a circle). Every other value is silently ignored. |
+| `ambient` | `anInt6979` | 7 | **unsigned** byte | `createMeshRasterizer(…, ambient + 64, …)` |
+| `contrast` | `anInt6981` | 8 | **unsigned** byte | `createMeshRasterizer(…, …, contrast + 850)` — see the table above; no `·5` |
+| recolour / retexture pairs | 40 / 41 | | | `recolour(from, to)` / `retexture(from, to)` on the rasterizer, **before** the pose |
+
+The sequence is: decode mesh → pre-13 upscale → build rasterizer with the
+ambient/contrast pair → recolour/retexture → **pose** → **resize** → **rotate**
+→ ground contour. So resize and rotation act on the *posed* mesh, which is why
+`SpotAnimationViewer` hands them to `ModelViewer` as a render transform
+(`WorldRenderParams`, applied to the pose group) instead of baking them into
+the vertex buffer the animation rewrites each frame. Recolours go the other
+way — they precede the pose, so they're baked into the mesh at load.
+
+**Editable today** in `SpotAnimationViewer`, all five live-previewed in the
+right-hand panel along with the recolour pairs. **Not previewed:** the ground
+contour (`contourType`/`contourModifier`, opcodes 9–16 → `aByte6982` /
+`anInt6980`) needs real terrain under the model, and `replay` (opcode 10,
+`aBool6968`) is a spawn-behaviour flag with nothing to draw.
+
 # Editor gaps (map scene)
 
 Requested 2026-07-25. These are UI/UX work, not cache-format work — grouped

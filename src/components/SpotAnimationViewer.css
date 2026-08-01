@@ -1,0 +1,179 @@
+/* Spot animations put the editable def on the left and a permanent, always-live
+   3D preview on the right.
+
+   The page title sits ABOVE this layout, full width, exactly as every other
+   editor has it. The preview column starts level with the field sections and
+   its "Preview" heading is styled as a peer of their section headings — the
+   preview belongs to the item's data, it isn't a separate thing hung off the
+   title. Nothing here is centred as a block: the left column flows from the
+   panel edge like the rest of the app. */
+.spotanim-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.spotanim-main {
+  flex: 0 1 620px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* Narrower than the default 175px minimum, but not so narrow that a label with
+   a "View" link beside it (Sequence ID) ellipsises — that's the floor here. */
+.spotanim-main .item-grid {
+  grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+  max-width: 560px;
+}
+
+.spotanim-main .tex-op-note {
+  font-size: 11px;
+  line-height: 1.45;
+  max-width: 560px;
+}
+
+.spotanim-main .tex-op-note + .item-grid {
+  margin-top: 8px;
+}
+
+/* The field column is fixed-width, so the auto side margins split whatever is
+   left over evenly — equal space either side of the card instead of it being
+   shoved against the panel wall. */
+.spotanim-preview {
+  /* Sized so the card's TOTAL height lands on the field column's natural height
+     (~505px: four sections, no recolour pairs yet) while the canvas stays
+     square. Card height = heading 26 + padding 28 + canvas + 3 gaps of 10 +
+     playback 27 + toolbar 22 + meta 14 + borders 2, so a 390 card gives a
+     360-square canvas and ~509 overall. Widening the card raises the height
+     too — the two can't be tuned independently while the canvas is square. */
+  --spotanim-card-w: 390px;
+  --spotanim-card-pad: 14px;
+  flex: none;
+  width: var(--spotanim-card-w);
+  margin-inline: auto;
+  position: sticky;
+  top: 0;
+}
+
+/* Matches .item-section h3 exactly (size, weight, casing, 10px to its body), so
+   this row reads as another section heading and the card below starts level
+   with the first row of field cells opposite. */
+.spotanim-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.spotanim-preview-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+/* Bordered like the field cells opposite — it gets a cell of its own. */
+.spotanim-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: var(--spotanim-card-pad);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* ModelViewer renders canvas-then-toolbar as one block, which would strand the
+   playback row below its Wireframe/Particles toolbar. `display: contents`
+   promotes the canvas and that toolbar into this flex column so `order` can put
+   the primary controls directly under the canvas. */
+.spotanim-preview .model-viewer {
+  display: contents;
+}
+
+/* Square. Computed from the card's own width variables rather than left to
+   `aspect-ratio`: the canvas is a flex item whose child is sized `height: 100%
+   !important`, and resolving that percentage against an aspect-ratio-derived
+   auto height is exactly the circular case browsers handle inconsistently.
+   `flex: none` keeps the column's flex sizing off the height as well. */
+.spotanim-preview .model-canvas {
+  order: 1;
+  flex: none;
+  width: 100%;
+  min-height: 0;
+  height: calc(var(--spotanim-card-w) - 2 * var(--spotanim-card-pad) - 2px);
+}
+
+/* Secondary controls (Wireframe / Particles / FPS) sit last and wrap. */
+.spotanim-preview .model-toolbar {
+  order: 3;
+  flex-wrap: wrap;
+  justify-content: center;
+  opacity: 0.75;
+}
+
+/* Must follow .model-toolbar: the playback row carries both classes. */
+.spotanim-preview .spotanim-playback {
+  order: 2;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  opacity: 1;
+}
+
+.spotanim-playback .model-toolbar-btn {
+  min-width: 52px;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.spotanim-playback .spotanim-play-btn {
+  min-width: 88px;
+}
+
+/* Tabular figures plus a reserved width so the transport buttons don't shuffle
+   sideways as the frame number gains or loses a digit. */
+.spotanim-frame-count {
+  margin-left: 6px;
+  min-width: 92px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.spotanim-preview-meta {
+  order: 4;
+  margin: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Narrow windows: drop the preview under the fields instead of squeezing both.
+   620 field column + 20 gap + 390 card = 1030, so stack just below that. */
+@media (max-width: 1080px) {
+  .spotanim-layout {
+    flex-direction: column;
+  }
+
+  .spotanim-main {
+    flex: 1 1 auto;
+    align-self: stretch;
+  }
+
+  .spotanim-preview {
+    width: 100%;
+    margin-inline: 0;
+    position: static;
+  }
+
+  /* Full-bleed once stacked, so a square would be absurdly tall. */
+  .spotanim-preview .model-canvas {
+    height: 440px;
+  }
+}
