@@ -1691,7 +1691,7 @@ function App() {
                 : soundEffectContent != null
                 ? <SoundEffectViewer data={soundEffectContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : midiInstrumentContent != null
-                ? <MidiInstrumentViewer data={midiInstrumentContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <MidiInstrumentViewer data={midiInstrumentContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => { void handleNavigateToItem(entryName, id) }} />
                 : musicContent != null
                 ? <MusicViewer data={musicContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} rootHandle={cacheHandle ?? undefined} />
                 : soundEffectMidiContent != null

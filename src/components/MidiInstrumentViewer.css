@@ -1,0 +1,111 @@
+/* midi_instruments page. Prefix mi-.
+   The transport row deliberately reuses MusicViewer's .music-transport /
+   .music-play / .music-time / .music-seek / .music-volume so the two audio
+   pages feel like one control surface — see the shared-class note in CLAUDE.md. */
+
+.mi-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.mi-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mi-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Waveform */
+
+.mi-wave {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #0a0c12;
+  overflow: hidden;
+  cursor: crosshair;
+}
+
+.mi-wave canvas {
+  display: block;
+}
+
+/* Properties.
+   auto-fit rather than fixed columns: these fields carry a line of
+   explanation each, and at narrow widths two columns of wrapped hint text is
+   less readable than one. */
+
+.mi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px 20px;
+  margin-bottom: 12px;
+}
+
+.mi-grid .item-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.mi-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.mi-hint code {
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* the toggle row shouldn't stretch its control to the column width */
+.mi-grid .def-toggle-field .sprite-toggle {
+  align-self: flex-start;
+}
+
+.mi-loop-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mi-loop-toggle.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.mi-loop-toggle input {
+  cursor: inherit;
+}
+
+/* Scan action sits above its explanation rather than trailing the end of a
+   paragraph, where a button is easy to miss. */
+.mi-scan {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.mi-scan .tex-op-note {
+  margin: 0;
+}

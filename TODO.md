@@ -66,6 +66,56 @@ Sizing, for whenever this comes back: song-scoped export is 0.28 MB median /
 ~161 s of pure synthesis, so it likely needs chunking or a cancel button (an
 `AbortSignal` is plumbed through but nothing drives it).
 
+### RE-DUMP `midi_instruments` — two dumper bugs fixed 2026-08-01
+
+`MidiInstrument.dumpFiles` wrote the **packet index** as each Ogg page's granule
+position instead of a running sample count, so a 123-packet instrument ended at
+granulepos 123 rather than 62,110 samples. Every player reads that as a ~6ms
+file, which is why an `<audio>` element's play button did nothing. `duration`
+inherited it — computed off the same figure at 1,000 samples per packet, when
+they hold about 505 — and came out roughly 2x the truth.
+
+Fixed in cryogen: granule positions now distribute `sampleSize` across the
+packets (exact at both ends, at most half a block out in between, which only
+affects seek precision), and `duration` is `sampleSize / samplingRate` in
+seconds, taken directly rather than by re-reading the .ogg. `aBool7609` is
+renamed `loopConsistency` at the same time. Compiles on JDK 17 — note the
+Maven build fails on JDK 24 with a Lombok error unrelated to this.
+
+**Needs a re-dump.** Nothing breaks without one: the viewer decodes the packets
+and measures the audio itself, and the loader reads either spelling of the loop
+flag. What is stale until then is the `duration` field and any external player
+pointed at the dumped `.ogg`.
+
+### OPEN QUESTION: 14,211 of 16,825 midi_instruments have no reference in the cache
+
+Measured 2026-08-01, and the reason it matters is that it is 84% of the index.
+
+Two ways in were found and both are now indexed by the viewer's "Used by"
+panel: `sound_effects_midi` banks reach 1,187, and object/NPC ambient sounds
+reach another 1,427 — an object or NPC sound id is looked up in
+`midi_instruments` instead of `sound_effects` when the def sets the instrument
+flag (object opcodes 168/169, NPC opcode 162; `SoundEffectPlayer:233/268`,
+`AreaSoundPlayer:67`). Total reachable from cache data: 2,614.
+
+That leaves 14,211 with no cache-side referrer at all, which is too many to
+wave away as leftovers. Before concluding they are dead, check the referrers
+that would not show up in a def scan:
+
+- **Server-driven sound ids.** `AreaSoundPlayer:67` plays `sound.soundId`
+  through this index for "spoken" area sounds, and the id comes over the wire.
+  darkan-world-server is the place to grep.
+- **CS2 scripts** that trigger sounds by id.
+- **Whether the id space is what we think.** `SoundBankCache.listMusic` treats
+  its argument as an archive id or a file id depending on the index layout
+  (`getArchiveCount() == 1`). cryogen dumps a flat 1..16824. All 1,187 bank
+  references resolve to files that exist, and referenced ids cluster rather
+  than spreading evenly (34.7% of the first decile, 0% of the 70-80% band),
+  which argues the mapping is right — but it has not been proven.
+
+Until that is settled the viewer says only what it has checked; it does not
+claim the rest are unreachable.
+
 ### `midi_instruments` viewer wants export buttons too, eventually
 
 Same parking as above, plus Cody wants to rework that viewer anyway — so this
