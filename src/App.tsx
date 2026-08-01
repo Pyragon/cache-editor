@@ -81,6 +81,7 @@ import SoundEffectMidiViewer from './components/SoundEffectMidiViewer'
 import type { SoundEffectMidiData } from './loaders/sound_effects_midi'
 import IdentikitViewer from './components/IdentikitViewer'
 import type { IdentikitData } from './loaders/config/identikit'
+import ErrorBoundary from './components/ErrorBoundary'
 import AnimationViewer from './components/AnimationViewer'
 import type { AnimationData } from './loaders/animations'
 import AnimationFrameBaseViewer from './components/AnimationFrameBaseViewer'
@@ -1549,6 +1550,7 @@ function App() {
                 onChange={(e) => setFilter(e.target.value)}
               />
             </div>
+            <ErrorBoundary label="item list" resetKey={selectedEntry.name}>
             <ul
               ref={itemListRef}
               className="item-list"
@@ -1592,12 +1594,19 @@ function App() {
                 })}
               </div>
             </ul>
+            </ErrorBoundary>
           </aside>
         )}
 
         <main id="content">
           <div className="content-panel">
           <div className="content-panel-scroll" ref={contentPanelRef}>
+            {/* The viewers are where a render throw is most likely — they read
+                cache data that may be shaped differently from what they expect.
+                Without a boundary here, one bad item blanks the entire app and
+                you have to reload and re-pick the cache folder. Keyed on the
+                selection so clicking a different item clears the error. */}
+            <ErrorBoundary label="viewer" resetKey={`${selectedEntry?.name ?? ''}:${selectedItemId ?? ''}`}>
             {isLoading ? (
               <p className="loading-text">
                 {loadCount > 0
@@ -1728,6 +1737,7 @@ function App() {
             ) : selectedItem ? (
               <p className="loading-text">Loading…</p>
             ) : null}
+            </ErrorBoundary>
           </div>
           </div>
         </main>
