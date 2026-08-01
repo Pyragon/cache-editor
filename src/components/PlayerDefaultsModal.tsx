@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PlayerLook, PlayerLooks } from '../loaders/playerLook'
 import {
   LOOK_COLOUR_LABELS, LOOK_PART_ARMS, LOOK_PART_COUNT, LOOK_PART_LABELS, LOOK_PART_TOP,
-  LOOK_PART_WRISTS, defaultPlayerLooks, loadPlayerLooks, lookPartAppliesTo, savePlayerLooks,
+  LOOK_PART_WRISTS, defaultPlayerLooks, loadPlayerGender, loadPlayerLooks, lookPartAppliesTo,
+  savePlayerGender, savePlayerLooks,
 } from '../loaders/playerLook'
 import type { LookModel, RecolorPalette } from '../loaders/playerAppearance'
 import { buildLookModel, loadRecolorPalette } from '../loaders/playerAppearance'
@@ -57,7 +58,7 @@ type Props = {
 export default function PlayerDefaultsModal({ rootHandle, onClose }: Props) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const [looks, setLooks] = useState<PlayerLooks>(() => loadPlayerLooks())
-  const [female, setFemale] = useState(false)
+  const [female, setFemale] = useState(loadPlayerGender)
   const [dirty, setDirty] = useState(false)
   const [palette, setPalette] = useState<RecolorPalette | null>(null)
   const [outfit, setOutfit] = useState<OutfitData | null>(null)
@@ -254,14 +255,14 @@ export default function PlayerDefaultsModal({ rootHandle, onClose }: Props) {
               <button
                 type="button"
                 className={`pill-btn${female ? '' : ' active'}`}
-                onClick={() => { setFemale(false); setSelectedSlot(null) }}
+                onClick={() => { setFemale(false); savePlayerGender(false); setSelectedSlot(null) }}
               >
                 Male
               </button>
               <button
                 type="button"
                 className={`pill-btn${female ? ' active' : ''}`}
-                onClick={() => { setFemale(true); setSelectedSlot(null) }}
+                onClick={() => { setFemale(true); savePlayerGender(true); setSelectedSlot(null) }}
               >
                 Female
               </button>

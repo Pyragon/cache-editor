@@ -118,6 +118,28 @@ export function lookSlotFromCategory(category: number): { female: boolean; part:
 
 export const PLAYER_LOOK_KEY = 'cache-editor:player-look-v1'
 
+export const PLAYER_GENDER_KEY = 'cache-editor:player-gender-v1'
+
+/** Which of the two stored looks IS you. Both are kept and editable, but a
+ *  cutscene's player entity can only wear one, so the Player Look modal's
+ *  Male/Female pill records which is the character rather than just which one
+ *  you happen to be editing. */
+export function loadPlayerGender(): boolean {
+  try {
+    return localStorage.getItem(PLAYER_GENDER_KEY) === 'female'
+  } catch {
+    return false
+  }
+}
+
+export function savePlayerGender(female: boolean): void {
+  try {
+    localStorage.setItem(PLAYER_GENDER_KEY, female ? 'female' : 'male')
+  } catch {
+    // storage disabled/full — the choice still applies for this session
+  }
+}
+
 function sanitizeLook(raw: unknown, fallback: PlayerLook): PlayerLook {
   const src = (raw ?? {}) as Partial<PlayerLook>
   const pick = (list: unknown, count: number, base: number[]) => {

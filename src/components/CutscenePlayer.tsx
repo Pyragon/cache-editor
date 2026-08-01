@@ -8,6 +8,9 @@ import type { ModelData } from '../loaders/models'
 import { applyPoseToMesh, buildTexturedModelMesh } from './modelMesh'
 import type { TexturedModelMesh } from './modelMesh'
 import { loadModelComposite, npcCompositeSpec, objectCompositeSpec } from '../loaders/npcComposite'
+import { buildLookModel } from '../loaders/playerAppearance'
+import { loadPlayerGender, loadPlayerLooks } from '../loaders/playerLook'
+import { resolveRenderEmote } from '../loaders/renderEmote'
 import type { AnimationDef } from '../loaders/animations'
 import { frameFileId } from '../loaders/animations'
 import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
@@ -80,6 +83,9 @@ function sunOf(env: RegionEnvironment | null): SunConfig {
 const FOG_TILES = 64
 
 const VOLUME_KEY = 'cache-editor:cutscene-volume'
+
+/** No def to read ambient/contrast from, so the client's base values. */
+const PLAYER_LIGHTING = { ambient: 64, contrast: 850 }
 
 type Props = {
   def: CutsceneDef
@@ -1353,10 +1359,25 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         }
 
         // Entities: NPC composites + BAS stand/walk anims; the player entity is
-        // a placeholder marker (its appearance is streamed at runtime).
+        // the editor's stored Player Look, standing in for the appearance the
+        // real client streams from the server.
         setStatus('Loading cast…')
         const npcsDir = await resolveEntryHandle(rootHandle, getEntryPath('npcs'))
         const basDir = await resolveEntryHandle(rootHandle, getEntryPath('config_bas'))
+        /** Stand/walk/run/half-walk sequences, plus the BAS half of the turn
+         *  gate. Shared by NPCs (their def's basId) and the player (1426). */
+        const applyBas = async (ert: EntityRt, basId: number) => {
+          if (basId < 0 || !basDir) return
+          try {
+            const basFile = await (await basDir.getFileHandle(`${basId}.json`)).getFile()
+            const bas = JSON.parse(await basFile.text()) as Record<string, unknown>
+            ert.standAnimId = Number(bas.standAnimation ?? -1)
+            ert.walkAnimId = Number(bas.walkAnimation ?? -1)
+            ert.runAnimId = Number(bas.runningAnimation ?? -1)
+            ert.halfWalkAnimId = Number(bas.teleportingAnimation ?? -1)
+            ert.turnsWhileWalking ||= Number(bas.yawAcceleration ?? 0) !== 0
+          } catch { /* BAS unavailable */ }
+        }
         for (const entity of def.entities) {
           const ert: EntityRt = {
             em: null, group: new THREE.Group(), placed: false,
@@ -1411,24 +1432,37 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
               // entities gliding sideways and made the ones it did catch walk
               // backwards, since the walk facing was 180° out on top of it.)
               ert.turnsWhileWalking = (Number(npcDef.turnDirection ?? 32) << 3) !== 0
-              if (basId >= 0 && basDir) {
-                try {
-                  const basFile = await (await basDir.getFileHandle(`${basId}.json`)).getFile()
-                  const bas = JSON.parse(await basFile.text()) as Record<string, unknown>
-                  ert.standAnimId = Number(bas.standAnimation ?? -1)
-                  ert.walkAnimId = Number(bas.walkAnimation ?? -1)
-                  ert.runAnimId = Number(bas.runningAnimation ?? -1)
-                  ert.halfWalkAnimId = Number(bas.teleportingAnimation ?? -1)
-                  ert.turnsWhileWalking ||= Number(bas.yawAcceleration ?? 0) !== 0
-                } catch { /* BAS unavailable */ }
-              }
+              await applyBas(ert, basId)
             } else {
-              const marker = new THREE.Mesh(
-                new THREE.ConeGeometry(140, 460, 12),
-                new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.75 }),
-              )
-              marker.position.y = 230
-              ert.group.add(marker)
+              // The player. Its appearance streams from the server in the real
+              // client (CutsceneEntity decodes an appearance block), so there is
+              // nothing in the cache that says who this is — the editor's own
+              // stored Player Look stands in: the identikit parts, colour
+              // choices and equipped items you set under Player Look, assembled
+              // by the same buildLookModel the modal previews with.
+              const looks = loadPlayerLooks()
+              const female = loadPlayerGender()
+              const look = female ? looks.female : looks.male
+              const built = await buildLookModel(rootHandle, look, null, female)
+              const tm = built.model ? await buildTexturedModelMesh(built.model, PLAYER_LIGHTING) : null
+              if (tm && built.model) {
+                ert.em = { tm, model: built.model }
+                ert.group.add(tm.mesh)
+              } else {
+                // no usable look (parts missing from the dump) — keep the old
+                // marker so the entity's placement and routes stay visible
+                const marker = new THREE.Mesh(
+                  new THREE.ConeGeometry(140, 460, 12),
+                  new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.75 }),
+                )
+                marker.position.y = 230
+                ert.group.add(marker)
+              }
+              // The render emote: the equipped weapon's BAS (item client-script
+              // param 644), or 1426 unarmed — so wielding a sword in Player
+              // Look gives the cutscene player the sword stance, exactly as the
+              // server derives it (Appearance.getRenderEmote).
+              await applyBas(ert, (await resolveRenderEmote(rootHandle, look.equipment)).bas)
             }
           } catch { /* NPC unloadable — the entity acts but stays invisible */ }
           ert.group.visible = false
