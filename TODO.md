@@ -394,6 +394,32 @@ real cache, in rough risk order:
 
 ## General Editor
 
+### Every entry needs a working Add / Remove / Clone
+
+Audited 2026-08-01. The sidebar buttons are gated on the loader exposing
+`createItem` / `deleteItem` / `cloneItem`, so an entry without them shows the
+button greyed out with no explanation. 19 of 32 entry loaders are missing at
+least one.
+
+**All three (13):** animations, billboards, game_tips, items, map_areas, npcs,
+objects, particles, quick_chat_menus, quick_chat_messages, spot_animations,
+sprites, texture_definitions.
+
+**Add + Remove but no Clone (4):** animation_frame_bases, cs2,
+sound_effects_midi, varbits. These get Add/Remove free from
+`makeJsonDefLoader`; only `cloneItem` is missing, so they are the cheap ones.
+
+**None of the three (15):** animation_frame_sets, cutscenes, defaults, enums,
+font_metrics, huffman, interfaces, maps, midi_instruments, models, music,
+native_libraries, shaders, sound_effects, textures.
+
+Not all fifteen should get all three — some are genuinely single-blob entries
+(`huffman`, `native_libraries`, `defaults`) where Add means nothing, and a few
+write formats we can't synthesise from scratch yet (`models`, `textures`,
+`maps`). Decide per entry: implement it, or make the button explain why it is
+disabled rather than looking broken. The second half matters as much as the
+first — a greyed button with no tooltip reads as a bug.
+
 - **Explain every field, viewer by viewer.** Cody's ask (2026-07-29): a lot of
   pages are just a label and a box, and names like "Supports Items" don't say
   what they do. `NumFieldDef`'s optional third element now carries the
