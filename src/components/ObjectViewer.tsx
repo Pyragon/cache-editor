@@ -7,6 +7,7 @@ import type { ModelCompositeSpec } from '../loaders/npcComposite'
 import { getObjectIcon, peekObjectIcon } from './npcSnapshot'
 import { CursorPreview, ModelSnapshotIcon, SpriteFramePreview } from './spriteCards'
 import { SoundPlayerCell } from './SoundPlayerCell'
+import { InstrumentPlayerCell } from './InstrumentPlayerCell'
 import { MenuPreview } from './MenuPreview'
 import ModelPreviewModal from './ModelPreviewModal'
 import { NumberInput, NumGrid, PairTable, ParamsTable, ToggleGrid  } from './defFields'
@@ -631,10 +632,12 @@ export default function ObjectViewer({ data, onSave, onDirtyChange, onNavigate, 
           onChange={(k, v) => set(k, v)}
           links={{ ambientSoundId: onNavigate && { label: 'View', onOpen: (id: number) => onNavigate(ambientSoundEntry, id) } }}
           fieldExtra={cacheRoot ? {
-            // the synth player only understands index 4 — with the instrument
-            // flag set this id is an ogg in midi_instruments instead
-            ambientSoundId: Number(draft.ambientSoundId ?? -1) >= 0 && !ambientIsInstrument
-              ? <SoundPlayerCell key="ambientSoundId" cacheRoot={cacheRoot} soundId={Number(draft.ambientSoundId)} />
+            // the id names an index-4 synth effect OR an index-14 sample,
+            // depending on the flag — each has its own player
+            ambientSoundId: Number(draft.ambientSoundId ?? -1) >= 0
+              ? (ambientIsInstrument
+                ? <InstrumentPlayerCell key="ambientSoundId" cacheRoot={cacheRoot} soundId={Number(draft.ambientSoundId)} />
+                : <SoundPlayerCell key="ambientSoundId" cacheRoot={cacheRoot} soundId={Number(draft.ambientSoundId)} />)
               : undefined,
           } : undefined}
         />
@@ -649,7 +652,9 @@ export default function ObjectViewer({ data, onSave, onDirtyChange, onNavigate, 
                   <tr key={i}>
                     <td><NumberInput className="cell-input" value={soundId} onChange={(v) => setListValue('soundGroupIds', i, v)} /></td>
                     <td>
-                      {cacheRoot && soundId >= 0 && !groupIsInstrument && <SoundPlayerCell cacheRoot={cacheRoot} soundId={soundId} />}
+                      {cacheRoot && soundId >= 0 && (groupIsInstrument
+                        ? <InstrumentPlayerCell cacheRoot={cacheRoot} soundId={soundId} />
+                        : <SoundPlayerCell cacheRoot={cacheRoot} soundId={soundId} />)}
                     </td>
                     <td>
                       <span className="anim-fit-actions">

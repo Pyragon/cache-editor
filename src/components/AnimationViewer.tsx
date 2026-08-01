@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AnimationData, AnimationDef } from '../loaders/animations'
 import { frameFileId, setFrameRef } from '../loaders/animations'
 import { buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
@@ -6,6 +6,8 @@ import { scanLabel } from '../loaders/scan'
 import type { ScanProgress } from '../loaders/scan'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { NumberInput, NumGrid, IntListInput } from './defFields'
+import { SoundPlayerCell } from './SoundPlayerCell'
+import { InstrumentPlayerCell } from './InstrumentPlayerCell'
 import type { NumFieldDef } from './defFields'
 import { NpcFitTable, SpotFitTable } from './AnimCompatTables'
 import AnimationPlaybackViewer from './AnimationPlaybackViewer'
@@ -144,6 +146,29 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
     setIsDirty(false)
   }
 
+  // Per-frame sounds. soundSettings[frame][0] packs id/repeats/positionOffset
+  // exactly as SequenceSoundPlayer:21-24 unpacks it; entries [1..] are
+  // alternates the client picks between at random. Which index the ids name is
+  // the `vorbis` flag's job — SequenceSoundPlayer:42 branches on it, sending
+  // them to playSoundVorbis (midi_instruments) or playSoundSynth
+  // (sound_effects).
+  const soundEntry = draft.vorbis ? 'midi_instruments' : 'sound_effects'
+  const frameSounds = useMemo(() => {
+    const rows: { frame: number; id: number; repeats: number; volume: number; alternates: number[] }[] = []
+    ;(draft.soundSettings ?? []).forEach((entry, frame) => {
+      if (!entry || entry.length === 0) return
+      const packed = entry[0]
+      rows.push({
+        frame,
+        id: packed >> 8,
+        repeats: (packed >> 5) & 0x7,
+        volume: draft.frameSoundVolume?.[frame] ?? 255,
+        alternates: entry.slice(1),
+      })
+    })
+    return rows
+  }, [draft])
+
   const frameCount = draft.frameDurations?.length ?? 0
   const totalMs = (draft.frameDurations ?? []).reduce((sum, d) => sum + d * 20, 0)
 
@@ -265,6 +290,49 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
         </div>
         <button type="button" className="add-row-btn" onClick={addFrame}>+ Add frame</button>
       </section>
+
+
+      {frameSounds.length > 0 && (
+        <section className="item-section">
+          <h3>Frame Sounds — {frameSounds.length}</h3>
+          <p className="tex-op-note">
+            Played as the animation reaches each frame. The packed value carries the sound id, how many times it
+            repeats, and a position offset; where a frame lists alternates the client picks one at random, so the
+            same swing doesn't sound identical twice.
+            {' '}
+            {draft.vorbis
+              ? <>This animation has <code>vorbis</code> set, so the ids are <code>midi_instruments</code> samples.</>
+              : <>Without <code>vorbis</code> set, the ids are <code>sound_effects</code> synth entries.</>}
+          </p>
+          <div className="quest-table-wrap">
+            <table className="quest-table">
+              <thead>
+                <tr><th>Frame</th><th>Sound</th><th>Repeats</th><th>Volume</th><th>Alternates</th><th /></tr>
+              </thead>
+              <tbody>
+                {frameSounds.map((s) => (
+                  <tr key={s.frame}>
+                    <td className="item-stack-index">{s.frame}</td>
+                    <td>
+                      {onNavigate
+                        ? <button type="button" className="field-link-btn" onClick={() => onNavigate(soundEntry, s.id)}>{s.id}</button>
+                        : s.id}
+                    </td>
+                    <td>{s.repeats}</td>
+                    <td>{s.volume}</td>
+                    <td>{s.alternates.length > 0 ? s.alternates.join(', ') : '—'}</td>
+                    <td>
+                      {data.rootHandle && (draft.vorbis
+                        ? <InstrumentPlayerCell cacheRoot={data.rootHandle} soundId={s.id} />
+                        : <SoundPlayerCell cacheRoot={data.rootHandle} soundId={s.id} />)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="item-section">
         <h3>Playback Settings</h3>

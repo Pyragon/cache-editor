@@ -522,12 +522,14 @@ export default function MidiInstrumentViewer({ data, onSave, onDirtyChange, onNa
                 {uses.map((u, i) => (
                   <tr key={i}>
                     <td className="item-stack-index">
-                      {u.kind === 'bank' ? `Bank ${u.bank}` : u.kind === 'object' ? `Object ${u.id}` : `NPC ${u.id}`}
+                      {u.kind === 'bank' ? `Bank ${u.bank}` : u.kind === 'object' ? `Object ${u.id}` : u.kind === 'npc' ? `NPC ${u.id}` : `Cutscene ${u.id}`}
                     </td>
                     <td>
                       {u.kind === 'bank'
                         ? <>{bankAddress(u.bank)} · note{u.notes.length === 1 ? '' : 's'} {formatNotes(u.notes)}</>
-                        : <><code>{u.field}</code> — ambient sound</>}
+                        : u.kind === 'cutscene'
+                          ? <><code>PLAY_VORBIS</code> — cutscene audio</>
+                          : <><code>{u.field}</code> — ambient sound</>}
                     </td>
                     <td>
                       {onNavigate && (
@@ -535,7 +537,7 @@ export default function MidiInstrumentViewer({ data, onSave, onDirtyChange, onNa
                           type="button"
                           className="field-link-btn"
                           onClick={() => onNavigate(
-                            u.kind === 'bank' ? 'sound_effects_midi' : u.kind === 'object' ? 'objects' : 'npcs',
+                            u.kind === 'bank' ? 'sound_effects_midi' : u.kind === 'object' ? 'objects' : u.kind === 'npc' ? 'npcs' : 'cutscenes',
                             u.kind === 'bank' ? u.bank : u.id,
                           )}
                         >

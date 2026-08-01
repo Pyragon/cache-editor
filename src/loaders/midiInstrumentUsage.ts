@@ -31,7 +31,7 @@ export type InstrumentUse =
       notes: number[]
     }
   | {
-      kind: 'object' | 'npc'
+      kind: 'object' | 'npc' | 'cutscene'
       id: number
       /** which def field points here */
       field: string
@@ -92,6 +92,33 @@ async function build(root: FileSystemDirectoryHandle): Promise<UsageIndex> {
       const uses = index.get(id)
       if (uses) uses.push(use)
       else index.set(id, [use])
+    }
+  }
+
+  // Cutscenes reach this index too, and there are only 16 of them, so they go
+  // in the automatic pass rather than behind the objects/NPCs scan. A
+  // PLAY_VORBIS action's soundId is an index-14 sample: the client builds an
+  // AreaSound of type 2, which `spoken()` routes to Resource.MIDI_INSTRUMENT
+  // (AreaSoundPlayer:67) — "vorbis" is the format, not an index.
+  const cutscenesDir = await resolveEntryHandle(root, getEntryPath('cutscenes'))
+  if (cutscenesDir) {
+    for await (const handle of cutscenesDir.values()) {
+      if (handle.kind !== 'file' || !handle.name.endsWith('.json')) continue
+      const cutsceneId = Number.parseInt(handle.name, 10)
+      try {
+        const def = JSON.parse(await (await (handle as FileSystemFileHandle).getFile()).text()) as
+          { actions?: { type?: string; fields?: Record<string, number> }[] }
+        for (const action of def.actions ?? []) {
+          if (action.type !== 'PLAY_VORBIS') continue
+          const id = action.fields?.soundId
+          if (id == null || id < 0) continue
+          const use: InstrumentUse = { kind: 'cutscene', id: cutsceneId, field: 'PLAY_VORBIS' }
+          const uses = index.get(id)
+          // one entry per cutscene, however many times it plays the sample
+          if (uses) { if (!uses.some((u) => u.kind === 'cutscene' && u.id === cutsceneId)) uses.push(use) }
+          else index.set(id, [use])
+        }
+      } catch { /* unreadable cutscene — skip */ }
     }
   }
 

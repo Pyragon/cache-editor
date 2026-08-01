@@ -8,6 +8,7 @@ import { getNpcIcon, peekNpcIcon } from './npcSnapshot'
 import { CursorPreview, ModelSnapshotIcon, SpriteFramePreview } from './spriteCards'
 import { NpcMenuPreview } from './NpcMenuPreview'
 import { SoundPlayerCell } from './SoundPlayerCell'
+import { InstrumentPlayerCell } from './InstrumentPlayerCell'
 import ModelPreviewModal from './ModelPreviewModal'
 import ChatheadPreviewModal from './ChatheadPreviewModal'
 import { NumberInput, NumGrid, PairTable, ParamsTable, ToggleGrid  } from './defFields'
@@ -702,9 +703,13 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate, cac
             key,
             onNavigate && { label: 'View', onOpen: (id: number) => onNavigate(soundEntry, id) },
           ]))}
-          fieldExtra={cacheRoot && !soundIsInstrument ? Object.fromEntries(SOUND_ID_KEYS.map((key) => {
+          fieldExtra={cacheRoot ? Object.fromEntries(SOUND_ID_KEYS.map((key) => {
             const id = Number(draft[key] ?? -1)
-            return [key, id >= 0 && id !== 65535 ? <SoundPlayerCell key={key} cacheRoot={cacheRoot} soundId={id} /> : undefined]
+            if (id < 0 || id === 65535) return [key, undefined]
+            // opcode 162 sends these ids to midi_instruments instead
+            return [key, soundIsInstrument
+              ? <InstrumentPlayerCell key={key} cacheRoot={cacheRoot} soundId={id} />
+              : <SoundPlayerCell key={key} cacheRoot={cacheRoot} soundId={id} />]
           })) : undefined}
         />
       </section>
