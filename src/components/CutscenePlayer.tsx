@@ -28,6 +28,9 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { assembleCutsceneScene } from './cutsceneScene'
+import { CutsceneAudio } from './cutsceneAudio'
+import { CYCLE_MS, clockShort, clockSuffix, clockValue } from './cutsceneClock'
+import type { CutsceneClockUnit } from './cutsceneClock'
 import './AnimationViewer.css'
 import './CutsceneViewer.css'
 
@@ -75,11 +78,17 @@ function sunOf(env: RegionEnvironment | null): SunConfig {
  *  high draw-distance client and keeps the fade band's far edge past the
  *  2×2-region area a cutscene can even copy. */
 const FOG_TILES = 64
-const CYCLE_MS = 20
+
+const VOLUME_KEY = 'cache-editor:cutscene-volume'
 
 type Props = {
   def: CutsceneDef
   rootHandle: FileSystemDirectoryHandle
+  /** Reports the sim clock so the page's action roll can draw a playhead. */
+  onCycle?: (cycle: number) => void
+  /** Clock unit for the action list and transport readout, shared with the
+   *  roll's pill so the whole page counts the same way. */
+  unit?: CutsceneClockUnit
 }
 
 // ---------------------------------------------------------------------------
@@ -212,19 +221,64 @@ function actionGroupClass(type: string): string {
   return 'misc'
 }
 
-export default function CutscenePlayer({ def, rootHandle }: Props) {
+export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'seconds' }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fadeRef = useRef<HTMLDivElement>(null)
+  // The scene build's teardown force-loses the WebGL context: three's dispose()
+  // doesn't free it and a tab only gets ~16. But a canvas lost that way can
+  // never hand out another context — getContext keeps returning the same dead
+  // one, and three dies on it asking for getShaderPrecisionFormat().precision.
+  // Selecting a second cutscene re-runs the build on this same mounted
+  // component, so the canvas has to be a NEW element each time: this counter
+  // changes in the very render that re-runs the effect, which makes React swap
+  // the node instead of reusing it. (Every other viewer avoids the problem by
+  // letting three create its own canvas into a mount div.)
+  const buildGen = useRef({ def, rootHandle, n: 0 })
+  if (buildGen.current.def !== def || buildGen.current.rootHandle !== rootHandle) {
+    buildGen.current = { def, rootHandle, n: buildGen.current.n + 1 }
+  }
   const [status, setStatus] = useState('Assembling scene…')
   const [ready, setReady] = useState(false)
   // Not autoplaying: the player is a page section now rather than something
   // you opened deliberately, so it waits to be started.
   const [playing, setPlaying] = useState(false)
   const [cycle, setCycle] = useState(0)
+  // kept in a ref so the rAF loop can report without re-subscribing
+  const onCycleRef = useRef(onCycle)
+  onCycleRef.current = onCycle
+  useEffect(() => { onCycleRef.current?.(cycle) }, [cycle])
   const [warnings, setWarnings] = useState<string[]>([])
+  // Volume is a preference, not scene state: it outlives this cutscene, the
+  // next one, and the session (same convention as the map viewer's POV
+  // settings). Read once at mount; written back below as it changes.
+  const [volume, setVolume] = useState(() => {
+    try {
+      const v = parseFloat(localStorage.getItem(VOLUME_KEY) ?? '')
+      return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1
+    } catch { return 1 }
+  })
+  const audioRef = useRef<CutsceneAudio | null>(null)
 
   const playingRef = useRef(playing)
   playingRef.current = playing
+
+  // Audio lives as long as the panel. `audible` follows the transport so a
+  // paused preview goes quiet and a resumed one picks the song back up.
+  useEffect(() => {
+    audioRef.current = new CutsceneAudio(rootHandle)
+    return () => { audioRef.current?.dispose(); audioRef.current = null }
+  }, [rootHandle])
+
+  useEffect(() => {
+    rt.current.audible = playing
+    if (playing) audioRef.current?.resume()
+    else audioRef.current?.pause()
+  }, [playing])
+
+  useEffect(() => {
+    audioRef.current?.setVolume(volume)
+    try { localStorage.setItem(VOLUME_KEY, String(volume)) } catch { /* private mode — it just won't persist */ }
+  }, [volume])
 
   // Everything the sim touches, mutable and rAF-owned.
   const rt = useRef<{
@@ -259,6 +313,8 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
     cycle: number
     msAcc: number
     finished: boolean
+    /** false while a seek replays history, so it stays silent */
+    audible: boolean
     disposed: boolean
   }>(null!)
   if (!rt.current) {
@@ -282,6 +338,7 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
       cycle: 0,
       msAcc: 0,
       finished: false,
+      audible: false,
       disposed: false,
       composer: null,
       sky: null,
@@ -759,8 +816,16 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
       case 'FINISHED':
         r.finished = true
         break
+      case 'PLAY_SYNTH':
+      case 'PLAY_VORBIS':
+      case 'PLAY_SONG':
+        // A seek re-applies every earlier action to rebuild scene state, and
+        // firing their sounds too would dump the whole soundtrack at once —
+        // so audio only sounds while the clock is genuinely running forward.
+        if (r.audible) audioRef.current?.play(a.type, f, (r.cycle * CYCLE_MS) / 1000)
+        break
       default:
-        break // sounds, gfx, projectiles, hints, messages, vars: not simulated
+        break // gfx, projectiles, hints, messages, vars: not simulated
     }
   }
 
@@ -875,6 +940,10 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
   /** Jump the sim to an absolute cycle (rebuilds from 0 when scrubbing back). */
   const seek = (target: number) => {
     const r = rt.current
+    // whatever was sounding belongs to the old position
+    audioRef.current?.stopAll()
+    const wasAudible = r.audible
+    r.audible = false
     if (target < r.cycle) {
       r.cursor = 0
       r.cycle = 0
@@ -898,6 +967,7 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
       r.gfx = []
     }
     while (r.cycle < target) stepCycle()
+    r.audible = wasAudible
     applyCameraAndFade()
     setCycle(r.cycle)
   }
@@ -907,6 +977,24 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
   useEffect(() => {
     const r = rt.current
     r.disposed = false
+    // Selecting another cutscene re-runs this on the same component, so the
+    // transport and the sim start over rather than inheriting the last one's
+    // clock (which would drop the new scene in mid-timeline, its actions
+    // already "applied"), and whatever the last one was playing goes quiet —
+    // the audio outlives this effect, being keyed only on the cache handle.
+    r.cursor = 0
+    r.cycle = 0
+    r.msAcc = 0
+    r.finished = false
+    r.camRt = null
+    r.fade = null
+    r.heightsByCell.clear()
+    audioRef.current?.stopAll()
+    setCycle(0)
+    setReady(false)
+    setPlaying(false)
+    setWarnings([])
+    setStatus('Assembling scene…')
     let cancelled = false
     let disposeResize: (() => void) | null = null
     ;(async () => {
@@ -1410,6 +1498,11 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
           }
         }
       })
+      // The scene object itself is reused across builds, and disposing a mesh
+      // does NOT take it out of the graph — three would happily re-upload the
+      // last cutscene's terrain into the next one's. Empty it.
+      rr.scene.clear()
+      rr.sky = null
     }
     // the scene build runs once per cutscene
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1420,7 +1513,7 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
       <div className="anim-preview-body">
         <div className="cutscene-player-main">
           <div className="cutscene-player-stage">
-            <canvas ref={canvasRef} className="cutscene-player-canvas" />
+            <canvas key={buildGen.current.n} ref={canvasRef} className="cutscene-player-canvas" />
             <div ref={fadeRef} className="cutscene-player-fade" />
             {status && <p className="anim-preview-status cutscene-player-status">{status}</p>}
           </div>
@@ -1438,7 +1531,7 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
                       title={`Jump here (${JSON.stringify(a.fields ?? {})})`}
                       onClick={() => { seek(a.lengthInCycles + 1); setPlaying(false) }}
                     >
-                      <span className="cutscene-player-action-time">{(a.lengthInCycles * CYCLE_MS / 1000).toFixed(1)}s</span>
+                      <span className="cutscene-player-action-time">{clockShort(a.lengthInCycles, unit)}</span>
                       <span className={`cutscene-action-badge cutscene-action-${actionGroupClass(a.type)}`}>{a.type.toLowerCase().replace(/_/g, ' ')}</span>
                     </button>
                   </li>
@@ -1488,13 +1581,26 @@ export default function CutscenePlayer({ def, rootHandle }: Props) {
             onChange={(e) => seek(parseInt(e.target.value, 10))}
           />
           <span className="cutscene-player-time">
-            {(cycle * CYCLE_MS / 1000).toFixed(1)}s / {(durationCycles * CYCLE_MS / 1000).toFixed(1)}s
-            <span className="cutscene-player-actioncount">action {rt.current.cursor}/{def.actions.length}</span>
+            {clockValue(cycle, unit)} / {clockValue(durationCycles, unit)}{clockSuffix(unit)}
+            <span className="cutscene-player-actioncount">{rt.current.cursor}/{def.actions.length}</span>
           </span>
+          <label className="cutscene-player-volume" title={`Volume ${Math.round(volume * 100)}%`}>
+            <span aria-hidden>{volume === 0 ? '🔇' : '🔊'}</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(volume * 100)}
+              style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` } as React.CSSProperties}
+              aria-label="Volume"
+              onChange={(e) => setVolume(Number(e.target.value) / 100)}
+            />
+          </label>
         </div>
         <p className="cutscene-note">
-          Simulated: terrain/locs from the areas recipe, camera splines, entity placement + walk routes + animations, object spawns, screen fades.
-          Not simulated: sounds, gfx/projectiles, hitmarks, hint arrows, tile messages{warnings.length > 0 ? ` — ${warnings.length} warning${warnings.length === 1 ? '' : 's'}: ${[...new Set(warnings)].slice(0, 3).join('; ')}` : ''}.
+          Simulated: terrain/locs from the areas recipe, camera splines, entity placement + walk routes + animations, object spawns, screen fades, entity gfx, sound.
+          Not simulated: projectiles, hitmarks, hint arrows, tile messages{warnings.length > 0 ? ` — ${warnings.length} warning${warnings.length === 1 ? '' : 's'}: ${[...new Set(warnings)].slice(0, 3).join('; ')}` : ''}.
         </p>
       </div>
     </div>

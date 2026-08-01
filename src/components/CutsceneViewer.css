@@ -19,13 +19,16 @@
   max-width: 100%;
 }
 
-.cutscene-npc-cell {
+/* Icon + name cell, shared by the cast list and the objects list — both are
+   "here is a def this cutscene casts", and a loc reads as unidentifiable from
+   its id alone in exactly the way an NPC does. */
+.cutscene-def-cell {
   display: inline-flex;
   align-items: center;
   gap: 8px;
 }
 
-.cutscene-npc-icon {
+.cutscene-def-icon {
   width: 28px;
   height: 28px;
   object-fit: contain;
@@ -232,18 +235,108 @@
   flex: 1;
 }
 
+/* Fixed width so the scrub bar doesn't jump as the digits change, and narrow
+   enough to leave the bar the room — the readout used to take a third of it. */
 .cutscene-player-time {
+  flex: 0 0 auto;
+  min-width: 104px;
   font-variant-numeric: tabular-nums;
   color: #9a9aa4;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   white-space: nowrap;
   text-align: right;
+}
+
+.cutscene-player-volume {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #9a9aa4;
+  cursor: pointer;
+}
+
+/* Same hairline-track / round-thumb slider as the music page, filled up to the
+   thumb. `--fill` is set inline from the live value: Chromium has no
+   ::-webkit-slider-progress and ::-moz-range-progress is Firefox-only, so a
+   hard-stop gradient is the portable way. */
+.cutscene-player-volume input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 84px;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    #2f8fff 0 var(--fill, 100%),
+    rgba(255, 255, 255, 0.14) var(--fill, 100%) 100%
+  );
+  cursor: pointer;
+  outline: none;
+}
+
+.cutscene-player-volume input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #2f8fff;
+  border: none;
+  box-shadow: 0 0 5px rgba(47, 143, 255, 0.7);
+}
+
+.cutscene-player-volume input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #2f8fff;
+  border: none;
+  box-shadow: 0 0 5px rgba(47, 143, 255, 0.7);
 }
 
 .cutscene-player-actioncount {
   display: block;
   color: #77777f;
   font-size: 0.72rem;
+}
+
+/* Section heading with a control on its right (the roll's seconds/ticks pill).
+   The h3's own bottom margin moves to the row so the pill stays centred on the
+   title rather than sitting a line below it. */
+.cutscene-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.cutscene-section-head h3 {
+  margin: 0;
+}
+
+.cutscene-section-head .btn-pill .zoom-btn {
+  padding: 2px 12px;
+  font-size: 11px;
+}
+
+/* Disclosure for the flat action table — a bare summary-style row rather than
+   a button box, matching .cutscene-details > summary above it. */
+.cutscene-collapse-btn {
+  display: block;
+  margin: 0 0 8px;
+  padding: 3px 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #c8c8d0;
+  user-select: none;
+}
+
+.cutscene-collapse-btn:hover {
+  color: #fff;
 }
 
 /* ---- Action roll ---------------------------------------------------------
@@ -370,6 +463,8 @@
   filter: brightness(1.55);
 }
 
+/* A ring hugging the mark, not a halo standing off it — with a spacer ring
+   underneath, the gap between mark and highlight read as a filled background. */
 .cutscene-roll-mark.selected {
   opacity: 1;
   box-shadow: 0 0 0 2px #ffe14d;
@@ -390,4 +485,17 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* Playback position, mirroring the music page's piano-roll playhead. Spans
+   every lane, so it sits above them and ignores the pointer. */
+.cutscene-roll-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #ffe14d;
+  box-shadow: 0 0 6px rgba(255, 225, 77, 0.8);
+  pointer-events: none;
+  z-index: 1;
 }

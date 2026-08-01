@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CutsceneActionDef, CutsceneData, CutsceneDef } from '../loaders/cutscenes'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
-import { getNpcIcon, peekNpcIcon } from './npcSnapshot'
+import { getNpcIcon, getObjectIcon, peekNpcIcon, peekObjectIcon } from './npcSnapshot'
 import { SoundPlayerCell } from './SoundPlayerCell'
 import { InstrumentPlayerCell } from './InstrumentPlayerCell'
 import { SongPlayerCell } from './SongPlayerCell'
 import CutscenePlayer from './CutscenePlayer'
+import { CLOCK_UNITS, clockGranularity, clockShort } from './cutsceneClock'
+import type { CutsceneClockUnit } from './cutsceneClock'
 import './CutsceneViewer.css'
 
 type Props = {
@@ -25,7 +27,9 @@ const angleDeg = (angle: number) => `${Math.round((angle % 16384) / 16384 * 360)
 const MOVE_TYPE_NAMES: Record<number, string> = { 0: 'half walk', 2: 'run' }
 const moveTypeName = (t: number) => MOVE_TYPE_NAMES[t] ?? 'walk'
 
-type NpcInfo = { name: string; icon: string | null }
+/** A cast NPC or a cutscene object, resolved to something you can recognise:
+ *  the def's name and a rendered snapshot of its model. */
+type DefInfo = { name: string; icon: string | null }
 
 export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
   // A hand-made or truncated JSON may omit whole sections — treat them as empty
@@ -41,7 +45,7 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
   }), [data.def])
 
   // NPC names + snapshot icons for every distinct NPC the cutscene casts.
-  const [npcInfo, setNpcInfo] = useState<Map<number, NpcInfo>>(new Map())
+  const [npcInfo, setNpcInfo] = useState<Map<number, DefInfo>>(new Map())
   useEffect(() => {
     if (!cacheRoot) return
     let cancelled = false
@@ -63,6 +67,31 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
     return () => { cancelled = true }
   }, [def, cacheRoot])
 
+  // The same for the locs the cutscene spawns as props. A loc id on its own
+  // says nothing about what appears on screen — cutscene 0's battle crowd is
+  // loc-spawned fighters — so the objects list gets the cast list's treatment.
+  const [objectInfo, setObjectInfo] = useState<Map<number, DefInfo>>(new Map())
+  useEffect(() => {
+    if (!cacheRoot) return
+    let cancelled = false
+    const ids = [...new Set(def.objects.map((o) => o.locId).filter((id) => id >= 0))]
+    ;(async () => {
+      const dir = await resolveEntryHandle(cacheRoot, getEntryPath('objects'))
+      if (!dir) return
+      for (const id of ids) {
+        try {
+          const file = await (await dir.getFileHandle(`${id}.json`)).getFile()
+          const objDef = JSON.parse(await file.text()) as Record<string, unknown>
+          const name = typeof objDef.name === 'string' && objDef.name !== 'null' ? objDef.name : `Object ${id}`
+          const icon = peekObjectIcon(id) ?? await getObjectIcon(cacheRoot, id, objDef)
+          if (cancelled) return
+          setObjectInfo((prev) => new Map(prev).set(id, { name, icon }))
+        } catch { /* object def unreadable — the id link still works */ }
+      }
+    })()
+    return () => { cancelled = true }
+  }, [def, cacheRoot])
+
   const entityLabel = (index: number): string => {
     const entity = def.entities[index]
     if (!entity) return `entity #${index}`
@@ -71,8 +100,26 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
     return `entity #${index} (${info?.name ?? `NPC ${entity.id}`})`
   }
 
+  /** The object-list counterpart of entityLabel: actions name a loc by its
+   *  index into `def.objects`, which says nothing on its own. */
+  const objectLabel = (index: number): string => {
+    const obj = def.objects[index]
+    if (!obj) return `object #${index}`
+    const name = objectInfo.get(obj.locId)?.name
+    const known = name && name !== `Object ${obj.locId}`
+    return `object #${index} (${known ? `${name}, loc ${obj.locId}` : `loc ${obj.locId}`})`
+  }
+
   const [selectedAction, setSelectedAction] = useState<number | null>(null)
-  useEffect(() => { setSelectedAction(null) }, [def])
+  // the preview's sim clock, so the roll can show where playback is
+  const [playCycle, setPlayCycle] = useState(0)
+  // the roll's ruler, and with it the preview's action list and transport:
+  // seconds, 600ms game ticks, or the 20ms client cycles the cache stores
+  const [rollUnit, setRollUnit] = useState<CutsceneClockUnit>('seconds')
+  // The flat action table is a few hundred rows on a real cutscene, and it sits
+  // between the roll and everything below it — collapsed unless asked for.
+  const [showAllActions, setShowAllActions] = useState(false)
+  useEffect(() => { setSelectedAction(null); setShowAllActions(false) }, [def])
 
   /** Short lane name for the roll — the cast table already carries the detail. */
   const rollEntityName = useCallback((index: number): string => {
@@ -101,31 +148,67 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
       <section className="item-section">
         <h3>Preview</h3>
         {cacheRoot
-          ? <CutscenePlayer def={def} rootHandle={cacheRoot} />
+          ? <CutscenePlayer def={def} rootHandle={cacheRoot} onCycle={setPlayCycle} unit={rollUnit} />
           : <p className="cutscene-note">Reopen the cache to play this cutscene.</p>}
       </section>
 
       <section className="item-section">
-        <h3>Timeline — {def.actions.length} actions</h3>
+        <div className="cutscene-section-head">
+          <h3>Timeline — {def.actions.length} actions</h3>
+          <span className="btn-pill">
+            {CLOCK_UNITS.map((u) => (
+              <button
+                key={u.key}
+                type="button"
+                className={`zoom-btn${rollUnit === u.key ? ' active' : ''}`}
+                title={u.hint}
+                onClick={() => setRollUnit(u.key)}
+              >
+                {u.label}
+              </button>
+            ))}
+          </span>
+        </div>
         <p className="cutscene-note">
           Each mark is one action at the cycle it fires, on the row of whatever it acts on. Click a mark to
           single it out below; click it again to show them all.
         </p>
-        <ActionRoll def={def} entityName={rollEntityName} selected={selectedAction} onSelect={setSelectedAction} />
-        <div className="quest-table-wrap">
-          <table className="quest-table cutscene-timeline">
-            <thead><tr><th>Start</th><th>Action</th><th>Details</th></tr></thead>
-            <tbody>
-              {def.actions.map((a, i) => (selectedAction != null && selectedAction !== i ? null : (
-                <tr key={i} className={selectedAction === i ? 'linked-hover' : undefined}>
-                  <td className="cutscene-time">{cycleTime(a.lengthInCycles)}<span className="cutscene-cycles">{a.lengthInCycles}c</span></td>
-                  <td><span className={`cutscene-action-badge cutscene-action-${actionGroup(a.type)}`}>{actionTitle(a.type)}</span></td>
-                  <td><ActionRow action={a} entityLabel={entityLabel} def={def} onNavigate={onNavigate} cacheRoot={cacheRoot ?? null} /></td>
-                </tr>
-              )))}
-            </tbody>
-          </table>
-        </div>
+        <ActionRoll
+          def={def}
+          entityName={rollEntityName}
+          selected={selectedAction}
+          onSelect={setSelectedAction}
+          playCycle={playCycle}
+          unit={rollUnit}
+        />
+        {/* A selected mark always shows its own row — that is what clicking it
+            is for — so the collapse only governs the full list. */}
+        {selectedAction == null && (
+          <button
+            type="button"
+            className="cutscene-collapse-btn"
+            aria-expanded={showAllActions}
+            onClick={() => setShowAllActions((v) => !v)}
+          >
+            {showAllActions ? '▾' : '▸'} {showAllActions ? 'Hide' : 'Show'} the full action list ({def.actions.length})
+          </button>
+        )}
+        {(selectedAction != null || showAllActions) && (
+          <div className="quest-table-wrap">
+            <table className="quest-table cutscene-timeline">
+              <thead><tr><th>Start</th><th>Action</th><th>Details</th></tr></thead>
+              <tbody>
+                {def.actions.map((a, i) => (selectedAction != null && selectedAction !== i ? null : (
+                  <tr key={i} className={selectedAction === i ? 'linked-hover' : undefined}>
+                    <td className="cutscene-time">{cycleTime(a.lengthInCycles)}<span className="cutscene-cycles">{a.lengthInCycles}c</span></td>
+                    <td><span className={`cutscene-action-badge cutscene-action-${actionGroup(a.type)}`}>{actionTitle(a.type)}</span></td>
+                    <td><ActionRow action={a} entityLabel={entityLabel} objectLabel={objectLabel} def={def} onNavigate={onNavigate} cacheRoot={cacheRoot ?? null} /></td>
+                  </tr>
+                )))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className="item-section">
@@ -140,8 +223,8 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
                   <tr key={e.index}>
                     <td>{e.index}</td>
                     <td>
-                      <span className="cutscene-npc-cell">
-                        {info?.icon && <img className="cutscene-npc-icon" src={info.icon} alt="" />}
+                      <span className="cutscene-def-cell">
+                        {info?.icon && <img className="cutscene-def-icon" src={info.icon} alt="" />}
                         {e.id < 0
                           ? 'Player (appearance streamed at runtime)'
                           : info && info.name !== `NPC ${e.id}` ? `${info.name} (${e.id})` : `NPC ${e.id}`}
@@ -168,10 +251,17 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
             <table className="quest-table">
               <thead><tr><th>#</th><th>Object</th><th>Shape</th><th></th></tr></thead>
               <tbody>
-                {def.objects.map((o, i) => (
+                {def.objects.map((o, i) => {
+                  const info = o.locId >= 0 ? objectInfo.get(o.locId) : null
+                  return (
                   <tr key={i}>
                     <td>{i}</td>
-                    <td>{o.locId}</td>
+                    <td>
+                      <span className="cutscene-def-cell">
+                        {info?.icon && <img className="cutscene-def-icon" src={info.icon} alt="" />}
+                        {info && info.name !== `Object ${o.locId}` ? `${info.name} (${o.locId})` : `Object ${o.locId}`}
+                      </span>
+                    </td>
                     <td>{o.locShape}</td>
                     <td>
                       {onNavigate && (
@@ -179,7 +269,8 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
                       )}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -294,15 +385,21 @@ function actionLane(a: CutsceneActionDef, entityName: (i: number) => string): { 
   return { key: 'scene', label: 'Scene', order: 500 }
 }
 
-/** Mark width in px, mirrored in .cutscene-roll-mark — the fan spacing is
- *  derived from it so stacked marks never overlap. */
+/** Mark width in px, mirrored in .cutscene-roll-mark. The fan spacing derives
+ *  from it plus a real 3px gap: marks sit at a PERCENTAGE offset, so a 1px gap
+ *  lands on a different sub-pixel remainder per pile and rounds away on some
+ *  of them — which is why some piles looked touching and others didn't. */
 const MARK_W = 9
 
-function ActionRoll({ def, entityName, selected, onSelect }: {
+function ActionRoll({ def, entityName, selected, onSelect, playCycle, unit }: {
   def: CutsceneDef
   entityName: (index: number) => string
   selected: number | null
   onSelect: (index: number | null) => void
+  /** where the preview's clock is, or 0 when it hasn't started */
+  playCycle: number
+  /** what the ruler counts in — seconds, 600ms game ticks, or raw cycles */
+  unit: CutsceneClockUnit
 }) {
   const { lanes, laneOf, stackAt, maxCycle } = useMemo(() => {
     const byKey = new Map<string, { key: string; label: string; order: number }>()
@@ -332,9 +429,11 @@ function ActionRoll({ def, entityName, selected, onSelect }: {
     }
   }, [def, entityName])
 
-  // 50 cycles to the second; aim for a gridline every few seconds without
-  // producing hundreds of them on a long cutscene
-  const step = Math.max(50, Math.ceil(maxCycle / 12 / 50) * 50)
+  // Aim for a dozen gridlines however long the cutscene is, snapped to the
+  // displayed unit's own granularity (50 cycles to a second, 30 to a tick) so
+  // every label comes out a whole number rather than 1.7t, 3.3t, 5t…
+  const gran = clockGranularity(unit)
+  const step = Math.max(gran, Math.ceil(maxCycle / 12 / gran) * gran)
   const ticks: number[] = []
   for (let c = 0; c <= maxCycle; c += step) ticks.push(c)
 
@@ -347,6 +446,12 @@ function ActionRoll({ def, entityName, selected, onSelect }: {
         {lanes.map((l) => <div key={l.key} className="cutscene-roll-lane-label">{l.label}</div>)}
       </div>
       <div className="cutscene-roll-grid">
+        {playCycle > 0 && (
+          <div
+            className="cutscene-roll-playhead"
+            style={{ left: `${Math.min(100, (playCycle / maxCycle) * 100)}%` }}
+          />
+        )}
         <div className="cutscene-roll-ticks">
           {ticks.map((c, i) => (
             <span
@@ -360,7 +465,7 @@ function ActionRoll({ def, entityName, selected, onSelect }: {
                 transform: i === 0 ? 'none' : i === ticks.length - 1 ? 'translateX(-100%)' : 'translateX(-50%)',
               }}
             >
-              {(c * 0.02).toFixed(0)}s
+              {clockShort(c, unit)}
             </span>
           ))}
         </div>
@@ -382,14 +487,14 @@ function ActionRoll({ def, entityName, selected, onSelect }: {
               // step by the full mark width plus a hairline: at less than the
               // width each mark covered part of the one before it, so only the
               // last in a pile looked full size
-              const nudge = stackAt[i] * (MARK_W + 1) * (atEnd ? -1 : 1)
+              const nudge = stackAt[i] * (MARK_W + 3) * (atEnd ? -1 : 1)
               return (
               <button
                 key={i}
                 type="button"
                 className={`cutscene-roll-mark cutscene-action-${actionGroup(a.type)}${stackAt[i] % 2 === 1 ? ' alt' : ''}${selected === i ? ' selected' : ''}`}
                 style={{ left: `${frac * 100}%`, marginLeft: `${base + nudge}px` }}
-                title={`${cycleTime(a.lengthInCycles)} — ${actionTitle(a.type)}`}
+                title={`${clockShort(a.lengthInCycles, unit)} — ${actionTitle(a.type)}`}
                 onClick={() => onSelect(selected === i ? null : i)}
               />
               )
@@ -496,9 +601,10 @@ function actionLinks(action: CutsceneActionDef, def: CutsceneDef): { entry: stri
   })
 }
 
-function ActionRow({ action, entityLabel, def, onNavigate, cacheRoot }: {
+function ActionRow({ action, entityLabel, objectLabel, def, onNavigate, cacheRoot }: {
   action: CutsceneActionDef
   entityLabel: (index: number) => string
+  objectLabel: (index: number) => string
   def: CutsceneDef
   onNavigate?: (entryName: string, itemId: number) => void
   cacheRoot: FileSystemDirectoryHandle | null
@@ -506,7 +612,7 @@ function ActionRow({ action, entityLabel, def, onNavigate, cacheRoot }: {
   const links = actionLinks(action, def)
   return (
     <div className="cutscene-detail">
-      <ActionDetails action={action} entityLabel={entityLabel} def={def} cacheRoot={cacheRoot} />
+      <ActionDetails action={action} entityLabel={entityLabel} objectLabel={objectLabel} cacheRoot={cacheRoot} />
       {onNavigate && links.length > 0 && (
         <div className="cutscene-detail-links">
           {links.map((l) => (
@@ -525,10 +631,12 @@ function ActionRow({ action, entityLabel, def, onNavigate, cacheRoot }: {
   )
 }
 
-function ActionDetails({ action, entityLabel, def, cacheRoot }: {
+// The two label helpers now resolve everything this needs out of the cutscene
+// def, so it no longer takes the def itself.
+function ActionDetails({ action, entityLabel, objectLabel, cacheRoot }: {
   action: CutsceneActionDef
   entityLabel: (index: number) => string
-  def: CutsceneDef
+  objectLabel: (index: number) => string
   cacheRoot: FileSystemDirectoryHandle | null
 }) {
   const f = (action.fields ?? {}) as Record<string, number & string>
@@ -550,22 +658,16 @@ function ActionDetails({ action, entityLabel, def, cacheRoot }: {
       return <>remove {entityLabel(f.entityIndex)} from the scene</>
     case 'ROTATE_CUTSCENE_ENTITY':
       return <>turn {entityLabel(f.cutsceneEntityPtr)} to {angleDeg(f.rotation as number)}</>
-    case 'REPLACE_OBJECT': {
-      const obj = def.objects[f.locIndex as number]
+    case 'REPLACE_OBJECT':
       return <>
-        spawn object #{f.locIndex}{obj ? ` (loc ${obj.locId})` : ''} at tile ({f.x}, {f.y}) plane {f.plane}, rotation {f.rotation}
+        spawn {objectLabel(f.locIndex)} at tile ({f.x}, {f.y}) plane {f.plane}, rotation {f.rotation}
       </>
-    }
-    case 'DESTROY_OBJECT': {
-      const obj = def.objects[f.cutsceneObjectPtr as number]
-      return <>remove object #{f.cutsceneObjectPtr}{obj ? ` (loc ${obj.locId})` : ''}</>
-    }
-    case 'ANIMATE_OBJECT': {
-      const obj = def.objects[f.objectIndex as number]
+    case 'DESTROY_OBJECT':
+      return <>remove {objectLabel(f.cutsceneObjectPtr)}</>
+    case 'ANIMATE_OBJECT':
       return <>
-        object #{f.objectIndex}{obj ? ` (loc ${obj.locId})` : ''} plays animation {f.sequenceId}
+        {objectLabel(f.objectIndex)} plays animation {f.sequenceId}
       </>
-    }
     case 'ENTITY_GFX':
       return <>
         {entityLabel(f.targetIndex)} shows gfx {f.gfxId} (slot {f.spotAnimationIndex}, height {f.displayHeight}, rotation {f.rotation})
