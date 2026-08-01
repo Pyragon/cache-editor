@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { ModelData } from '../loaders/models'
 import { hslToRgb } from '../loaders/models'
 import type { PosedVertices } from '../loaders/skeletalAnimation'
+import type { PoseBounds } from './useSequencePlayback'
 import type { ParticleProducer, ParticleType } from '../loaders/particles'
 import { PARTICLE_FPS_DEFAULT, PARTICLE_FPS_KEY, PARTICLE_FPS_OPTIONS, ParticleSim } from './particleSim'
 import type { Effector } from './particleSim'
@@ -97,6 +98,12 @@ type Props = {
   /** Camera distance as a multiple of the model's bounding span. Lower fills
    *  more of the frame; 2.5 is the standalone viewer's default. */
   fitScale?: number
+  /** Where the model ends up once ANIMATED, unioned over the sequence's frames
+   *  (raw RS model space, as `useSequencePlayback` reports it). Posing can move
+   *  a mesh clean out of a frame centred on its rest pose, so when this is
+   *  supplied the camera centres and zooms on it instead. One fixed box for the
+   *  whole sequence, so the view still never shifts between frames. */
+  poseBounds?: PoseBounds | null
   /** Hides the id/vertex-count header — for embeds where the surrounding panel
    *  already says what is being shown. */
   hideHeader?: boolean
@@ -286,7 +293,7 @@ function makeDotTexture(): THREE.Texture {
   return texture
 }
 
-export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader }: Props) {
+export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds }: Props) {
   // `world` is built inline by callers, so its identity churns every render —
   // the in-place apply effect keys off its VALUE instead.
   const worldKey = world ? JSON.stringify(world) : ''
@@ -316,6 +323,15 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
   const applyPosedFnRef = useRef<((posed: PosedVertices | null) => void) | null>(null)
   // Same idea for the def render params — see applyWorld.
   const applyWorldFnRef = useRef<((next: WorldRenderParams | null | undefined) => void) | null>(null)
+  // Same again for pose bounds, which arrive after the scene is already built.
+  const applyFramingFnRef = useRef<((next: PoseBounds | null | undefined) => void) | null>(null)
+  // Has the user driven the camera themselves? Auto-framing must not fight an
+  // orbit someone set deliberately. This can't key off `cameraStateRef`, which
+  // is written on EVERY scene teardown (so it's non-null after the first
+  // rebuild whether or not anyone touched the mouse) — it tracks a real
+  // interaction, and resets only when a genuinely different model loads.
+  const userAdjustedRef = useRef(false)
+  const framedModelIdRef = useRef<number | null>(null)
   const [particles, setParticles] = useState(true)
   const particlesRef = useRef(true)
   const particleObjectsRef = useRef<THREE.Points[]>([])
@@ -975,12 +991,27 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
       if (!isFinite(minX)) { minX = maxX = minY = maxY = minZ = maxZ = 0 }
     }
 
-    const cx2 = (minX + maxX) / 2
-    const cy2 = (minY + maxY) / 2
-    const cz2 = (minZ + maxZ) / 2
+    // Prefer the ANIMATED extents when the caller measured them: the vertex
+    // buffer this camera has to frame is the posed one, and for most spot
+    // animations the rest box is nowhere near it. RS→Three negates y and z, so
+    // the bounds have to be mapped the same way the vertices are (min/max swap
+    // on the negated axes).
+    let cx2 = (minX + maxX) / 2
+    let cy2 = (minY + maxY) / 2
+    let cz2 = (minZ + maxZ) / 2
+    let span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1)
+    if (poseBounds) {
+      cx2 = (poseBounds.minX + poseBounds.maxX) / 2
+      cy2 = -(poseBounds.minY + poseBounds.maxY) / 2
+      cz2 = -(poseBounds.minZ + poseBounds.maxZ) / 2
+      span = Math.max(
+        poseBounds.maxX - poseBounds.minX,
+        poseBounds.maxY - poseBounds.minY,
+        poseBounds.maxZ - poseBounds.minZ,
+        1,
+      )
+    }
     mesh.position.set(-cx2, -cy2, -cz2)
-
-    const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1)
 
     // Item pose: the client's inventory-icon transform (ItemDefinitions.getSprite).
     // It rolls Z(-zan), yaws Y(yan), translates to (offX, offY − h/2, zoom·sin(xan),
@@ -1166,6 +1197,41 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     }
     applyWorldFnRef.current = applyWorld
 
+    /**
+     * Re-centre and re-zoom on the animated extents. Pose bounds are measured
+     * asynchronously (the sequence's frames have to be loaded and posed), so
+     * they usually land AFTER the scene is built — and rebuilding for them
+     * would leak a WebGL context, same reason `world` is applied in place.
+     * Everything this touches is a transform, so there is nothing to rebuild.
+     *
+     * Skipped once the user has taken over the camera: re-framing under an
+     * orbit they set themselves would yank the view out from under them.
+     */
+    function applyFraming(next: PoseBounds | null | undefined) {
+      if (!next || userAdjustedRef.current) return
+      // RS→Three negates y and z, so the box's min/max swap on those axes
+      mesh.position.set(
+        -(next.minX + next.maxX) / 2,
+        (next.minY + next.maxY) / 2,
+        (next.minZ + next.maxZ) / 2,
+      )
+      const posedSpan = Math.max(
+        next.maxX - next.minX,
+        next.maxY - next.minY,
+        next.maxZ - next.minZ,
+        1,
+      )
+      // matches the build path's `span * Math.max(sx, sy, sz, 1) / 128`
+      const s = Math.max(poseGroup.scale.x * 128, poseGroup.scale.y * 128, poseGroup.scale.z * 128, 1) / 128
+      const scaled = posedSpan * s
+      camera.position.set(0, 0, scaled * fitScale)
+      camera.near = scaled * 0.001
+      camera.far = scaled * 100
+      camera.updateProjectionMatrix()
+      controls.target.set(0, 0, 0)
+      controls.update()
+    }
+    applyFramingFnRef.current = applyFraming
 
     // A rebuild mid-animation (this render's closure has the current prop)
     // starts from the active pose instead of flashing the rest pose.
@@ -1174,6 +1240,14 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
+    // A different model means a different thing being previewed, so it earns a
+    // fresh auto-frame; edits that rebuild the same model (recolours, scale)
+    // keep whatever view the user had.
+    if (framedModelIdRef.current !== data.id) {
+      framedModelIdRef.current = data.id
+      userAdjustedRef.current = false
+    }
+    controls.addEventListener('start', () => { userAdjustedRef.current = true })
 
     // restore the previous rebuild's orbit state (animation frame stepping)
     if (cameraStateRef?.current) {
@@ -1235,6 +1309,7 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
       disposed = true
       applyPosedFnRef.current = null
       applyWorldFnRef.current = null
+      applyFramingFnRef.current = null
       if (cameraStateRef) {
         cameraStateRef.current = {
           position: [camera.position.x, camera.position.y, camera.position.z],
@@ -1281,6 +1356,12 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     applyWorldFnRef.current?.(world)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [worldKey])
+
+  // Nor does re-framing on the measured animated extents — they land a moment
+  // after the sequence loads, and a rebuild here would leak a GL context.
+  useEffect(() => {
+    applyFramingFnRef.current?.(poseBounds)
+  }, [poseBounds])
 
   useEffect(() => {
     for (const material of matsRef.current) material.wireframe = wireframe

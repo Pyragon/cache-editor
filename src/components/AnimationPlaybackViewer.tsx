@@ -33,7 +33,7 @@ export default function AnimationPlaybackViewer({ animation, rootHandle, initial
   // Orbit rotation survives model reloads (which do rebuild the scene).
   const cameraStateRef = useRef<CameraState | null>(null)
 
-  const { posedVertices, status, frameIndex, setFrameIndex, frameCount, playing, setPlaying } =
+  const { posedVertices, status, frameIndex, setFrameIndex, frameCount, playing, setPlaying, poseBounds } =
     useSequencePlayback(animation, model, rootHandle)
 
   async function loadModel() {
@@ -99,7 +99,7 @@ export default function AnimationPlaybackViewer({ animation, rootHandle, initial
 
         {loadError && <p className="anim-preview-status">{loadError}</p>}
         {status && <p className="anim-preview-status">{status}</p>}
-        {model && <ModelViewer data={model} posedVertices={posedVertices} cameraStateRef={cameraStateRef} />}
+        {model && <ModelViewer data={model} posedVertices={posedVertices} cameraStateRef={cameraStateRef} poseBounds={poseBounds} />}
       </div>
     </dialog>
   )

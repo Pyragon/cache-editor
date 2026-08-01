@@ -181,7 +181,7 @@ export default function PlayerDefaultsModal({ rootHandle, onClose }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rootHandle, equippedKey])
 
-  const { posedVertices } = useSequencePlayback(standAnim, preview?.model ?? null, rootHandle, true)
+  const { posedVertices, poseBounds } = useSequencePlayback(standAnim, preview?.model ?? null, rootHandle, true)
 
   /** Walks ids from the current one until an item fits the slot. */
   async function stepEquipment(slot: number, current: number, direction: 1 | -1) {
@@ -470,6 +470,7 @@ export default function PlayerDefaultsModal({ rootHandle, onClose }: Props) {
                       hideHeader
                       fitScale={1.75}
                       posedVertices={posedVertices}
+                      poseBounds={poseBounds}
                       cameraStateRef={cameraRef}
                     />
                   )

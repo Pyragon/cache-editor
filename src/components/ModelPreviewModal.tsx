@@ -89,7 +89,7 @@ export default function ModelPreviewModal({ title, modelIds, translations, recol
     return () => { cancelled = true }
   }, [seqId, rootHandle])
 
-  const { posedVertices, status, frameIndex, frameCount, playing, setPlaying } =
+  const { posedVertices, status, frameIndex, frameCount, playing, setPlaying, poseBounds } =
     useSequencePlayback(animation, model, rootHandle, true)
 
   // Keyed by the id list's VALUE — callers build the array inline, so the
@@ -211,6 +211,7 @@ export default function ModelPreviewModal({ title, modelIds, translations, recol
             data={model}
             display={display ?? undefined}
             posedVertices={posedVertices}
+            poseBounds={poseBounds}
             statsExtra={animation ? `anim ${seqId} · frame ${frameIndex + 1} / ${frameCount}${playing ? '' : ' (paused)'}` : undefined}
           />
         )}

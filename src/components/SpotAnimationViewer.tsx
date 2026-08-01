@@ -163,7 +163,7 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
     return () => { cancelled = true }
   }, [draft.sequenceId, rootHandle])
 
-  const { posedVertices, status, frameIndex, setFrameIndex, frameCount, playing, setPlaying } =
+  const { posedVertices, status, frameIndex, setFrameIndex, frameCount, playing, setPlaying, poseBounds } =
     useSequencePlayback(sequence, model, rootHandle, true)
 
   function stepFrame(delta: number) {
@@ -270,6 +270,7 @@ export default function SpotAnimationViewer({ data, onSave, onDirtyChange, onNav
                 world={world}
                 posedVertices={posedVertices}
                 cameraStateRef={cameraStateRef}
+                poseBounds={poseBounds}
                 fitScale={2.8}
                 hideHeader
               />
