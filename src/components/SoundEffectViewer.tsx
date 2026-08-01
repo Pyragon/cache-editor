@@ -294,12 +294,21 @@ function OptionalEnvelopePair({ title, a, b, onSetA, onSetB, labelA = 'Modifier'
   }
   return (
     <section className="item-section">
-      <h3>{title}</h3>
+      {/* the remove sits IN the heading, so it reads as belonging to this
+          section rather than floating above whatever comes next */}
+      <div className="sfx-section-head">
+        <h3>{title}</h3>
+        <button
+          type="button"
+          className="remove-btn"
+          title={`Delete this ${title.toLowerCase()} pair — the effect keeps playing without it`}
+          onClick={() => { onSetA(null); onSetB(null) }}
+        >
+          Remove
+        </button>
+      </div>
       <EnvelopeEditor label={labelA} envelope={a} onChange={onSetA} accent="hsl(280 70% 65%)" />
       <EnvelopeEditor label={labelB} envelope={b ?? emptyEnvelope()} onChange={onSetB} accent="hsl(320 70% 65%)" />
-      <button type="button" className="row-remove-btn sfx-remove-pair" onClick={() => { onSetA(null); onSetB(null) }}>
-        Remove {title}
-      </button>
     </section>
   )
 }
@@ -383,15 +392,13 @@ function FilterEditor({ filter, filterEnvelope, onChangeFilter, onChangeEnvelope
         </div>
       ))}
       <EnvelopeEditor label="Filter Envelope" envelope={filterEnvelope} onChange={onChangeEnvelope} accent="hsl(160 70% 55%)" />
-      <button type="button" className="row-remove-btn sfx-remove-pair" onClick={() => onChangeFilter({ numPairs: [0, 0], pairPhase: filter.pairPhase, pairMagnitude: filter.pairMagnitude, unity: [0, 0], migrated: 0 })}>
-        Remove Filter
-      </button>
     </div>
   )
 }
 
-function InstrumentEditor({ instrument, onChange, onRemove }: {
+function InstrumentEditor({ instrument, slot, onChange, onRemove }: {
   instrument: InstrumentDef
+  slot: number
   onChange: (next: InstrumentDef) => void
   onRemove: () => void
 }) {
@@ -406,6 +413,18 @@ function InstrumentEditor({ instrument, onChange, onRemove }: {
 
   return (
     <div className="sfx-instrument">
+      <div className="sfx-section-head sfx-instrument-head">
+        <h3>Instrument {slot}</h3>
+        <button
+          type="button"
+          className="remove-btn"
+          title={`Empty slot ${slot}. The sound effect keeps its other instruments — this one stops contributing to the mix.`}
+          onClick={onRemove}
+        >
+          Remove instrument {slot}
+        </button>
+      </div>
+
       <section className="item-section">
         <h3>Timing</h3>
         <NumGrid
@@ -465,7 +484,25 @@ function InstrumentEditor({ instrument, onChange, onRemove }: {
       />
 
       <section className="item-section">
-        <h3>Filter <span className="sfx-advanced-note">(advanced)</span></h3>
+        <div className="sfx-section-head">
+          <h3>Filter <span className="sfx-advanced-note">(advanced)</span></h3>
+          {(instrument.filter.numPairs[0] > 0 || instrument.filter.numPairs[1] > 0) && (
+            <button
+              type="button"
+              className="remove-btn"
+              title="Clear the filter — the instrument plays unfiltered"
+              onClick={() => set('filter', {
+                numPairs: [0, 0],
+                pairPhase: instrument.filter.pairPhase,
+                pairMagnitude: instrument.filter.pairMagnitude,
+                unity: [0, 0],
+                migrated: 0,
+              })}
+            >
+              Remove
+            </button>
+          )}
+        </div>
         <FilterEditor
           filter={instrument.filter}
           filterEnvelope={instrument.filterEnvelope}
@@ -474,7 +511,6 @@ function InstrumentEditor({ instrument, onChange, onRemove }: {
         />
       </section>
 
-      <button type="button" className="row-remove-btn sfx-remove-instrument" onClick={onRemove}>Remove Instrument</button>
     </div>
   )
 }
@@ -581,6 +617,7 @@ export default function SoundEffectViewer({ data, onSave, onDirtyChange }: {
       {selected && (
         <InstrumentEditor
           instrument={selected}
+          slot={selectedSlot}
           onChange={(next) => updateSlot(selectedSlot, next)}
           onRemove={() => removeSlot(selectedSlot)}
         />

@@ -169,13 +169,38 @@
   gap: 8px;
 }
 
-.sfx-remove-pair,
-.sfx-remove-instrument {
-  margin-top: 8px;
+/* Section heading with its own action on the right. Putting the destructive
+   action here rather than after the section's content is what makes it read as
+   belonging to this section — trailing it at the bottom put it visually next to
+   whatever section came NEXT. */
+/* The action sits immediately after the title, NOT pushed to the far edge:
+   `space-between` across a 900px row put it a hand's width from the heading it
+   belongs to, which is the same disconnect it was meant to fix. */
+.sfx-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  /* the h3 inside is zeroed below, so the 10px that `.item-section h3` would
+     have put under the heading has to live on the row instead */
+  margin-bottom: 10px;
 }
 
-.sfx-remove-instrument {
-  margin-top: 16px;
+.sfx-section-head h3 {
+  margin: 0;
+}
+
+/* The instrument header names the slot being edited, so it sits above the
+   sections rather than inside one. */
+.sfx-instrument-head {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Breathing room under a trailing "+ Add ..." button, which would otherwise sit
+   flush against the next section's heading. */
+.item-section > .add-row-btn:last-child {
+  margin-bottom: 6px;
 }
 
 .sfx-advanced-note {
