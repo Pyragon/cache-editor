@@ -4,12 +4,19 @@
    is prefixed sem-. The env-graph classes are shared with the sound_effects
    synth viewer. */
 
+/* Sits beside the id badges. It used to be pushed to the far right with
+   `margin-left: auto`, which on a wide panel put it a screen away from the
+   thing it belongs to. */
 .sem-gain-field {
-  margin-left: auto;
   max-width: 160px;
 }
 
+/* The keyboard is a fixed-width SVG, so the box around it should be that wide
+   and no wider — a full-panel border with the keys tucked in one corner reads
+   as a layout bug. */
 .sem-keyboard-wrap {
+  width: fit-content;
+  max-width: 100%;
   margin-top: 12px;
   padding: 12px;
   border-radius: 10px;
@@ -66,7 +73,11 @@
   border: 1px solid var(--border);
 }
 
+/* Holds one .item-grid, which caps at 900px — without a matching cap the
+   bordered card stretched to the panel while its contents stopped well short. */
 .sem-detail {
+  width: fit-content;
+  max-width: 100%;
   border: 1px solid rgba(47, 143, 255, 0.35);
   border-radius: 10px;
   padding: 12px 16px;
@@ -75,9 +86,10 @@
 
 .sem-zone-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(360px, 420px));
   gap: 14px;
   margin-top: 10px;
+  max-width: 900px;
 }
 
 .sem-zone-card {
@@ -102,10 +114,13 @@
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  max-width: 900px;
 }
 
+/* grow only up to a sane graph width, rather than splitting the whole panel
+   between however many graphs there happen to be */
 .sem-graphs .env-graph {
-  flex: 1 1 220px;
+  flex: 0 1 320px;
   min-width: 200px;
 }
 
