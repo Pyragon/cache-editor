@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AnimationData, AnimationDef } from '../loaders/animations'
 import { frameFileId, setFrameRef } from '../loaders/animations'
 import { buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
@@ -27,6 +27,7 @@ type Props = {
 
 export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigate }: Props) {
   const [draft, setDraft] = useState<AnimationDef>(data.def)
+  const hoveredFrameRef = useRef<number | null>(null)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [showPlayback, setShowPlayback] = useState(false)
@@ -144,6 +145,27 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
   const frameCount = draft.frameDurations?.length ?? 0
   const totalMs = (draft.frameDurations ?? []).reduce((sum, d) => sum + d * 20, 0)
 
+  // Hovering a timeline segment highlights its table row and vice versa. Done
+  // by toggling a class on exactly two nodes rather than through state: the
+  // longest animation here has 400 frames, and re-rendering 1,200 number
+  // inputs on every pointer move between segments visibly stutters.
+  const segId = (i: number) => `anim-frame-seg-${data.id}-${i}`
+  const rowId = (i: number) => `anim-frame-row-${data.id}-${i}`
+  const setHoveredFrame = useCallback((index: number | null) => {
+    const mark = (i: number, on: boolean) => {
+      document.getElementById(`anim-frame-seg-${data.id}-${i}`)?.classList.toggle('linked-hover', on)
+      document.getElementById(`anim-frame-row-${data.id}-${i}`)?.classList.toggle('linked-hover', on)
+    }
+    if (hoveredFrameRef.current === index) return
+    if (hoveredFrameRef.current != null) mark(hoveredFrameRef.current, false)
+    hoveredFrameRef.current = index
+    if (index != null) mark(index, true)
+  }, [data.id])
+
+  // React doesn't know about the class above, so it survives a re-render that
+  // shifts the rows — clear it whenever the frame list changes underneath it.
+  useEffect(() => { setHoveredFrame(null) }, [data.id, frameCount, setHoveredFrame])
+
   return (
     <div className="item-viewer">
       <div className="item-header">
@@ -183,15 +205,25 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
       <section className="item-section">
         <h3>Frames ({frameCount})</h3>
         {frameCount > 1 && (
-          <div className="anim-timeline" title="One segment per frame, width = duration. Amber underline = interruption point. Click a segment to jump to its row.">
+          <div
+            className="anim-timeline"
+            title="One segment per frame, width = duration. Amber underline = interruption point. Hover to highlight its row; click to jump to it."
+            onMouseLeave={() => setHoveredFrame(null)}
+          >
             {(draft.frameDurations ?? []).map((duration, i) => (
               <button
                 key={i}
+                id={segId(i)}
                 type="button"
                 className={`anim-timeline-seg${draft.interLeaveOrder?.[i] ? ' interruptible' : ''}`}
                 style={{ flexGrow: Math.max(1, duration) }}
                 title={`Frame ${i} — ${duration} ticks (${duration * 20}ms) · set ${draft.frameSetIds?.[i] ?? 0} file ${frameFileId(draft, i)}`}
-                onClick={() => document.getElementById(`anim-frame-row-${data.id}-${i}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })}
+                onMouseEnter={() => setHoveredFrame(i)}
+                // keyboard tabbing gets the link too; blur fires before the
+                // next focus, so the early-return keeps it from flickering
+                onFocus={() => setHoveredFrame(i)}
+                onBlur={() => setHoveredFrame(null)}
+                onClick={() => document.getElementById(rowId(i))?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })}
               />
             ))}
           </div>
@@ -201,9 +233,9 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
             <thead>
               <tr><th>#</th><th>Duration (ticks)</th><th>Frame Set</th><th>File ID</th><th></th></tr>
             </thead>
-            <tbody>
+            <tbody onMouseLeave={() => setHoveredFrame(null)}>
               {(draft.frameDurations ?? []).map((duration, i) => (
-                <tr key={i} id={`anim-frame-row-${data.id}-${i}`}>
+                <tr key={i} id={rowId(i)} onMouseEnter={() => setHoveredFrame(i)}>
                   <td className="item-stack-index">{i}</td>
                   <td><NumberInput className="cell-input" value={duration} onChange={(v) => setFrameDuration(i, v)} min={0} /></td>
                   <td>

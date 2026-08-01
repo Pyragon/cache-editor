@@ -42,7 +42,10 @@
   background: rgba(126, 184, 255, 0.3);
 }
 
-.anim-timeline-seg:hover {
+/* `.linked-hover` is set imperatively when the matching table row is hovered,
+   so a segment lights up the same way whichever half the pointer is over. */
+.anim-timeline-seg:hover,
+.anim-timeline-seg.linked-hover {
   background: rgba(126, 184, 255, 0.55);
 }
 
@@ -69,6 +72,18 @@
 
 .anim-frames-wrap td {
   vertical-align: middle;
+}
+
+/* The other half of the timeline<->table hover link. Both the pointer's own
+   row and one highlighted from the timeline use the same class, so there's no
+   competing :hover rule to fight. */
+.anim-frames-wrap tbody tr.linked-hover td {
+  background: rgba(126, 184, 255, 0.12);
+}
+
+/* the row number reads as the anchor, so give it the accent edge */
+.anim-frames-wrap tbody tr.linked-hover td:first-child {
+  box-shadow: inset 2px 0 0 rgba(126, 184, 255, 0.85);
 }
 
 .anim-advanced .item-section {
