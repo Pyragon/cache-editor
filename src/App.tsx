@@ -151,6 +151,7 @@ const DONE_ENTRIES = new Set([
   'config_bas', 'npcs', 'cs2', 'shaders', 'config_identikit',
   'config_underlays', 'config_overlays', 'objects',
   'spot_animations', 'music', 'music2',
+  'sound_effects', 'midi_instruments', 'sound_effects_midi',
 ])
 
 function unavailableReason(name: string): string {

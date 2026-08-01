@@ -66,27 +66,6 @@ Sizing, for whenever this comes back: song-scoped export is 0.28 MB median /
 ~161 s of pure synthesis, so it likely needs chunking or a cancel button (an
 `AbortSignal` is plumbed through but nothing drives it).
 
-### RE-DUMP `midi_instruments` — two dumper bugs fixed 2026-08-01
-
-`MidiInstrument.dumpFiles` wrote the **packet index** as each Ogg page's granule
-position instead of a running sample count, so a 123-packet instrument ended at
-granulepos 123 rather than 62,110 samples. Every player reads that as a ~6ms
-file, which is why an `<audio>` element's play button did nothing. `duration`
-inherited it — computed off the same figure at 1,000 samples per packet, when
-they hold about 505 — and came out roughly 2x the truth.
-
-Fixed in cryogen: granule positions now distribute `sampleSize` across the
-packets (exact at both ends, at most half a block out in between, which only
-affects seek precision), and `duration` is `sampleSize / samplingRate` in
-seconds, taken directly rather than by re-reading the .ogg. `aBool7609` is
-renamed `loopConsistency` at the same time. Compiles on JDK 17 — note the
-Maven build fails on JDK 24 with a Lombok error unrelated to this.
-
-**Needs a re-dump.** Nothing breaks without one: the viewer decodes the packets
-and measures the audio itself, and the loader reads either spelling of the loop
-flag. What is stale until then is the `duration` field and any external player
-pointed at the dumped `.ogg`.
-
 ### OPEN QUESTION: 14,211 of 16,825 midi_instruments have no reference in the cache
 
 Measured 2026-08-01, and the reason it matters is that it is 84% of the index.
@@ -126,8 +105,6 @@ bank**, so "all instruments" means something different there than on the music
 page, where "all" means all 247 banks. Worth deciding whether the unreferenced
 ~15,600 are useful to export at all, given no MIDI message can address them.
 
-- **`sound_effects_midi` keymap is read-only** — the 128-note keymap renders as grouped ranges with resolved sample links; per-note editing across six 128-entry parallel arrays needs a better UI concept before it's worth building.
-- **`sound_effects_midi` editor not tested in a real browser session** — typecheck/lint/build pass; the dumper/decoder is verified byte-identical independently.
 
 ## Maps
 
