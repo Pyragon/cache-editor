@@ -143,7 +143,14 @@ type GfxRt = AnimHolder & {
   attachments: { pose: (posed: PosedVertices | null) => void; remove: () => void }[]
   /** false while the sequence is still loading — anim null + settled is "done" */
   settled: boolean
+  /** the gfx id whose prebuilt spare mesh this borrowed, so removal returns it
+   *  instead of disposing it (null = it built its own) */
+  spareOf: number | null
 }
+
+/** A spot animation prepared at build time: its def, its model composite
+ *  (shareable — posing never writes to the model) and one prebuilt mesh. */
+type GfxAsset = { def: Record<string, unknown>; composite: ModelData; spare: TexturedModelMesh | null }
 
 // ---------------------------------------------------------------------------
 // Runtime state (all in refs — the sim runs on the rAF loop, not React).
@@ -490,6 +497,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   const animDefCache = useRef(new Map<number, Promise<AnimationDef | null>>())
   const frameSetCache = useRef(new Map<number, Promise<AnimationFrameSetData | null>>())
   const frameBaseCache = useRef(new Map<number, Promise<AnimationFrameBaseDef | null>>())
+  // Spot-animation assets, keyed by gfx id — see loadGfxAsset.
+  const gfxAssets = useRef(new Map<number, GfxAsset>())
+  const gfxPending = useRef(new Map<number, Promise<GfxAsset | null>>())
   const animDefSync = useRef(new Map<number, AnimationDef | null>())
   const frameSetSync = useRef(new Map<number, AnimationFrameSetData | null>())
   const frameBaseSync = useRef(new Map<number, AnimationFrameBaseDef | null>())
@@ -668,36 +678,89 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     }))
   }
 
+  const gfxLighting = (gfxDef: Record<string, unknown>) => ({
+    ambient: 64 + Number(gfxDef.ambient ?? 0),
+    contrast: 850 + Number(gfxDef.contrast ?? 0) * 5,
+  })
+
+  /**
+   * Load a spot animation's def, model composite and one built mesh, once per
+   * gfx id, at BUILD time.
+   *
+   * The client will not start a cutscene until every spot-anim action reports
+   * `isFullyCached()`, which is `gfxType.isModelLoaded() && seqType.ready()`
+   * (AbstractCutsceneSpotAnimation) — we were doing only the sequence half, so
+   * a gfx read its def off disk, parsed its model and built its mesh at the
+   * exact cycle it was supposed to already be on screen. Cutscene 0's teleport
+   * flash (gfx 1588, 30 cycles from 2033) was meant to cover two entities being
+   * removed at 2042 and 2072, and instead arrived after they had both blinked
+   * out.
+   *
+   * The composite is shared between concurrent instances of the same gfx —
+   * posing copies the model's vertex arrays into its own state and never writes
+   * back — but a mesh owns GPU geometry that each pose rewrites, so only one
+   * prebuilt mesh is kept, lent to whichever instance is live and returned when
+   * it ends. A second simultaneous instance falls back to building its own.
+   */
+  const loadGfxAsset = (gfxId: number): Promise<GfxAsset | null> => {
+    let p = gfxPending.current.get(gfxId)
+    if (!p) {
+      p = (async () => {
+        try {
+          const dir = await resolveEntryHandle(rootHandle, getEntryPath('spot_animations'))
+          if (!dir) return null
+          const gfxDef = JSON.parse(await (await dir.getFileHandle(`${gfxId}.json`)).getFile().then((f) => f.text())) as Record<string, unknown>
+          const modelId = Number(gfxDef.modelId ?? -1)
+          if (modelId < 0) return null
+          const composite = await loadModelComposite(rootHandle, {
+            hideMarkerFaces: true,
+            modelIds: [modelId],
+            recolor: {
+              from: gfxDef.originalColors as number[] | undefined,
+              to: gfxDef.modifiedColors as number[] | undefined,
+              textureFrom: gfxDef.originalTextures as number[] | undefined,
+              textureTo: gfxDef.modifiedTextures as number[] | undefined,
+            },
+            scale: {
+              x: Number(gfxDef.scaleXZ ?? 128) || 128,
+              y: Number(gfxDef.scaleY ?? 128) || 128,
+              z: Number(gfxDef.scaleXZ ?? 128) || 128,
+            },
+          })
+          const spare = await buildTexturedModelMesh(composite, gfxLighting(gfxDef))
+          if (rt.current.disposed) { spare?.dispose(); return null }
+          const asset: GfxAsset = { def: gfxDef, composite, spare }
+          gfxAssets.current.set(gfxId, asset)
+          return asset
+        } catch {
+          return null // gfx unavailable — its actions just do nothing
+        }
+      })()
+      gfxPending.current.set(gfxId, p)
+    }
+    return p
+  }
+
   /** Spawns a spot animation (gfx) on an entity — ENTITY_GFX, and the gfx an
    *  ANIMATE_MOVEMENT can carry in its third field (the client plays them via
    *  the same spot-anim slots). Plays its sequence once, then removes itself. */
   const startEntityGfx = async (e: EntityRt, gfxId: number, displayHeight: number, rotation: number) => {
     try {
-      const dir = await resolveEntryHandle(rootHandle, getEntryPath('spot_animations'))
-      if (!dir) return
-      const gfxDef = JSON.parse(await (await dir.getFileHandle(`${gfxId}.json`)).getFile().then((f) => f.text())) as Record<string, unknown>
-      const modelId = Number(gfxDef.modelId ?? -1)
-      if (modelId < 0) return
-      const composite = await loadModelComposite(rootHandle, {
-        hideMarkerFaces: true,
-        modelIds: [modelId],
-        recolor: {
-          from: gfxDef.originalColors as number[] | undefined,
-          to: gfxDef.modifiedColors as number[] | undefined,
-          textureFrom: gfxDef.originalTextures as number[] | undefined,
-          textureTo: gfxDef.modifiedTextures as number[] | undefined,
-        },
-        scale: {
-          x: Number(gfxDef.scaleXZ ?? 128) || 128,
-          y: Number(gfxDef.scaleY ?? 128) || 128,
-          z: Number(gfxDef.scaleXZ ?? 128) || 128,
-        },
-      })
-      const tm = await buildTexturedModelMesh(composite, {
-        ambient: 64 + Number(gfxDef.ambient ?? 0),
-        contrast: 850 + Number(gfxDef.contrast ?? 0) * 5,
-      })
-      if (rt.current.disposed) { tm?.dispose(); return }
+      // Prewarmed in the common case, so this resolves in a microtask and the
+      // gfx is on screen in the same frame its action fired.
+      const asset = gfxAssets.current.get(gfxId) ?? await loadGfxAsset(gfxId)
+      if (!asset) return
+      const { def: gfxDef, composite } = asset
+      let tm = asset.spare
+      const borrowed = tm != null
+      if (tm) {
+        asset.spare = null
+        applyPose({ tm, model: composite }, null) // it holds the last run's final pose
+      } else {
+        // another instance of this gfx is already using the spare
+        tm = await buildTexturedModelMesh(composite, gfxLighting(gfxDef))
+      }
+      if (rt.current.disposed) { if (!borrowed) tm?.dispose(); return }
       // Most cutscene 1 gfx models are pure attachment carriers (1-5 faces,
       // all billboard hosts / emitter spawn surfaces) — tm comes back null
       // for those and the billboards/particles below ARE the effect. Only
@@ -714,6 +777,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         poseModel: composite,
         anim: null, animPending: 0, animCommitted: 0,
         holder, parent: e.group, attachments: [], settled: false,
+        spareOf: borrowed ? gfxId : null,
       }
       // Billboards/particles ride the entity's CURRENT placement (a cutscene
       // entity rarely moves during its own gfx). Billboards follow the posed
@@ -742,7 +806,13 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
 
   const removeGfx = (g: GfxRt) => {
     g.parent.remove(g.holder)
-    g.em?.tm.dispose()
+    if (g.em) {
+      // hand a borrowed mesh back rather than destroying it — the next spawn of
+      // this gfx has to be instant too
+      const asset = g.spareOf != null ? gfxAssets.current.get(g.spareOf) : null
+      if (asset && !asset.spare) asset.spare = g.em.tm
+      else g.em.tm.dispose()
+    }
     for (const a of g.attachments) a.remove()
     g.attachments = []
   }
@@ -1081,6 +1151,10 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
 
   useEffect(() => {
     const r = rt.current
+    // captured for the cleanup: the Maps themselves are stable for the life of
+    // the component, but reading `.current` down there trips the ref lint rule
+    const builtGfx = gfxAssets.current
+    const pendingGfx = gfxPending.current
     r.disposed = false
     // The sim's own counters were already reset during render (see
     // switchedBuild); this is the rest — scene-scoped data, the React-side
@@ -1095,6 +1169,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     setStatus('Assembling scene…')
     let cancelled = false
     let disposeResize: (() => void) | null = null
+    let stopLoop: (() => void) | null = null
     ;(async () => {
       try {
         const mapsDir = await resolveEntryHandle(rootHandle, getEntryPath('maps'))
@@ -1415,19 +1490,15 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
               gfxIds.push(f.gfxId)
             }
           }
-          // gfx defs carry their own sequence ids — resolve those too
+          // Every gfx the cutscene can spawn: model AND mesh built now, not at
+          // the cycle it fires (the client's isModelLoaded half of a spot-anim
+          // action's ready check). Their defs carry the sequence ids the
+          // prewarm below then resolves.
           if (gfxIds.length > 0) {
-            try {
-              const gfxDir = await resolveEntryHandle(rootHandle, getEntryPath('spot_animations'))
-              if (gfxDir) {
-                await Promise.all([...new Set(gfxIds)].filter((id) => id > 0).map(async (id) => {
-                  try {
-                    const gfxDef = JSON.parse(await (await gfxDir.getFileHandle(`${id}.json`)).getFile().then((fl) => fl.text())) as Record<string, unknown>
-                    animIds.push(Number(gfxDef.sequenceId ?? -1))
-                  } catch { /* missing gfx def */ }
-                }))
-              }
-            } catch { /* no spot_animations entry */ }
+            setStatus('Loading effects…')
+            const assets = await Promise.all([...new Set(gfxIds)].filter((id) => id > 0).map(loadGfxAsset))
+            if (cancelled) return
+            for (const asset of assets) if (asset) animIds.push(Number(asset.def.sequenceId ?? -1))
           }
           await prewarmAnims(animIds)
           if (cancelled) return
@@ -1513,9 +1584,16 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         setReady(true)
 
         let last = performance.now()
+        let rafId = 0
         const loop = (now: number) => {
-          if (r.disposed) return
-          requestAnimationFrame(loop)
+          // `cancelled` is THIS build's own token. `r.disposed` is shared
+          // runtime state that the next build clears on its way in, so a loop
+          // guarded only by that would see its stop signal undone and carry on
+          // driving the new scene alongside the new loop: two sims stepping one
+          // runtime (double speed), the old cutscene's actions applied to the
+          // new cast, and its camera fighting the new one.
+          if (cancelled || r.disposed) return
+          rafId = requestAnimationFrame(loop)
           const dt = Math.min(now - last, 250)
           last = now
           if (playingRef.current && !r.finished && r.cycle < durationCycles) {
@@ -1575,16 +1653,26 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
           if (r.composer) r.composer.render()
           else r.renderer!.render(r.scene, r.camera)
         }
-        requestAnimationFrame(loop)
+        rafId = requestAnimationFrame(loop)
+        stopLoop = () => cancelAnimationFrame(rafId)
       } catch (e) {
         if (!cancelled) setStatus(`Scene build failed: ${e instanceof Error ? e.message : e}`)
       }
     })()
     return () => {
       cancelled = true
+      // drops the frame already queued, so teardown can't be raced by one last
+      // render against a disposed renderer
+      stopLoop?.()
       disposeResize?.()
       const rr = rt.current
       rr.disposed = true
+      // Prebuilt gfx meshes are held OUTSIDE the scene graph while unused, so
+      // the traverse below can't reach them — and the next cutscene needs its
+      // own anyway.
+      for (const asset of builtGfx.values()) asset.spare?.dispose()
+      builtGfx.clear()
+      pendingGfx.clear()
       rr.particles?.dispose()
       rr.billboards?.dispose()
       rr.billboards = null
