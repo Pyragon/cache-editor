@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CutsceneActionDef, CutsceneData, CutsceneDef } from '../loaders/cutscenes'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getNpcIcon, peekNpcIcon } from './npcSnapshot'
 import { SoundPlayerCell } from './SoundPlayerCell'
-import CutscenePlayerModal from './CutscenePlayerModal'
+import { InstrumentPlayerCell } from './InstrumentPlayerCell'
+import { SongPlayerCell } from './SongPlayerCell'
+import CutscenePlayer from './CutscenePlayer'
 import './CutsceneViewer.css'
 
 type Props = {
@@ -69,19 +71,25 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
     return `entity #${index} (${info?.name ?? `NPC ${entity.id}`})`
   }
 
+  const [selectedAction, setSelectedAction] = useState<number | null>(null)
+  useEffect(() => { setSelectedAction(null) }, [def])
+
+  /** Short lane name for the roll — the cast table already carries the detail. */
+  const rollEntityName = useCallback((index: number): string => {
+    const entity = def.entities[index]
+    if (!entity) return `Entity ${index}`
+    if (entity.id < 0) return `${index} · Player`
+    const name = npcInfo.get(entity.id)?.name
+    return name && name !== `NPC ${entity.id}` ? `${index} · ${name}` : `${index} · NPC ${entity.id}`
+  }, [def, npcInfo])
+
   const durationCycles = def.actions.reduce((max, a) => Math.max(max, a.lengthInCycles), 0)
-  const [playerOpen, setPlayerOpen] = useState(false)
 
   return (
     <div className="item-viewer">
       <div className="item-header">
         <div className="item-title-row">
           <span className="cutscene-title">Cutscene {def.id}</span>
-          {cacheRoot && (
-            <button type="button" className="zoom-btn anim-preview-play" onClick={() => setPlayerOpen(true)}>
-              ▶ Play Cutscene
-            </button>
-          )}
         </div>
         <div className="item-badges">
           <span className="item-id-badge">ID {def.id}</span>
@@ -90,16 +98,34 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
         </div>
       </div>
 
-      {playerOpen && cacheRoot && (
-        <CutscenePlayerModal def={def} rootHandle={cacheRoot} onClose={() => setPlayerOpen(false)} />
-      )}
+      <section className="item-section">
+        <h3>Preview</h3>
+        {cacheRoot
+          ? <CutscenePlayer def={def} rootHandle={cacheRoot} />
+          : <p className="cutscene-note">Reopen the cache to play this cutscene.</p>}
+      </section>
 
       <section className="item-section">
-        <h3>Scene Overview</h3>
+        <h3>Timeline — {def.actions.length} actions</h3>
         <p className="cutscene-note">
-          Camera paths (solid) with their look-at targets (dashed), and entity walk routes (dotted lines with step markers), in scene tile coordinates.
+          Each mark is one action at the cycle it fires, on the row of whatever it acts on. Click a mark to
+          single it out below; click it again to show them all.
         </p>
-        <SceneCanvas def={def} />
+        <ActionRoll def={def} entityName={rollEntityName} selected={selectedAction} onSelect={setSelectedAction} />
+        <div className="quest-table-wrap">
+          <table className="quest-table cutscene-timeline">
+            <thead><tr><th>Start</th><th>Action</th><th>Details</th></tr></thead>
+            <tbody>
+              {def.actions.map((a, i) => (selectedAction != null && selectedAction !== i ? null : (
+                <tr key={i} className={selectedAction === i ? 'linked-hover' : undefined}>
+                  <td className="cutscene-time">{cycleTime(a.lengthInCycles)}<span className="cutscene-cycles">{a.lengthInCycles}c</span></td>
+                  <td><span className={`cutscene-action-badge cutscene-action-${actionGroup(a.type)}`}>{actionTitle(a.type)}</span></td>
+                  <td><ActionRow action={a} entityLabel={entityLabel} def={def} onNavigate={onNavigate} cacheRoot={cacheRoot ?? null} /></td>
+                </tr>
+              )))}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section className="item-section">
@@ -241,28 +267,139 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
         </section>
       )}
 
-      <section className="item-section">
-        <h3>Timeline — {def.actions.length} actions</h3>
-        <div className="quest-table-wrap">
-          <table className="quest-table cutscene-timeline">
-            <thead><tr><th>Start</th><th>Action</th><th>Details</th></tr></thead>
-            <tbody>
-              {def.actions.map((a, i) => (
-                <tr key={i}>
-                  <td className="cutscene-time">{cycleTime(a.lengthInCycles)}<span className="cutscene-cycles">{a.lengthInCycles}c</span></td>
-                  <td><span className={`cutscene-action-badge cutscene-action-${actionGroup(a.type)}`}>{actionTitle(a.type)}</span></td>
-                  <td><ActionDetails action={a} entityLabel={entityLabel} def={def} onNavigate={onNavigate} cacheRoot={cacheRoot ?? null} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
     </div>
   )
 }
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Action roll — the timeline as lanes over cycles, reading the same way as the
+// music page's piano roll: subject down the side, time across, one mark per
+// event. A 342-action cutscene as a flat table is unreadable; laid out this way
+// you can see the camera cut while an entity is mid-walk, which is the thing
+// you actually want to know.
+// ---------------------------------------------------------------------------
+
+/** Which row an action belongs to. Actions name their subject through one of
+ *  several different fields — targetIndex, entityIndex, objectIndex, locIndex —
+ *  so this is the single place that has to know all of them. */
+function actionLane(a: CutsceneActionDef, entityName: (i: number) => string): { key: string; label: string; order: number } {
+  const f = (a.fields ?? {}) as Record<string, number>
+  const entity = f.targetIndex ?? f.entityIndex
+  if (entity != null) return { key: `e${entity}`, label: entityName(entity), order: 100 + entity }
+  if (a.type.includes('CAMERA')) return { key: 'camera', label: 'Camera', order: 0 }
+  if (a.type.includes('OBJECT')) return { key: 'object', label: 'Objects', order: 300 }
+  if (a.type.startsWith('PLAY_')) return { key: 'sound', label: 'Sound', order: 400 }
+  return { key: 'scene', label: 'Scene', order: 500 }
+}
+
+/** Mark width in px, mirrored in .cutscene-roll-mark — the fan spacing is
+ *  derived from it so stacked marks never overlap. */
+const MARK_W = 9
+
+function ActionRoll({ def, entityName, selected, onSelect }: {
+  def: CutsceneDef
+  entityName: (index: number) => string
+  selected: number | null
+  onSelect: (index: number | null) => void
+}) {
+  const { lanes, laneOf, stackAt, maxCycle } = useMemo(() => {
+    const byKey = new Map<string, { key: string; label: string; order: number }>()
+    const laneOf: string[] = []
+    // Actions routinely share a lane AND a cycle — an entity is placed and
+    // told to walk on the same tick — and drawn at the same x they hide each
+    // other exactly. That is how cutscene 0's spawn of Saradomin looked
+    // missing. Each coincident mark gets a small nudge so the pile is visible.
+    const stackAt: number[] = []
+    const seen = new Map<string, number>()
+    let maxCycle = 0
+    for (const a of def.actions) {
+      const lane = actionLane(a, entityName)
+      if (!byKey.has(lane.key)) byKey.set(lane.key, lane)
+      laneOf.push(lane.key)
+      const slot = `${lane.key}@${a.lengthInCycles}`
+      const n = seen.get(slot) ?? 0
+      stackAt.push(n)
+      seen.set(slot, n + 1)
+      if (a.lengthInCycles > maxCycle) maxCycle = a.lengthInCycles
+    }
+    return {
+      lanes: [...byKey.values()].sort((x, y) => x.order - y.order),
+      laneOf,
+      stackAt,
+      maxCycle: Math.max(1, maxCycle),
+    }
+  }, [def, entityName])
+
+  // 50 cycles to the second; aim for a gridline every few seconds without
+  // producing hundreds of them on a long cutscene
+  const step = Math.max(50, Math.ceil(maxCycle / 12 / 50) * 50)
+  const ticks: number[] = []
+  for (let c = 0; c <= maxCycle; c += step) ticks.push(c)
+
+  if (lanes.length === 0) return <p className="cutscene-note">No actions.</p>
+
+  return (
+    <div className="cutscene-roll">
+      <div className="cutscene-roll-side">
+        <div className="cutscene-roll-corner" />
+        {lanes.map((l) => <div key={l.key} className="cutscene-roll-lane-label">{l.label}</div>)}
+      </div>
+      <div className="cutscene-roll-grid">
+        <div className="cutscene-roll-ticks">
+          {ticks.map((c, i) => (
+            <span
+              key={c}
+              className="cutscene-roll-tick"
+              style={{
+                left: `${(c / maxCycle) * 100}%`,
+                // centred by default, but the end ones are anchored inward:
+                // a centred 0s hangs half off the grid and vanishes under the
+                // pinned lane labels, which is why it read as a bare "s"
+                transform: i === 0 ? 'none' : i === ticks.length - 1 ? 'translateX(-100%)' : 'translateX(-50%)',
+              }}
+            >
+              {(c * 0.02).toFixed(0)}s
+            </span>
+          ))}
+        </div>
+        {lanes.map((l) => (
+          <div key={l.key} className="cutscene-roll-lane">
+            {ticks.map((c) => (
+              <span key={c} className="cutscene-roll-gridline" style={{ left: `${(c / maxCycle) * 100}%` }} />
+            ))}
+            {def.actions.map((a, i) => (laneOf[i] === l.key ? ((): React.ReactNode => {
+              const frac = a.lengthInCycles / maxCycle
+              // A mark is 9px wide and normally centred on its cycle, but at the
+              // very ends that hangs it outside the grid — at 0 it slid under
+              // the pinned lane labels, which is why the first actions looked
+              // absent. Anchor the ends inward, and fan a pile away from the
+              // edge rather than through it.
+              const atStart = frac <= 0
+              const atEnd = frac >= 1
+              const base = atStart ? 0 : atEnd ? -MARK_W : -MARK_W / 2
+              // step by the full mark width plus a hairline: at less than the
+              // width each mark covered part of the one before it, so only the
+              // last in a pile looked full size
+              const nudge = stackAt[i] * (MARK_W + 1) * (atEnd ? -1 : 1)
+              return (
+              <button
+                key={i}
+                type="button"
+                className={`cutscene-roll-mark cutscene-action-${actionGroup(a.type)}${stackAt[i] % 2 === 1 ? ' alt' : ''}${selected === i ? ' selected' : ''}`}
+                style={{ left: `${frac * 100}%`, marginLeft: `${base + nudge}px` }}
+                title={`${cycleTime(a.lengthInCycles)} — ${actionTitle(a.type)}`}
+                onClick={() => onSelect(selected === i ? null : i)}
+              />
+              )
+            })() : null))}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function actionTitle(type: string): string {
   return type.toLowerCase().replace(/_/g, ' ')
@@ -279,17 +416,122 @@ function actionGroup(type: string): string {
   return 'misc'
 }
 
-function ActionDetails({ action, entityLabel, def, onNavigate, cacheRoot }: {
+/**
+ * Cross-entry jumps offered by an action, rendered as a row UNDER its
+ * description rather than trailed inline — inline they got lost in the prose,
+ * and an action with two of them (an entity playing an animation has both an
+ * NPC and a sequence) read as a run-on sentence.
+ *
+ * Entity-based actions all resolve their NPC through the cast: the action
+ * carries a cast index, and `def.entities[index].id` is the npc id. A negative
+ * id is the player, whose appearance streams from the server, so there is
+ * nothing to link to.
+ */
+function actionLinks(action: CutsceneActionDef, def: CutsceneDef): { entry: string; id: number; label: string }[] {
+  const f = (action.fields ?? {}) as Record<string, number>
+  const links: { entry: string; id: number; label: string }[] = []
+
+  const addEntity = (castIndex: number | undefined) => {
+    if (castIndex == null) return
+    const npcId = def.entities[castIndex]?.id
+    if (npcId != null && npcId >= 0) links.push({ entry: 'npcs', id: npcId, label: 'View NPC' })
+  }
+  const addObject = (objectIndex: number | undefined) => {
+    if (objectIndex == null) return
+    const locId = def.objects[objectIndex]?.locId
+    if (locId != null && locId >= 0) links.push({ entry: 'objects', id: locId, label: 'View Object' })
+  }
+
+  // every field an action can name its entity through
+  addEntity(f.targetIndex ?? f.entityIndex ?? f.cutsceneEntityPtr)
+
+  switch (action.type) {
+    case 'ANIMATE_MOVEMENT':
+      links.push({ entry: 'animations', id: f.movementAnimationId, label: 'View Anim' })
+      break
+    case 'REPLACE_OBJECT':
+      addObject(f.locIndex)
+      break
+    case 'DESTROY_OBJECT':
+      addObject(f.cutsceneObjectPtr)
+      break
+    case 'ANIMATE_OBJECT':
+      addObject(f.objectIndex)
+      links.push({ entry: 'animations', id: f.sequenceId, label: 'View Anim' })
+      break
+    case 'ENTITY_GFX':
+    case 'POSITIONED_GFX':
+      links.push({ entry: 'spot_animations', id: f.gfxId, label: 'View GFX' })
+      break
+    case 'PROJECTILE_HOMING':
+    case 'PROJECTILE_TO_COORD':
+    case 'PROJECTILE_FROM_COORD':
+    case 'PROJECTILE_BETWEEN_COORDS':
+      addEntity(f.sourceEntityIndex)
+      addEntity(f.targetEntityIndex)
+      links.push({ entry: 'spot_animations', id: f.gfxId, label: 'View GFX' })
+      break
+    case 'PLAY_SONG':
+      links.push({ entry: 'music', id: f.musicId, label: 'View Music' })
+      break
+    case 'PLAY_SYNTH':
+      links.push({ entry: 'sound_effects', id: f.soundId, label: 'View Sound' })
+      break
+    case 'PLAY_VORBIS':
+      links.push({ entry: 'midi_instruments', id: f.soundId, label: 'View Sample' })
+      break
+    default:
+      break
+  }
+
+  // an entity can appear twice (a projectile from A to A), and a duplicate
+  // button is just noise
+  const seen = new Set<string>()
+  return links.filter((l) => {
+    if (l.id == null || l.id < 0) return false
+    const key = `${l.entry}:${l.id}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function ActionRow({ action, entityLabel, def, onNavigate, cacheRoot }: {
   action: CutsceneActionDef
   entityLabel: (index: number) => string
   def: CutsceneDef
   onNavigate?: (entryName: string, itemId: number) => void
   cacheRoot: FileSystemDirectoryHandle | null
 }) {
+  const links = actionLinks(action, def)
+  return (
+    <div className="cutscene-detail">
+      <ActionDetails action={action} entityLabel={entityLabel} def={def} cacheRoot={cacheRoot} />
+      {onNavigate && links.length > 0 && (
+        <div className="cutscene-detail-links">
+          {links.map((l) => (
+            <button
+              key={`${l.entry}:${l.id}:${l.label}`}
+              type="button"
+              className="field-link-btn"
+              onClick={() => onNavigate(l.entry, l.id)}
+            >
+              {l.label} {l.id}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ActionDetails({ action, entityLabel, def, cacheRoot }: {
+  action: CutsceneActionDef
+  entityLabel: (index: number) => string
+  def: CutsceneDef
+  cacheRoot: FileSystemDirectoryHandle | null
+}) {
   const f = (action.fields ?? {}) as Record<string, number & string>
-  const link = (entry: string, id: number, label: string) => onNavigate
-    ? <button type="button" className="field-link-btn" onClick={() => onNavigate(entry, id)}>{label}</button>
-    : <>{label}</>
 
   switch (action.type) {
     case 'DIRECT_CAMERA_MOVEMENT':
@@ -302,8 +544,7 @@ function ActionDetails({ action, entityLabel, def, onNavigate, cacheRoot }: {
       return <>walk {entityLabel(f.entityIndex)} along route {f.movementIndex} on plane {f.plane}</>
     case 'ANIMATE_MOVEMENT':
       return <>
-        {entityLabel(f.entityIndex)} plays animation {f.movementAnimationId}{(f.seqFlag as number) !== 0 ? ` (flag ${f.seqFlag})` : ' (as movement anims)'}{' '}
-        {link('animations', f.movementAnimationId as number, 'View Anim')}
+        {entityLabel(f.entityIndex)} plays animation {f.movementAnimationId}{(f.seqFlag as number) !== 0 ? ` (flag ${f.seqFlag})` : ' (as movement anims)'}
       </>
     case 'RESET_CUTSCENE_ENTITY':
       return <>remove {entityLabel(f.entityIndex)} from the scene</>
@@ -312,33 +553,32 @@ function ActionDetails({ action, entityLabel, def, onNavigate, cacheRoot }: {
     case 'REPLACE_OBJECT': {
       const obj = def.objects[f.locIndex as number]
       return <>
-        spawn object #{f.locIndex}{obj ? ` (loc ${obj.locId})` : ''} at tile ({f.x}, {f.y}) plane {f.plane}, rotation {f.rotation}{' '}
-        {obj && link('objects', obj.locId, 'View Object')}
+        spawn object #{f.locIndex}{obj ? ` (loc ${obj.locId})` : ''} at tile ({f.x}, {f.y}) plane {f.plane}, rotation {f.rotation}
       </>
     }
     case 'DESTROY_OBJECT': {
       const obj = def.objects[f.cutsceneObjectPtr as number]
-      return <>remove object #{f.cutsceneObjectPtr}{obj ? ` (loc ${obj.locId})` : ''} {obj && link('objects', obj.locId, 'View Object')}</>
+      return <>remove object #{f.cutsceneObjectPtr}{obj ? ` (loc ${obj.locId})` : ''}</>
     }
     case 'ANIMATE_OBJECT': {
       const obj = def.objects[f.objectIndex as number]
       return <>
-        object #{f.objectIndex}{obj ? ` (loc ${obj.locId})` : ''} plays animation {f.sequenceId}{' '}
-        {link('animations', f.sequenceId as number, 'View Anim')}
+        object #{f.objectIndex}{obj ? ` (loc ${obj.locId})` : ''} plays animation {f.sequenceId}
       </>
     }
     case 'ENTITY_GFX':
       return <>
-        {entityLabel(f.targetIndex)} shows gfx {f.gfxId} (slot {f.spotAnimationIndex}, height {f.displayHeight}, rotation {f.rotation}){' '}
-        {link('spot_animations', f.gfxId as number, 'View GFX')}
+        {entityLabel(f.targetIndex)} shows gfx {f.gfxId} (slot {f.spotAnimationIndex}, height {f.displayHeight}, rotation {f.rotation})
       </>
     case 'POSITIONED_GFX':
       return <>
-        gfx {f.gfxId} at tile ({f.x}, {f.y}) plane {f.plane} (height {f.displayHeight}, rotation {f.rotation}){' '}
-        {link('spot_animations', f.gfxId as number, 'View GFX')}
+        gfx {f.gfxId} at tile ({f.x}, {f.y}) plane {f.plane} (height {f.displayHeight}, rotation {f.rotation})
       </>
     case 'PLAY_SONG':
-      return <>play music track {f.musicId} at volume {f.volume} {link('music', f.musicId as number, 'View Music')}</>
+      return <>
+        play music track {f.musicId} at volume {f.volume}
+        {cacheRoot && <SongPlayerCell cacheRoot={cacheRoot} musicId={f.musicId as number} />}
+      </>
     case 'PLAY_JINGLE':
       return <>play jingle {f.jingleId} at volume {f.volume}</>
     case 'PLAY_SYNTH':
@@ -349,7 +589,13 @@ function ActionDetails({ action, entityLabel, def, onNavigate, cacheRoot }: {
         </span>
       </>
     case 'PLAY_VORBIS':
-      return <>play vorbis sound {f.soundId} (volume {f.volume}, rate {f.sampleRate}, repeats {f.timesRepeated}) — vorbis index isn't dumped, no preview</>
+      // "Vorbis" is the FORMAT, not an index: the client sends these through
+      // AreaSound type 2, which `spoken()` routes to midi_instruments (index
+      // 14) — not the empty index 36. All 81 distinct ids resolve there.
+      return <>
+        play sample {f.soundId} (volume {f.volume}, rate {f.sampleRate}, repeats {f.timesRepeated})
+        {cacheRoot && <InstrumentPlayerCell cacheRoot={cacheRoot} soundId={f.soundId as number} label={`sample ${f.soundId}`} />}
+      </>
     case 'FADE_SCREEN': {
       const argb = (f.fadeScreenColor as number) >>> 0
       const alpha = argb >>> 24
@@ -381,8 +627,7 @@ function ActionDetails({ action, entityLabel, def, onNavigate, cacheRoot }: {
       const from = f.sourceEntityIndex != null ? entityLabel(f.sourceEntityIndex) : `tile (${f.startTileX}, ${f.startTileY})`
       const to = f.targetEntityIndex != null ? entityLabel(f.targetEntityIndex) : `tile (${f.endTileX}, ${f.endTileY})`
       return <>
-        projectile gfx {f.gfxId} from {from} to {to} over {f.duration} cycles (heights {f.startHeight}→{f.endHeight}, angle {f.angle}, slope {f.slope}){' '}
-        {link('spot_animations', f.gfxId as number, 'View GFX')}
+        projectile gfx {f.gfxId} from {from} to {to} over {f.duration} cycles (heights {f.startHeight}→{f.endHeight}, angle {f.angle}, slope {f.slope})
       </>
     }
     case 'FINISHED':
@@ -393,129 +638,3 @@ function ActionDetails({ action, entityLabel, def, onNavigate, cacheRoot }: {
 }
 
 // ---------------------------------------------------------------------------
-
-/** Top-down plot of camera paths (fine coords /512 = tiles) and walk routes. */
-function SceneCanvas({ def }: { def: CutsceneDef }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    // Gather every point in tile units to find the bounds.
-    const points: { x: number; y: number }[] = []
-    for (const cam of def.camMovements) {
-      for (let i = 0; i < cam.xPositions.length; i++) {
-        points.push({ x: cam.xPositions[i] / 512, y: cam.zPositions[i] / 512 })
-        points.push({ x: cam.targetXPositions[i] / 512, y: cam.targetZPositions[i] / 512 })
-      }
-    }
-    for (const m of def.movements) {
-      for (const p of m.bitpackedPositions) points.push({ x: p >>> 16, y: p & 0xffff })
-    }
-    const W = 480
-    const H = 360
-    const dpr = window.devicePixelRatio || 1
-    canvas.width = W * dpr
-    canvas.height = H * dpr
-    ctx.scale(dpr, dpr)
-    ctx.clearRect(0, 0, W, H)
-    if (points.length === 0) {
-      ctx.fillStyle = '#8a8a94'
-      ctx.font = '13px sans-serif'
-      ctx.fillText('No camera paths or walk routes to plot.', 16, 24)
-      return
-    }
-
-    const pad = 2
-    const minX = Math.min(...points.map((p) => p.x)) - pad
-    const maxX = Math.max(...points.map((p) => p.x)) + pad
-    const minY = Math.min(...points.map((p) => p.y)) - pad
-    const maxY = Math.max(...points.map((p) => p.y)) + pad
-    const scale = Math.min(W / (maxX - minX), H / (maxY - minY))
-    const ox = (W - (maxX - minX) * scale) / 2
-    const oy = (H - (maxY - minY) * scale) / 2
-    // Game north (+y) points up: flip the canvas y axis.
-    const px = (x: number) => ox + (x - minX) * scale
-    const py = (y: number) => H - oy - (y - minY) * scale
-
-    // Tile grid every 8 tiles (one chunk).
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)'
-    ctx.lineWidth = 1
-    for (let gx = Math.ceil(minX / 8) * 8; gx <= maxX; gx += 8) {
-      ctx.beginPath(); ctx.moveTo(px(gx), 0); ctx.lineTo(px(gx), H); ctx.stroke()
-    }
-    for (let gy = Math.ceil(minY / 8) * 8; gy <= maxY; gy += 8) {
-      ctx.beginPath(); ctx.moveTo(0, py(gy)); ctx.lineTo(W, py(gy)); ctx.stroke()
-    }
-
-    // Walk routes: dotted lines with a dot per step.
-    def.movements.forEach((m, i) => {
-      const color = PATH_COLORS[i % PATH_COLORS.length]
-      ctx.strokeStyle = color
-      ctx.fillStyle = color
-      ctx.setLineDash([2, 3])
-      ctx.lineWidth = 1.5
-      ctx.beginPath()
-      m.bitpackedPositions.forEach((p, k) => {
-        const x = px(p >>> 16)
-        const y = py(p & 0xffff)
-        if (k === 0) ctx.moveTo(x, y)
-        else ctx.lineTo(x, y)
-      })
-      ctx.stroke()
-      ctx.setLineDash([])
-      m.bitpackedPositions.forEach((p) => {
-        ctx.beginPath()
-        ctx.arc(px(p >>> 16), py(p & 0xffff), 3, 0, Math.PI * 2)
-        ctx.fill()
-      })
-    })
-
-    // Camera paths: solid position spline, dashed look-at line, numbered keyframes.
-    def.camMovements.forEach((cam, i) => {
-      const color = PATH_COLORS[i % PATH_COLORS.length]
-      ctx.lineWidth = 2
-      ctx.strokeStyle = color
-      ctx.beginPath()
-      cam.xPositions.forEach((x, k) => {
-        const cx = px(x / 512)
-        const cy = py(cam.zPositions[k] / 512)
-        if (k === 0) ctx.moveTo(cx, cy)
-        else ctx.lineTo(cx, cy)
-      })
-      ctx.stroke()
-
-      ctx.lineWidth = 1
-      ctx.setLineDash([5, 4])
-      ctx.beginPath()
-      cam.targetXPositions.forEach((x, k) => {
-        const cx = px(x / 512)
-        const cy = py(cam.targetZPositions[k] / 512)
-        if (k === 0) ctx.moveTo(cx, cy)
-        else ctx.lineTo(cx, cy)
-      })
-      ctx.stroke()
-      ctx.setLineDash([])
-
-      ctx.fillStyle = color
-      cam.xPositions.forEach((x, k) => {
-        const cx = px(x / 512)
-        const cy = py(cam.zPositions[k] / 512)
-        ctx.beginPath()
-        ctx.arc(cx, cy, 4, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.fillStyle = '#111'
-        ctx.font = 'bold 8px sans-serif'
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'middle'
-        ctx.fillText(String(k), cx, cy)
-        ctx.fillStyle = color
-      })
-    })
-  }, [def])
-
-  return <canvas ref={canvasRef} className="cutscene-map-canvas" style={{ width: 480, height: 360 }} />
-}

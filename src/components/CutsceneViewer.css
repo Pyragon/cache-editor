@@ -106,15 +106,13 @@
 
 /* --- playback preview modal --- */
 
-.cutscene-player-dialog {
-  width: min(1720px, 97vw);
-}
-
-/* The shared preview-modal body caps itself at 960px, which is right for a
-   model preview and wrong here: without this the dialog widens and the content
-   stays in a 960px column on the left. */
-.cutscene-player-dialog .anim-preview-body {
+/* The player used to be a modal; it is the page's Preview section now, so it
+   fills the panel rather than a dialog. `.anim-preview-body` is shared with the
+   model preview and caps itself at 960px, which is right there and wrong here. */
+.cutscene-player .anim-preview-body {
   width: 100%;
+  max-width: none;
+  padding: 0;
 }
 
 .cutscene-player-main {
@@ -130,7 +128,9 @@
   /* Height drives this box, NOT an aspect ratio: an aspect-ratio combined with
      a max-height transfers into a maximum WIDTH, which kept the stage narrow no
      matter how wide the dialog got. The canvas inside is what holds a ratio. */
-  height: clamp(360px, calc(100vh - 210px), 1100px);
+  /* inline, there is no dialog to fill — a fixed band keeps the page scrollable
+     instead of the stage eating the viewport */
+  height: clamp(320px, 52vh, 720px);
   background: #000;
   border: 1px solid #2c2c34;
   border-radius: 8px;
@@ -244,4 +244,150 @@
   display: block;
   color: #77777f;
   font-size: 0.72rem;
+}
+
+/* ---- Action roll ---------------------------------------------------------
+   The timeline laid out like the music page's piano roll: subject down the
+   side, cycles across, one mark per action. A 342-action cutscene as a flat
+   table is unreadable — here you can see a camera cut land mid-walk. */
+
+/* Capped and scrollable: cutscene 15 has 59 lanes (a 1,316px roll), which
+   would push everything below it off the page. The ruler and the lane labels
+   stay pinned so a scrolled row still tells you who and when. */
+.cutscene-roll {
+  display: flex;
+  align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #0a0c12;
+  overflow: auto;
+  max-height: 460px;
+  margin-bottom: 10px;
+  max-width: 100%;
+}
+
+/* Pinned so a horizontally scrolled row still says whose it is. Capped and
+   truncating: a long NPC name would otherwise widen this column until it
+   squeezed the grid to nothing and sat on top of the marks. */
+.cutscene-roll-side {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  flex: 0 0 auto;
+  max-width: 190px;
+  border-right: 1px solid var(--border);
+  background: #101219;
+}
+
+/* matches the tick strip's height so the lane labels line up with their rows */
+.cutscene-roll-corner {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 18px;
+  background: #101219;
+}
+
+.cutscene-roll-lane-label {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+}
+
+/* min-width, not 0: inside the scrolling container a flexible grid collapses
+   toward nothing on a narrow panel, piling every mark under the pinned label
+   column. Below this width the roll scrolls horizontally instead. */
+.cutscene-roll-grid {
+  position: relative;
+  flex: 1 0 auto;
+  min-width: 520px;
+}
+
+.cutscene-roll-ticks {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 18px;
+  background: #0a0c12;
+}
+
+/* transform is set per tick in the component — the first and last anchor
+   inward so they stay inside the grid. */
+.cutscene-roll-tick {
+  position: absolute;
+  top: 3px;
+  font-size: 9px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.cutscene-roll-lane {
+  position: relative;
+  height: 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.cutscene-roll-gridline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* The mark is the whole point, so it stays legible at any zoom: a fixed pixel
+   width centred on its cycle, rather than a share of the timeline that would
+   vanish on a long cutscene. */
+.cutscene-roll-mark {
+  position: absolute;
+  top: 4px;
+  width: 9px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.12s, transform 0.12s;
+}
+
+.cutscene-roll-mark:hover {
+  opacity: 1;
+  transform: scaleY(1.15);
+}
+
+/* Marks sharing a lane and cycle are fanned 5px apart; alternating brightness
+   makes the pile read as separate events rather than one wide smear. */
+.cutscene-roll-mark.alt {
+  filter: brightness(1.55);
+}
+
+.cutscene-roll-mark.selected {
+  opacity: 1;
+  box-shadow: 0 0 0 2px #ffe14d;
+}
+
+/* Action detail cell: the description, then its cross-entry jumps on their own
+   row. Inline they disappeared into the prose, and an action with two of them
+   (an entity playing an animation has both an NPC and a sequence) read as a
+   run-on sentence. */
+.cutscene-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.cutscene-detail-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }

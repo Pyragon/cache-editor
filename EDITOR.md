@@ -898,6 +898,17 @@ This is the same situation as `config_sun`: the index exists in the format, the
 revision just ships no data for it. Don't take "cryogen has no dumper for
 vorbis" as the reason — the reason is that there is no data.
 
+**And nothing needs it.** A cutscene's `PLAY_VORBIS` action does NOT read index
+36 — "vorbis" is the format (a streamed Ogg sample) as opposed to index 4's
+additive synth, not an index name. `CutscenePlayVorbis.perform` calls
+`AreaSoundPlayer.playSoundVorbis`, which builds an `AreaSound` of **type 2**;
+`AreaSound.spoken()` is `type == 2 || type == 3`, and the update loop branches
+on it: type 1 reads `Resource.SOUND_EFFECT` (index 4, `AreaSoundPlayer:59`),
+`spoken()` reads `Resource.MIDI_INSTRUMENT` (index 14, `:67`). Confirmed
+against the dump — all 81 distinct soundIds across the cache's 116 PLAY_VORBIS
+actions exist in `midi_instruments`, where only 54 exist in `sound_effects`.
+Type 3 is voice-over, which is why the field is called "spoken".
+
 If a cache revision that DOES populate it ever turns up, the work is small,
 because the container is already traced from darkan's
 `config/midi/instrument/MusicSample.kt` (`decode`, line ~293):

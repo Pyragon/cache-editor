@@ -66,16 +66,22 @@ Sizing, for whenever this comes back: song-scoped export is 0.28 MB median /
 ~161 s of pure synthesis, so it likely needs chunking or a cancel button (an
 `AbortSignal` is plumbed through but nothing drives it).
 
-### OPEN QUESTION: 14,211 of 16,825 midi_instruments have no reference in the cache
+### OPEN QUESTION: 14,131 of 16,825 midi_instruments have no reference in the cache
 
 Measured 2026-08-01, and the reason it matters is that it is 84% of the index.
 
-Two ways in were found and both are now indexed by the viewer's "Used by"
-panel: `sound_effects_midi` banks reach 1,187, and object/NPC ambient sounds
-reach another 1,427 — an object or NPC sound id is looked up in
-`midi_instruments` instead of `sound_effects` when the def sets the instrument
-flag (object opcodes 168/169, NPC opcode 162; `SoundEffectPlayer:233/268`,
-`AreaSoundPlayer:67`). Total reachable from cache data: 2,614.
+Three ways in are known, all indexed by the viewer's "Used by" panel:
+
+- **instrument banks** — 1,187, through `sound_effects_midi`
+- **object/NPC ambient sounds** — another 1,427. The sound id is looked up in
+  `midi_instruments` instead of `sound_effects` when the def sets the instrument
+  flag (object opcodes 168/169, NPC opcode 162; `SoundEffectPlayer:233/268`)
+- **cutscene PLAY_VORBIS** — another 81, none of which any bank reaches.
+  `AreaSound` type 2 is `spoken()`, which reads index 14 (`AreaSoundPlayer:67`)
+
+Total reachable from cache data: 2,694. Each of the last two was found only
+after the count looked implausible and someone pushed back on it, which is the
+reason this entry stays open rather than being written off.
 
 That leaves 14,211 with no cache-side referrer at all, which is too many to
 wave away as leftovers. Before concluding they are dead, check the referrers
@@ -94,6 +100,10 @@ that would not show up in a def scan:
 
 Until that is settled the viewer says only what it has checked; it does not
 claim the rest are unreachable.
+
+- **`sound_effects_midi` editor not tested in a real browser session** — typecheck/lint/build pass;
+  the dumper/decoder is verified byte-identical independently. Marked done 2026-08-01 on review of
+  the UI, but nobody has driven the keymap editor against a real cache yet.
 
 ### `midi_instruments` viewer wants export buttons too, eventually
 
@@ -318,8 +328,25 @@ real cache, in rough risk order:
 
 - **OPEN BUG (2026-07-21): a class of loc objects around the God Wars chapel don't appear (bridge stonework, church ledges/base-plinth/"bottom outer" trim); walls/roof are fine.** VERIFIED via per-loc render logging in `buildLocsMesh`: the chapel's walls (loc 61734 plane 0, 61699 plane 1), roof (61704 plane 2) and crenellations (61708 plane 3) ALL render at the correct cascaded heights (−1536 / −3584 / −4608 / −5280) — the multi-storey structure is faithful, so the earlier "walls don't render / floating" framing was WRONG. Ruled out: shape→model skip (none), marker-face hiding (only 1 genuine marker region-wide), height corruption (a red herring — the debug dedup was showing a *neighbour* region that reuses the same loc ids; the centre terrain is correct, hv[1455]=48). The missing pieces are NOT the chapel walls. `groundContourType` was ported (`contourVertexY` in mapScene.ts — ct1/2/4/5, client `ModelSM.contourToGround`) since bridges (loc 54937 ct5) and paths (ct1) need it; it builds/lints and doesn't regress the chapel, but did NOT visibly fix the reported missing pieces (the chapel ledge pieces are ct0). NEXT: get the specific loc id of one missing piece (right-click/inspect in the maps editor, or in-game Examine) and trace why THAT loc doesn't render — do not keep guessing which loc it is. (The contour port is no longer unverified — the Lumbridge bridge arch was confirmed correct on 2026-07-25 and signed off, so it stays.)
 
+- **Action roll: a fanned pile can cover a later action.** Marks sharing a lane
+  and cycle are drawn 10px apart to the right of their true position, so a deep
+  pile reaches into the space belonging to the next action. Measured on a 900px
+  grid: **222 lane+cycle piles** across the 16 cutscenes are affected. Worst
+  cases: cutscene 0 objects cycle 747 (four DESTROY_OBJECT, next action at 748,
+  ~39px of overlap), cutscene 0 objects cycle 1516 (same shape), cutscene 9
+  objects cycle 373 (five deep). Nearly all of them are the **Objects** lane,
+  which carries every object in the scene where entities each get their own
+  row — splitting Objects per object id would dissolve most of it at the cost
+  of more rows. Note the current drawing never lies about ordering: a mark is
+  only ever displaced to the RIGHT, so nothing appears earlier than it happens.
+
 - **Editing + repack.** The viewer is read-only; the cryogen side already has a verified byte-identical `encode()` (16/16), so an editable pass needs: editing UI (the usual draft/save-bar pattern), `saveItem` in the loader, a CacheBuilder repack path that reads the JSON back into `CutsceneDefinitions` (Gson → encode), and `getActions()` on the definition.
-- **PLAY_VORBIS previews** — the 116 vorbis actions reference index 36 (Vorbis), which has no cryogen dumper; sounds can't be previewed until that index is dumped.
+- **PLAY_VORBIS resolves to midi_instruments, NOT index 36** (corrected 2026-08-01). "Vorbis" names the
+  format, not an index: the client builds an `AreaSound` of type 2, and `AreaSound.spoken()` (type 2 or 3)
+  routes it to `Resource.MIDI_INSTRUMENT` — index 14 — in `AreaSoundPlayer:67`, while type 1 goes to
+  `Resource.SOUND_EFFECT`. All 81 distinct soundIds across the 116 actions exist in `midi_instruments`
+  (only 54 exist in `sound_effects`), so the mapping is not ambiguous. These now preview in the viewer.
+  The old note here claimed they were unplayable until index 36 was dumped; that was wrong.
 - **Playback preview gaps** (the 3D player simulates terrain/locs, camera splines, entity walk routes + animations, object spawns and fades):
   - Area **rotations 1–3** aren't implemented in `cutsceneScene.ts` (no shipped cutscene uses them — copied unrotated with a warning). The client transforms to port live in darkan `MapLoader.decodeTilesServer` / `EnvironmentManager.localOffsetX/Y`.
   - **Not simulated**: sounds, positioned (tile) gfx, projectiles, hitmarks, hint arrows, tile messages, SET_VARIABLE/EXECUTE_SCRIPT hooks. (ENTITY_GFX is fully simulated as of 2026-07-28, including attachment-only gfx models whose visuals are billboards/particles — confirmed working.)

@@ -80,7 +80,6 @@ const CYCLE_MS = 20
 type Props = {
   def: CutsceneDef
   rootHandle: FileSystemDirectoryHandle
-  onClose: () => void
 }
 
 // ---------------------------------------------------------------------------
@@ -213,13 +212,14 @@ function actionGroupClass(type: string): string {
   return 'misc'
 }
 
-export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props) {
-  const dialogRef = useRef<HTMLDialogElement>(null)
+export default function CutscenePlayer({ def, rootHandle }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fadeRef = useRef<HTMLDivElement>(null)
   const [status, setStatus] = useState('Assembling scene…')
   const [ready, setReady] = useState(false)
-  const [playing, setPlaying] = useState(true)
+  // Not autoplaying: the player is a page section now rather than something
+  // you opened deliberately, so it waits to be started.
+  const [playing, setPlaying] = useState(false)
   const [cycle, setCycle] = useState(0)
   const [warnings, setWarnings] = useState<string[]>([])
 
@@ -325,7 +325,6 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
     setPlaying(false)
   }
 
-  useEffect(() => { dialogRef.current?.showModal() }, [])
 
   // Sidebar action list: the most recently applied start's actions are
   // "current"; keep them scrolled into view as playback advances.
@@ -334,8 +333,15 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
   useEffect(() => {
     const list = actionListRef.current
     if (!list) return
-    const current = list.querySelector('.cutscene-player-action-current')
-    current?.scrollIntoView({ block: 'nearest' })
+    const current = list.querySelector<HTMLElement>('.cutscene-player-action-current')
+    if (!current) return
+    // Scroll the LIST, never scrollIntoView. That walks every scrollable
+    // ancestor including the page, so while playing it fired on each cycle and
+    // yanked the window back — you could not scroll the player off-screen.
+    const top = current.offsetTop
+    const bottom = top + current.offsetHeight
+    if (top < list.scrollTop) list.scrollTop = top
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight
   }, [cycle])
 
   // ------------------------------------------------------------------ helpers
@@ -1410,12 +1416,8 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
   }, [def, rootHandle])
 
   return (
-    <dialog ref={dialogRef} className="anim-preview-dialog cutscene-player-dialog" onCancel={(e) => { e.preventDefault(); onClose() }}>
+    <div className="cutscene-player">
       <div className="anim-preview-body">
-        <div className="anim-preview-head">
-          <h3 className="confirm-dialog-title">Cutscene {def.id} — playback preview</h3>
-          <button type="button" className="save-bar-discard" onClick={onClose}>Close</button>
-        </div>
         <div className="cutscene-player-main">
           <div className="cutscene-player-stage">
             <canvas ref={canvasRef} className="cutscene-player-canvas" />
@@ -1495,6 +1497,6 @@ export default function CutscenePlayerModal({ def, rootHandle, onClose }: Props)
           Not simulated: sounds, gfx/projectiles, hitmarks, hint arrows, tile messages{warnings.length > 0 ? ` — ${warnings.length} warning${warnings.length === 1 ? '' : 's'}: ${[...new Set(warnings)].slice(0, 3).join('; ')}` : ''}.
         </p>
       </div>
-    </dialog>
+    </div>
   )
 }
