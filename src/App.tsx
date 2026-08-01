@@ -1692,7 +1692,7 @@ function App() {
                 : midiInstrumentContent != null
                 ? <MidiInstrumentViewer data={midiInstrumentContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : musicContent != null
-                ? <MusicViewer data={musicContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <MusicViewer data={musicContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} rootHandle={cacheHandle ?? undefined} />
                 : soundEffectMidiContent != null
                 ? <SoundEffectMidiViewer data={soundEffectMidiContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : identikitContent != null
