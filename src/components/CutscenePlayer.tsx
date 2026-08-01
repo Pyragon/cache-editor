@@ -158,6 +158,15 @@ type EntityRt = AnimHolder & {
   route: { tiles: [number, number][]; paces: number[]; next: number } | null
   standAnimId: number
   walkAnimId: number
+  /** BAS runningSequence / teleportSequence — the client picks between these
+   *  and the walk by the PACE of the step being taken, so a cutscene route of
+   *  RUNNING steps animates with the run, not a walk cycle at double speed. */
+  runAnimId: number
+  halfWalkAnimId: number
+  /** which of the three is currently playing, so a pace change restarts the
+   *  animation but a one-shot ANIMATE_MOVEMENT over the top of a walk doesn't
+   *  get clobbered on the next cycle */
+  moveAnimId: number
   /** NPC-model billboards (Saradomin's glowing eyes, model 58935 type 115):
    *  separate scene meshes that must FOLLOW the entity — bbMatrix is the
    *  placement the billboard runtime reads, resynced on every move/pose. */
@@ -207,8 +216,35 @@ function splinePoint(rows: number[][], kf: number, t: number): [number, number, 
   return out
 }
 
-const PACE_UNITS: Record<number, number> = { 0: 256 / 30, 2: 1024 / 30 } // half walk / run; walk below
-const paceUnits = (t: number) => PACE_UNITS[t] ?? 512 / 30
+/**
+ * Fine units per client cycle, straight from the client's own mover
+ * (EntityUpdating: `positionDelta = 16`, doubled for RUNNING and halved for
+ * HALF_WALK). Its catch-up speedups for a backlog of queued steps are all
+ * gated on NOT being in a cutscene, so 16/32/8 is the whole story here.
+ *
+ * Not modelled: the client halves this again while an entity is still turning
+ * toward its step (delayMovement), which needs the gradual yaw we snap.
+ */
+const PACE_UNITS: Record<number, number> = { 0: 8, 2: 32 } // half walk / run; walk below
+const paceUnits = (t: number) => PACE_UNITS[t] ?? 16
+
+/**
+ * The client's facing for a movement step. It turns by the SIGN of the delta
+ * into one of eight compass directions rather than taking a continuous
+ * bearing, so a 2×1 step still faces a clean diagonal.
+ *
+ * These are the client's own constants, and they pin the angle space that
+ * MOVEMENT's `direction` field also lives in: south 0, west 4096, north 8192,
+ * east 12288. (Both `EntityUpdating`'s step table and its face-an-entity
+ * `atan2` agree — the latter passes self−target, i.e. the bearing *away* from
+ * what it faces, which is the same +8192 offset.) Returns null for no movement,
+ * where the client leaves the facing alone.
+ */
+function stepFacing(dx: number, dy: number): number | null {
+  if (dx > 0) return dy > 0 ? 10240 : dy < 0 ? 14336 : 12288
+  if (dx < 0) return dy > 0 ? 6144 : dy < 0 ? 2048 : 4096
+  return dy > 0 ? 8192 : dy < 0 ? 0 : null
+}
 
 /** Badge colour family per action category (mirrors CutsceneViewer's list). */
 function actionGroupClass(type: string): string {
@@ -234,9 +270,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   // the node instead of reusing it. (Every other viewer avoids the problem by
   // letting three create its own canvas into a mount div.)
   const buildGen = useRef({ def, rootHandle, n: 0 })
-  if (buildGen.current.def !== def || buildGen.current.rootHandle !== rootHandle) {
-    buildGen.current = { def, rootHandle, n: buildGen.current.n + 1 }
-  }
+  const switchedBuild = buildGen.current.def !== def || buildGen.current.rootHandle !== rootHandle
+  if (switchedBuild) buildGen.current = { def, rootHandle, n: buildGen.current.n + 1 }
   const [status, setStatus] = useState('Assembling scene…')
   const [ready, setReady] = useState(false)
   // Not autoplaying: the player is a page section now rather than something
@@ -348,6 +383,23 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     }
   }
 
+  // Reset the transport HERE rather than in the build effect. A cutscene switch
+  // is visible to render one pass before any effect runs, and render reads the
+  // sim's cursor — cutscene 2 watched to its end left a cursor of 60 against
+  // cutscene 3's shorter action list, so `def.actions[cursor - 1]` was
+  // undefined and the whole panel died mid-render. Everything the render path
+  // touches has to be consistent with `def` by the time render sees it; the
+  // rest of the teardown stays in the effect where it belongs.
+  if (switchedBuild) {
+    const r = rt.current
+    r.cursor = 0
+    r.cycle = 0
+    r.msAcc = 0
+    r.finished = false
+    r.camRt = null
+    r.fade = null
+  }
+
   // Where the timeline ends. A cutscene finishes at its FINISHED action — the
   // sim stops dead there — so the bar has to end at the same cycle, or it reads
   // as a second of playback that never happens (cutscene 0: 44.8s shown against
@@ -386,7 +438,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   // Sidebar action list: the most recently applied start's actions are
   // "current"; keep them scrolled into view as playback advances.
   const actionListRef = useRef<HTMLUListElement>(null)
-  const lastAppliedStart = rt.current.cursor > 0 ? def.actions[rt.current.cursor - 1].lengthInCycles : -1
+  // `?.` on principle: the cursor is sim state and this is render, so any future
+  // path that lets the two drift must not be able to take the panel down again.
+  const lastAppliedStart = def.actions[rt.current.cursor - 1]?.lengthInCycles ?? -1
   useEffect(() => {
     const list = actionListRef.current
     if (!list) return
@@ -494,6 +548,15 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
 
   /** No newer startAnim in flight — safe for a fallback (stand/idle) to run. */
   const animSettled = (h: AnimHolder) => h.animPending === h.animCommitted
+
+  /** The BAS sequence for a step of this pace, mirroring the client's
+   *  `PathingEntity.animateMovement`: RUNNING takes the running sequence and
+   *  HALF_WALK the teleport one when they exist, and everything else walks. */
+  const moveAnimFor = (e: EntityRt, pace: number): number => {
+    if (pace === 2 && e.runAnimId >= 0) return e.runAnimId
+    if (pace === 0 && e.halfWalkAnimId >= 0) return e.halfWalkAnimId
+    return e.walkAnimId
+  }
 
   const frameSync = (def: AnimationDef, index: number) => {
     const setId = def.frameSetIds?.[index]
@@ -686,25 +749,55 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
 
   // ---------------------------------------------------------------- actions
 
+  /** A camera path as the interleaved [position, target] keyframe rows the
+   *  client's Bezier walks (see splinePoint). */
+  const camRows = (movementIndex: number): number[][] => {
+    const cam = def.camMovements[movementIndex]
+    if (!cam) return []
+    const out: number[][] = []
+    for (let i = 0; i < cam.xPositions.length; i++) {
+      out.push([cam.xPositions[i], cam.yPositions[i], cam.zPositions[i], cam.timestamps[i]])
+      out.push([cam.targetXPositions[i], cam.targetYPositions[i], cam.targetZPositions[i], cam.timestamps[i]])
+    }
+    return out
+  }
+
+  /**
+   * Park the camera where the cutscene's FIRST camera move begins, without
+   * starting anything: the still you see before pressing play is then the
+   * cutscene's own opening shot rather than a generic overhead guess, which
+   * put the camera somewhere arbitrary and sometimes under the terrain.
+   *
+   * Deliberately does NOT set `camRt` — that would have the spline advancing
+   * from cycle 0, flying the camera before its action has fired. Only the
+   * pose at t = 0 is borrowed. Returns false when there is no camera path to
+   * borrow it from, so the caller can fall back.
+   */
+  const applyInitialCamera = (): boolean => {
+    const r = rt.current
+    const first = def.actions.find((a) => a.type === 'DIRECT_CAMERA_MOVEMENT')
+    if (!first) return false
+    const f = (first.fields ?? {}) as Record<string, number>
+    const posRows = camRows(f.positionMovementIndex)
+    const lookRows = camRows(f.lookAtMovementIndex)
+    if (posRows.length === 0 || lookRows.length === 0) return false
+    const from = splinePoint(posRows, f.positionKeyframe, 0)
+    const to = splinePoint(lookRows, f.lookAtKeyframe, 0)
+    r.camera.position.set(from[0], from[1], -from[2])
+    r.camera.lookAt(to[0], to[1], -to[2])
+    r.focusY = to[1]
+    return true
+  }
+
   const applyAction = (index: number) => {
     const r = rt.current
     const a = def.actions[index]
     const f = (a.fields ?? {}) as Record<string, number>
     switch (a.type) {
       case 'DIRECT_CAMERA_MOVEMENT': {
-        const rows = (movementIndex: number): number[][] => {
-          const cam = def.camMovements[movementIndex]
-          if (!cam) return []
-          const out: number[][] = []
-          for (let i = 0; i < cam.xPositions.length; i++) {
-            out.push([cam.xPositions[i], cam.yPositions[i], cam.zPositions[i], cam.timestamps[i]])
-            out.push([cam.targetXPositions[i], cam.targetYPositions[i], cam.targetZPositions[i], cam.timestamps[i]])
-          }
-          return out
-        }
         r.camRt = {
-          posRows: rows(f.positionMovementIndex),
-          lookRows: rows(f.lookAtMovementIndex),
+          posRows: camRows(f.positionMovementIndex),
+          lookRows: camRows(f.lookAtMovementIndex),
           posKf: f.positionKeyframe,
           lookKf: f.lookAtKeyframe,
           speedStart: f.splineSpeedStart,
@@ -743,7 +836,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         e.fineX = tiles[0][0] * 512 + 256
         e.fineY = tiles[0][1] * 512 + 256
         e.route = { tiles, paces: m.movementTypes, next: 1 }
-        if (e.walkAnimId >= 0) void startAnim(e, e.walkAnimId, false)
+        // the walking loop below starts the right sequence for the first leg's
+        // pace on this very cycle — clearing it is what tells it to
+        e.moveAnimId = -1
         placeEntity(e)
         break
       }
@@ -766,7 +861,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       }
       case 'RESET_CUTSCENE_ENTITY': {
         const e = r.entities[f.entityIndex]
-        if (e) { e.placed = false; e.route = null; e.anim = null; placeEntity(e) }
+        if (e) { e.placed = false; e.route = null; e.anim = null; e.moveAnimId = -1; placeEntity(e) }
         break
       }
       case 'REPLACE_OBJECT': {
@@ -848,32 +943,39 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       const speed = c.speedStart + (((c.speedEnd - c.speedStart) * c.progress) >> 16)
       c.progress = Math.min(c.progress + speed, 65535)
     }
-    // entity walking
+    // Entity walking. Each axis advances by the full step independently, as
+    // the client does it — a diagonal leg therefore covers both axes at full
+    // speed rather than sharing one budget between them — and only one leg is
+    // consumed per cycle, with no leftover carried into the next.
     for (const e of r.entities) {
       if (!e.placed || !e.route) continue
-      let budget = paceUnits(e.route.paces[Math.min(e.route.next, e.route.paces.length - 1)] ?? 1)
-      while (budget > 0 && e.route.next < e.route.tiles.length) {
-        const [tx, ty] = e.route.tiles[e.route.next]
-        const gx = tx * 512 + 256
-        const gy = ty * 512 + 256
-        const dx = gx - e.fineX
-        const dy = gy - e.fineY
-        const dist = Math.hypot(dx, dy)
-        // gated exactly like the client (see turnsWhileWalking): an entity
-        // whose BAS can't turn keeps its scripted facing while it moves
-        if (dist > 1 && e.turnsWhileWalking) e.yaw = Math.atan2(dx, -dy) + Math.PI
-        if (dist <= budget) {
-          e.fineX = gx; e.fineY = gy
-          budget -= dist
-          e.route.next++
-        } else {
-          e.fineX += (dx / dist) * budget
-          e.fineY += (dy / dist) * budget
-          budget = 0
-        }
+      const pace = e.route.paces[Math.min(e.route.next, e.route.paces.length - 1)] ?? 1
+      // The BAS sequence follows the pace of the leg being walked. Only a
+      // CHANGE restarts it, so a one-shot animation playing over a walk lives
+      // out its length instead of being reset every cycle.
+      const wantAnim = moveAnimFor(e, pace)
+      if (wantAnim >= 0 && wantAnim !== e.moveAnimId) {
+        e.moveAnimId = wantAnim
+        void startAnim(e, wantAnim, false)
       }
+      const step = paceUnits(pace)
+      const [tx, ty] = e.route.tiles[e.route.next]
+      const gx = tx * 512 + 256
+      const gy = ty * 512 + 256
+      // gated exactly like the client (see turnsWhileWalking): an entity that
+      // cannot turn keeps its scripted facing while it moves
+      if (e.turnsWhileWalking) {
+        const facing = stepFacing(gx - e.fineX, gy - e.fineY)
+        if (facing != null) e.yaw = -(facing / 16384) * Math.PI * 2
+      }
+      if (e.fineX < gx) e.fineX = Math.min(gx, e.fineX + step)
+      else if (e.fineX > gx) e.fineX = Math.max(gx, e.fineX - step)
+      if (e.fineY < gy) e.fineY = Math.min(gy, e.fineY + step)
+      else if (e.fineY > gy) e.fineY = Math.max(gy, e.fineY - step)
+      if (e.fineX === gx && e.fineY === gy) e.route.next++
       if (e.route.next >= e.route.tiles.length) {
         e.route = null
+        e.moveAnimId = -1
         if (animSettled(e) && e.standAnimId >= 0) void startAnim(e, e.standAnimId, false)
       }
       placeEntity(e)
@@ -950,10 +1052,13 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       r.camRt = null
       r.fade = null
       r.finished = false
+      // back to the opening shot — with camRt cleared nothing else would move
+      // the camera, so a scrub to 0 would otherwise hold the last frame's view
+      applyInitialCamera()
       // rest poses too — a replayed entity otherwise shows its end-of-scene
       // pose (Zilyana standing) until its first animation lands
       for (const e of r.entities) {
-        e.placed = false; e.route = null; e.anim = null; e.lastPosed = null
+        e.placed = false; e.route = null; e.anim = null; e.moveAnimId = -1; e.lastPosed = null
         if (e.em) applyPose(e.em, null)
         placeEntity(e)
       }
@@ -977,17 +1082,10 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   useEffect(() => {
     const r = rt.current
     r.disposed = false
-    // Selecting another cutscene re-runs this on the same component, so the
-    // transport and the sim start over rather than inheriting the last one's
-    // clock (which would drop the new scene in mid-timeline, its actions
-    // already "applied"), and whatever the last one was playing goes quiet —
-    // the audio outlives this effect, being keyed only on the cache handle.
-    r.cursor = 0
-    r.cycle = 0
-    r.msAcc = 0
-    r.finished = false
-    r.camRt = null
-    r.fade = null
+    // The sim's own counters were already reset during render (see
+    // switchedBuild); this is the rest — scene-scoped data, the React-side
+    // transport, and whatever the last cutscene was still playing, since the
+    // audio outlives this effect, being keyed only on the cache handle.
     r.heightsByCell.clear()
     audioRef.current?.stopAll()
     setCycle(0)
@@ -1189,7 +1287,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             em: null, group: new THREE.Group(), placed: false,
             fineX: 0, fineY: 0, plane: 0, yaw: 0, route: null, anim: null,
             animPending: 0, animCommitted: 0,
-            standAnimId: -1, walkAnimId: -1, turnsWhileWalking: true,
+            standAnimId: -1, walkAnimId: -1, runAnimId: -1, halfWalkAnimId: -1, moveAnimId: -1,
+            turnsWhileWalking: true,
             bb: null, bbMatrix: null, lastPosed: null,
           }
           try {
@@ -1227,16 +1326,24 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
                 }
               }
               const basId = Number(npcDef.basId ?? -1)
-              // the client only re-faces a walking entity when its BAS has a
-              // yaw acceleration or the def a non-zero contrast
-              // (PathingEntity.method15863's gate) — assume no BAS = no turning
-              ert.turnsWhileWalking = Number(npcDef.contrast ?? 0) !== 0
+              // The client's gate for re-facing a moving entity is
+              // `PathingEntity.turn`: BAS yawAcceleration != 0 OR the entity's
+              // own turnDirection != 0, which for a cutscene entity is the NPC
+              // def's turnDirection << 3 (CutsceneEntity.move). The def's
+              // default is 32, so all but a handful of deliberately fixed
+              // characters do turn. (This used to read the def's `contrast`,
+              // which is the LIGHTING field and unrelated — it left most
+              // entities gliding sideways and made the ones it did catch walk
+              // backwards, since the walk facing was 180° out on top of it.)
+              ert.turnsWhileWalking = (Number(npcDef.turnDirection ?? 32) << 3) !== 0
               if (basId >= 0 && basDir) {
                 try {
                   const basFile = await (await basDir.getFileHandle(`${basId}.json`)).getFile()
                   const bas = JSON.parse(await basFile.text()) as Record<string, unknown>
                   ert.standAnimId = Number(bas.standAnimation ?? -1)
                   ert.walkAnimId = Number(bas.walkAnimation ?? -1)
+                  ert.runAnimId = Number(bas.runningAnimation ?? -1)
+                  ert.halfWalkAnimId = Number(bas.teleportingAnimation ?? -1)
                   ert.turnsWhileWalking ||= Number(bas.yawAcceleration ?? 0) !== 0
                 } catch { /* BAS unavailable */ }
               }
@@ -1294,7 +1401,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         setStatus('Loading animations…')
         {
           const animIds: number[] = []
-          for (const e of r.entities) animIds.push(e.standAnimId, e.walkAnimId)
+          for (const e of r.entities) animIds.push(e.standAnimId, e.walkAnimId, e.runAnimId, e.halfWalkAnimId)
           for (const o of r.objects) if (o) animIds.push(o.idleAnimId)
           const gfxIds: number[] = []
           for (const a of def.actions) {
@@ -1327,9 +1434,12 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         }
 
         if (cancelled) return
-        // Start-of-scene camera: overhead of the used area until an action takes over.
-        r.camera.position.set(REGION_UNITS * 0.75, 4500, -REGION_UNITS * 0.55)
-        r.camera.lookAt(REGION_UNITS * 0.75, 0, -REGION_UNITS * 0.75)
+        // Start-of-scene camera: the cutscene's own opening shot, falling back
+        // to an overhead of the used area for one with no camera path at all.
+        if (!applyInitialCamera()) {
+          r.camera.position.set(REGION_UNITS * 0.75, 4500, -REGION_UNITS * 0.55)
+          r.camera.lookAt(REGION_UNITS * 0.75, 0, -REGION_UNITS * 0.75)
+        }
         // Distance fog, the client's own formula: it ends at the draw distance
         // and fades over the last (fogDepth + 256) * 4 units, with the backdrop
         // set to the same colour so the world fades into it rather than into

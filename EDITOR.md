@@ -1244,6 +1244,71 @@ what hand-authoring terrain needs.
 
 ---
 
+## Cutscene entity movement — pace, facing and the BAS sequence (TRACED 2026-08-01)
+
+**What the renderer does with it.** A cutscene walk (`BASIC_MOVEMENT`) queues a
+route of steps, each with its own *pace*, and the client's mover
+(`EntityUpdating`, darkan-bot-refactor) drives three things off that pace: how
+fast the entity travels, which BAS sequence plays, and — separately — whether it
+turns to face where it is going.
+
+**Which cache fields drive it.**
+
+- `cutscenes/<id>.json` → `movements[].movementTypes[]`, one per step. The
+  client maps them in `CutsceneEntityMovement.move`: **0 → HALF_WALK, 2 →
+  RUNNING, anything else → WALKING**. This is the real pace source.
+- `npcs/<id>.json` → **`movementType`** (opcode 128) is a red herring. Both the
+  bot deob *and* `darkan-game-client`'s `NPCDefinitions` parse opcode 128 and
+  throw the value away — it is server-side. Cutscene 2's killer (14623) has
+  `movementType: "RUNNING"` and its route is all type-2 steps, so the two agree,
+  but only the route is doing any work.
+- `npcs/<id>.json` → **`turnDirection`** (default **32**) is the turn gate:
+  `CutsceneEntity.move` sets `entity.turnDirection = def.turnDirection << 3`,
+  and `PathingEntity.turn(rotation)` only re-faces when
+  `bas.yawAcceleration != 0 || turnDirection != 0`. Nearly every NPC has 32, so
+  nearly every NPC turns; a handful of deliberately fixed characters (cutscene
+  15's Will Shakenspear 15535, Essjay 15532, Minnie Coop 15533) have 0.
+- `config/bas/<id>.json` → `walkAnimation` / `runningAnimation` /
+  `teleportingAnimation` (the client calls them walkSequence / runningSequence /
+  teleportSequence). `PathingEntity.animateMovement` takes the running sequence
+  for a RUNNING step and the teleport one for HALF_WALK **when they are not -1**,
+  else the walk. The `*Dir1/2/3` and `*TurnCcw/Cw` variants are sidestep and
+  turning-in-place versions we do not use yet.
+
+**Speeds, exactly.** `positionDelta = 16` fine units per *client cycle*, `<< 1`
+for RUNNING and `>> 1` for HALF_WALK — so 16 / 32 / 8. The catch-up speedups for
+a backlog of queued steps (24, 32) are all gated on **not** being in a cutscene.
+Movement is applied **per axis independently**, so a diagonal leg covers both
+axes at full speed. Not modelled by us: the client halves the delta again while
+an entity is still turning (`delayMovement`), which needs gradual yaw.
+
+**The angle space, which is easy to get 180° wrong.** MOVEMENT's `direction`,
+`ROTATE_CUTSCENE_ENTITY`'s `rotation` and the per-step facing all live in one
+space: **south 0, west 4096, north 8192, east 12288**. Two independent
+confirmations in `EntityUpdating`: the 8-way step table
+(`startX < endX && startZ > endZ → 14336`) and the face-an-entity `atan2`, which
+is passed **self − target** — the bearing *away* from what it faces, i.e. the
+same +8192 offset. The step facing is snapped to those eight directions by the
+SIGN of the delta, never a continuous bearing, so a 2×1 step still faces a clean
+diagonal. Our conversion to three.js is `yaw = -(angle / 16384) * 2π`, which is
+correct given the scene puts north at -z.
+
+**What is already editable.** Nothing. `CutsceneViewer` shows the route table
+(tile + pace name) and the cast, all read-only.
+
+**What is not surfaced.** Per-step pace editing, the BAS sequence set, and
+`turnDirection` (which the NPC page does not show either, despite being the
+difference between a character that pivots and one that glides).
+
+**Gotchas.** `turnDirection` is *not* the def's `contrast` — we mistook the two,
+and since `contrast` is the lighting field this both froze the facing of most
+entities and let the few it caught expose a separate 180° error in the walk
+bearing. If an entity looks like it is moonwalking, check the pace→sequence
+mapping first: a RUNNING step animated with the walk cycle moves the feet at
+half the speed of the ground.
+
+---
+
 # Parked 2026-07-27 — map-scene punch list
 
 Dumped here on Cody's ask while switching off maps for a while. Open issues
