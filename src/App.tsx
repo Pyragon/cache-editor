@@ -137,6 +137,7 @@ const SPECIALIZED_ENTRIES = new Set([
   'particles', 'game_tips', 'config_underlays', 'config_overlays', 'maps', 'interfaces', 'sound_effects', 'midi_instruments',
   'music', 'music2', 'sound_effects_midi', 'config_identikit',
   'animations', 'animation_frame_bases', 'animation_frame_sets', 'spot_animations',
+  'cutscenes',
 ])
 
 // Feature-complete entries — rendered green in the sidebar. Only entries
@@ -154,10 +155,30 @@ function unavailableReason(name: string): string {
   return EMPTY_ENTRIES[name] ?? 'Not in this dump — cryogen has no dumper for this entry yet (the cache itself may still hold data)'
 }
 
+/** Entries being actively worked on that have NO data in the dump yet, so they
+ *  would otherwise show as red "not in this dump". Anything that already has a
+ *  viewer counts as in progress automatically (see below) and doesn't belong
+ *  here. Empty for now — `vorbis` was the one candidate and turned out to have
+ *  an empty index rather than pending work, so it belongs in `EMPTY_ENTRIES`. */
+const IN_PROGRESS_ENTRIES = new Set<string>([])
+
+/**
+ * Sidebar colour, three states:
+ * - **green** signed off by Cody (`DONE_ENTRIES`)
+ * - **yellow** in progress — has a viewer but isn't signed off, or is on
+ *   `IN_PROGRESS_ENTRIES` because work has started before any data exists
+ * - **red** nothing to work with: the dump has no folder for it
+ *
+ * Yellow used to mean "dumped but no editor". Nothing is in that state any
+ * more, so it was repurposed (2026-07-30); an entry that somehow lands there
+ * again falls through to uncoloured rather than silently reading as in-progress.
+ */
 function entryStatusClass(entry: CacheEntry): string {
-  if (!entry.available) return 'unavailable'
   if (DONE_ENTRIES.has(entry.name)) return 'done'
-  if (!SPECIALIZED_ENTRIES.has(entry.name)) return 'generic'
+  // before the availability test: work can start before the dumper exists
+  if (IN_PROGRESS_ENTRIES.has(entry.name)) return 'in-progress'
+  if (!entry.available) return 'unavailable'
+  if (SPECIALIZED_ENTRIES.has(entry.name)) return 'in-progress'
   return ''
 }
 
@@ -218,6 +239,7 @@ const EMPTY_ENTRIES: Record<string, string> = {
   config_varbits: 'Empty in this cache — varbit definitions moved to the top-level varbits index long before rev 727.',
   config_animations: 'Empty in this cache — animation definitions moved to the top-level animations index long before rev 727.',
   config_spot_anims: 'Empty in this cache — spot animation definitions moved to the top-level spot_animations index long before rev 727.',
+  vorbis: 'Empty in this cache — main_file_cache.idx36 is 0 bytes, so index 36 holds no archives at all. Nothing to dump (the container format is traced in EDITOR.md in case a populated cache turns up).',
 }
 
 // Add / Remove / Clone write to disk straight away rather than going through
@@ -1413,7 +1435,6 @@ function App() {
               const { groupName, members } = row
               const isActiveGroup = selectedEntry?.group === groupName
               const anyAvailable = members.some((m) => m.available)
-              const anySpecializedAvailable = members.some((m) => m.available && SPECIALIZED_ENTRIES.has(m.name))
               // A group is done once every member that this dump actually has
               // is done. Members with no folder (or an empty one, like the sun
               // index this revision never shipped) can't be worked on, so they
@@ -1431,7 +1452,9 @@ function App() {
                     className={[
                       'sidebar-group-toggle',
                       isActiveGroup ? 'active' : '',
-                      !anyAvailable ? 'unavailable' : allDone ? 'done' : !anySpecializedAvailable ? 'generic' : '',
+                      // same three states as a leaf: every member done = green,
+                      // anything left to do = in progress, nothing usable = red
+                      !anyAvailable ? 'unavailable' : allDone ? 'done' : 'in-progress',
                     ].join(' ').trim()}
                     disabled={!anyAvailable}
                     title={anyAvailable ? undefined : 'No data found for this cache entry'}

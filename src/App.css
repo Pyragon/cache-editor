@@ -340,15 +340,17 @@
   color: #66d96b;
 }
 
-.item-list button.generic {
+/* In progress — started, not signed off. (Was `.generic`, "dumped but no
+   editor", until that state stopped existing and yellow was repurposed.) */
+.item-list button.in-progress {
   color: #d9a441;
 }
 
-.item-list button.generic:hover {
+.item-list button.in-progress:hover {
   color: #f0bb57;
 }
 
-.item-list button.generic.active {
+.item-list button.in-progress.active {
   color: #f0bb57;
 }
 
