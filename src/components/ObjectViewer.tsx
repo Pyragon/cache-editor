@@ -43,8 +43,8 @@ const GENERAL_FIELDS: NumFieldDef[] = [
 ]
 
 const FLAG_FIELDS: NumFieldDef[] = [
-  ['blocks', 'Blocks Projectiles', "Opcodes 17 and 18 — darkan's blocksProjectiles. Whether arrows and spells are stopped by this object, which is separate from whether you can walk through it (that's Clip Type)."],
-  ['obstructsGround', 'Force Show Decoration', "Opcode 73 — darkan calls this forceDisplayDecoration, and cryogen's \"obstructsGround\" is a misnomer. It forces a ground decoration to draw even when the player has ground decorations turned off (SceneGraph checks it alongside hasActions and blocksMovement)."],
+  ['blocksProjectiles', 'Blocks Projectiles', "Opcodes 17 and 18 — darkan's blocksProjectiles. Whether arrows and spells are stopped by this object, which is separate from whether you can walk through it (that's Clip Type)."],
+  ['forceDisplayDecoration', 'Force Show Decoration', "Opcode 73 — darkan calls this forceDisplayDecoration, and cryogen's \"obstructsGround\" is a misnomer. It forces a ground decoration to draw even when the player has ground decorations turned off (SceneGraph checks it alongside hasActions and blocksMovement)."],
   ['ignoreClipOnAltRoute', 'Ignore Clip (Alt Route)', 'Opcode 74. Lets path-finding route through this object when taking an alternative route.'],
   ['members', 'Members', 'Opcode 79 era flag — the object only appears on members worlds.'],
   ['delayShading', 'Delay Shading', 'Opcode 22. Defers the object\'s shading pass; set on walls whose lighting is resolved later.'],
@@ -53,7 +53,7 @@ const FLAG_FIELDS: NumFieldDef[] = [
   ['dynamicShadow', 'Dynamic Shadow', 'Opcode 88 clears this. Whether the object casts the GPU sun-following shadow.'],
   ['replaySequence', 'Replay Sequence', 'Opcode 89 clears this. Whether the idle animation loops; off means it plays once and stops.'],
   ['requiresTextures', 'Requires Textures', 'Opcode 82. The object is only drawn when the client is running with textures enabled.'],
-  ['hasAnimation', 'Force Non-Stationary', "Opcode 98 — despite cryogen's name it does NOT mean \"this object has an idle animation\"; that comes from the Animations list below (opcodes 24/106), which the client reads separately. This is an extra way to force the object out of the static scene batch. SceneGraph treats a placement as stationary only when it has no sequence AND no animation list AND no Transform To list AND neither this flag nor Transforms — so any one of them is enough, and an object that already animates leaves this false."],
+  ['forceNonStationary', 'Force Non-Stationary', "Opcode 98 — despite cryogen's name it does NOT mean \"this object has an idle animation\"; that comes from the Animations list below (opcodes 24/106), which the client reads separately. This is an extra way to force the object out of the static scene batch. SceneGraph treats a placement as stationary only when it has no sequence AND no animation list AND no Transform To list AND neither this flag nor Transforms — so any one of them is enough, and an object that already animates leaves this false."],
   ['adjustMapSceneRotation', 'Map Scene Rotates', "Whether the object's map-scene icon turns with the placement rotation instead of staying upright."],
   ['flipMapSprite', 'Flip Map Sprite', 'Mirrors the minimap sprite horizontally.'],
   ['instrumentSoundEffect', 'Instrument Sound FX', 'The ambient sound is played through the MIDI instrument path rather than as a plain sound effect.'],

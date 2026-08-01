@@ -2138,13 +2138,16 @@ export type ObjectDefJson = {
   modifiedTextures?: number[]
   name?: string
   options?: (string | null)[]
-  /** Movement blocking. Default true; opcodes 17/18 clear it. */
-  blocks?: boolean
-  /** Clip mode — default 2 (opcode 17 sets 0 alongside `blocks`, 24 sets 1) */
+  /** Opcodes 17/18 clear it. Stops PROJECTILES, not movement — walking is
+   *  `clipType`. Renamed from `blocks` 2026-07-29. */
+  blocksProjectiles?: boolean
+  /** darkan's `blocksMovement` — default 2, opcode 17 sets 0, opcode 27 sets 1 */
   clipType?: number
-  /** opcode 69 — hides the ground decoration beneath the object */
-  obstructsGround?: boolean
-  /** opcode 71 — whether ground items stack on it (-1 = unset) */
+  /** Opcode 73 — FORCES a ground decoration to draw even when the player has
+   *  ground decorations switched off. Renamed from the misnomer
+   *  `obstructsGround` 2026-07-29. */
+  forceDisplayDecoration?: boolean
+  /** opcode 75 — whether ground items sit on top of it (-1 = unset) */
   supportsItems?: number
   staticShadow?: boolean
   // Sound fields. Names are cryogen's dumped ones; the client (darkan

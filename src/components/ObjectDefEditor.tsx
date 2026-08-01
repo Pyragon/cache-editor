@@ -439,9 +439,9 @@ export default function ObjectDefEditor({ draft, canEdit, onChange, sections, ro
         <div className="mapscene-side-grid is-compact">
           {num('Size X', 'Tiles occupied along x (opcode 14). Rotation swaps the two.', draft.sizeX ?? 1, (v) => set('sizeX', v), 1, 255)}
           {num('Size Y', 'Tiles occupied along y (opcode 15)', draft.sizeY ?? 1, (v) => set('sizeY', v), 1, 255)}
-          {flag('Blocks', 'Blocks movement. Cleared by opcodes 17 and 18; the default is true.', draft.blocks ?? true, (v) => set('blocks', v))}
+          {flag('Blocks projectiles', "Opcodes 17 and 18 clear it, default true. Stops arrows and spells — whether you can WALK through it is Clip type.", draft.blocksProjectiles ?? true, (v) => set('blocksProjectiles', v))}
           {num('Clip type', 'Clip mode — default 2, opcode 17 sets 0 (with blocks off), opcode 24-ish sets 1', draft.clipType ?? 2, (v) => set('clipType', v), 0, 3)}
-          {flag('Obstructs ground', 'Opcode 73 — hides the ground decoration under the object (darkan calls it forceDisplayDecoration)', draft.obstructsGround ?? false, (v) => set('obstructsGround', v))}
+          {flag('Force show decoration', 'Opcode 73 — forces a ground decoration to draw even when the player has ground decorations turned off. Renamed from the misnomer "obstructsGround".', draft.forceDisplayDecoration ?? false, (v) => set('forceDisplayDecoration', v))}
           {num('Supports items', 'Opcode 75 — whether ground items stack on top (-1 = unset)', draft.supportsItems ?? -1, (v) => set('supportsItems', v), -1, 255)}
           {num('Ground contour', 'Hillskew mode: 0 none, 1 follow ground, 2 partial, 4/5 stretch to the next plane (bridges/raised floors)', draft.groundContourType ?? 0, (v) => set('groundContourType', v), 0, 5)}
           {num('Contour modifier', 'Extra parameter for contour modes 2/5', draft.groundContourModifier ?? 0, (v) => set('groundContourModifier', v), -32768, 32767)}

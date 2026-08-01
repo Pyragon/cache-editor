@@ -34,7 +34,7 @@ const NEW_OBJECT_DEFAULTS: ObjectDef = {
   name: 'null',
   sizeX: 1, sizeY: 1,
   clipType: 2,
-  blocks: true,
+  blocksProjectiles: true,
   interactable: -1,
   groundContourType: 0, groundContourModifier: -1,
   delayShading: false,
@@ -51,7 +51,7 @@ const NEW_OBJECT_DEFAULTS: ObjectDef = {
   scaleX: 128, scaleY: 128, scaleZ: 128,
   offsetX: 0, offsetY: 0, offsetZ: 0,
   shadowOffsetX: 0, shadowOffsetY: 0, shadowOffsetZ: 0,
-  obstructsGround: false,
+  forceDisplayDecoration: false,
   ignoreClipOnAltRoute: false,
   supportsItems: -1,
   groundDecorationHeight: 0,
@@ -64,12 +64,40 @@ const NEW_OBJECT_DEFAULTS: ObjectDef = {
   replaySequence: true,
   requiresTextures: false,
   members: false,
-  hasAnimation: false,
+  forceNonStationary: false,
   accessBlockFlag: 0,
   transforms: false,
   dynamicTint: false,
   tintHue: 0, tintSaturation: 0, tintLightness: 0, tintOpacity: 0,
   options: [null, null, null, null, null],
+}
+
+/**
+ * Three object fields were renamed in cryogen on 2026-07-29 because the dumped
+ * names described the wrong thing (traced against darkan's `ObjectType.kt` and
+ * `SceneGraph`):
+ *
+ * | old | new | why |
+ * |---|---|---|
+ * | `blocks` | `blocksProjectiles` | opcodes 17/18 stop projectiles; walking is `clipType` |
+ * | `obstructsGround` | `forceDisplayDecoration` | opcode 73 SHOWS a ground decoration the player has switched off |
+ * | `hasAnimation` | `forceNonStationary` | opcode 98 is not the idle animation (that's 24/106) |
+ *
+ * Read either spelling until every dump is regenerated. Without this an older
+ * dump would show the field blank AND drop it on save, silently discarding the
+ * opcode — the same trap `migrateOverlayDef` exists for.
+ */
+export function migrateObjectDef(def: ObjectDef): ObjectDef {
+  const RENAMES: [old: string, next: string][] = [
+    ['blocks', 'blocksProjectiles'],
+    ['obstructsGround', 'forceDisplayDecoration'],
+    ['hasAnimation', 'forceNonStationary'],
+  ]
+  for (const [old, next] of RENAMES) {
+    if (def[next] === undefined && def[old] !== undefined) def[next] = def[old]
+    delete def[old]
+  }
+  return def
 }
 
 const NAME_REGEX = /"name":\s*"((?:[^"\\]|\\.)*)"/
@@ -107,7 +135,7 @@ const loader: CacheLoader = {
   async loadItem(dirHandle, item) {
     const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
     const file = await fileHandle.getFile()
-    const def = JSON.parse(await file.text()) as ObjectDef
+    const def = migrateObjectDef(JSON.parse(await file.text()) as ObjectDef)
     return { id: item.id, object: def } satisfies ObjectData
   },
 
@@ -129,7 +157,7 @@ const loader: CacheLoader = {
   async cloneItem(dirHandle, item) {
     const fileHandle = await dirHandle.getFileHandle(`${item.id}.json`)
     const file = await fileHandle.getFile()
-    const source = JSON.parse(await file.text()) as ObjectDef
+    const source = migrateObjectDef(JSON.parse(await file.text()) as ObjectDef)
 
     const id = await nextFreeJsonId(dirHandle)
     await writeJsonItem(dirHandle, id, { ...source, id })

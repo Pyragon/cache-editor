@@ -889,6 +889,63 @@ are deliberately never revoked, since the cache outlives any one modal. Blank
 records still get a cell, labelled with *why* they're blank, so "no sprite"
 stays distinguishable from a failed load.
 
+## Vorbis (JS5 index 36) — EMPTY in this cache, but the format is traced
+
+Investigated 2026-07-30. `main_file_cache.idx36` is **0 bytes**, so the index
+holds no archives at all — reading it through cryogen's store returns 0 files /
+0 bytes. There is nothing to dump, and a dumper would produce an empty folder.
+This is the same situation as `config_sun`: the index exists in the format, the
+revision just ships no data for it. Don't take "cryogen has no dumper for
+vorbis" as the reason — the reason is that there is no data.
+
+If a cache revision that DOES populate it ever turns up, the work is small,
+because the container is already traced from darkan's
+`config/midi/instrument/MusicSample.kt` (`decode`, line ~293):
+
+```
+int  sampleRate
+int  sampleCount
+int  start
+int  end          // if < 0: end = ~end and loopConsistency = true
+int  packetCount
+packetCount x {
+  size = 0; do { b = u8; size += b } while (b >= 255)   // 255-chained length
+  byte[size] packet
+}
+```
+
+Notes for whoever builds it:
+
+- Index 36 is registered as a **two-level** provider — darkan's
+  `ClientStartup:228`, `Resource.createProvider(IndexReference.INDEX_36, true, 2)`
+  — so entries are addressed (archive, file), and `MusicSample.list` takes both.
+- The Vorbis **setup data** (codebooks, floors, residues, mappings, modes) is
+  `static` on `MusicSample`'s companion object and loaded once by
+  `initializeData(data)`, so one entry is a shared setup blob and the rest are
+  per-sample packet streams. A dumper must keep them distinguishable.
+- These are **raw Vorbis packets, not Ogg** — there is no `OggS` framing, so a
+  browser `<audio>` element cannot play a dumped file directly. Playback needs
+  either a remux into an Ogg container using the setup blob, or a port of
+  `MusicSample`'s decoder (~600 lines of MDCT + codebook work, itself derived
+  from `stb_vorbis.c`).
+
+## Three object fields whose dumped names were wrong (RENAMED 2026-07-29)
+
+Traced against darkan's `ObjectType.kt` and its consumers while adding the
+objects page's field tooltips. All three were renamed **in cryogen**, and
+`migrateObjectDef` in `src/loaders/objects.ts` reads either spelling so older
+dumps keep working.
+
+| was (cryogen) | now | opcode | what it actually does |
+| --- | --- | --- | --- |
+| `blocks` | `blocksProjectiles` | 17 / 18 | stops projectiles. Walking is `clipType` (darkan's `blocksMovement`). The class also has a `blocksProjectiles()` accessor — `Region.java` calls it in 12 places for wall/object clipping, which is worth a second look, because it is feeding the PROJECTILE flag into movement clip maps |
+| `obstructsGround` | `forceDisplayDecoration` | 73 | the opposite of the old name: it FORCES a ground decoration to draw even when the player has ground decorations switched off (`SceneGraph:87` and `:219`, alongside `hasActions` and `blocksMovement`) |
+| `hasAnimation` | `forceNonStationary` | 98 | **not** "has an idle animation" — that is opcodes 24/106, read via `isAnimated()`. Opcode 98 is one of five independent ways to fail `SceneGraph:216`'s stationary test, so an object that already animates leaves it false. Note darkan shares the bad name, so this one is our coinage, not the reference's |
+
+**Ordering trap.** Gson ignores JSON keys the class no longer has and the
+no-arg constructor supplies the defaults, so packing a pre-rename dump with the
+renamed cryogen silently resets all three. Re-dump `objects` before packing.
+
 ## Loc cursors, appearance and morph fields
 
 Same treatment as the sound/icon table above — opcodes verified against both
