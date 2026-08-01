@@ -158,6 +158,7 @@
 
 .music-staged {
   margin: 12px 0 0;
+  max-width: 72ch;
   padding: 9px 12px;
   border-radius: 8px;
   border: 1px solid rgba(90, 170, 255, 0.35);
@@ -173,6 +174,7 @@
 
 .music-warning {
   margin: 6px 0 0;
+  max-width: 72ch;
   font-size: 12px;
   line-height: 1.6;
   color: #ffcf95;

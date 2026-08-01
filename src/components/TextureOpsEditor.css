@@ -160,9 +160,16 @@
   border-top: 1px solid #2f3542;
 }
 
+/* The explanatory-paragraph class, shared by 24 components. It needs a MEASURE:
+   without one these run the full width of the panel, and on a wide window that
+   is a 200-character line, which the eye can't track back from reliably.
+   72ch sits at the top of the readable 45-75 band and still fits the longer
+   technical sentences without looking cramped. */
 .tex-op-note {
   margin: 0;
+  max-width: 72ch;
   font-size: 12px;
+  line-height: 1.6;
   color: #8b93a3;
 }
 
