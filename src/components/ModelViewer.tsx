@@ -9,6 +9,7 @@ import { PARTICLE_FPS_DEFAULT, PARTICLE_FPS_KEY, PARTICLE_FPS_OPTIONS, ParticleS
 import type { Effector } from './particleSim'
 import { makeUVWriter } from './modelUVs'
 import { useZoom } from './useZoom'
+import { memCount, memSet, releaseBitmap, trackBitmap } from './memoryDebug'
 import './ModelViewer.css'
 
 // An item's 2D display params (ItemDefinitions), applied as an "item pose":
@@ -40,6 +41,27 @@ export type ModelDisplayParams = {
   retextureSpeeds?: Map<number, { u: number; v: number }>
 }
 
+// Def-driven render params for the WORLD (non-icon) view, as the client hands
+// them to createMeshRasterizer / applies to the rasterizer afterwards. Traced
+// in darkan-game-client SpotAnimationDefinitions.rasterize.
+export type WorldRenderParams = {
+  /** Raw def byte — the client passes `ambient + 64` as the lightness scale. */
+  ambient?: number
+  /** Raw def byte — the client passes `contrast + 850` and then scales the sun
+   *  by `768 / that`, so a BIGGER contrast means FLATTER shading. Note spot
+   *  animations have no `·5` multiplier (objects/NPCs/items do). */
+  contrast?: number
+  /** Client `resize(x, y, z)`, 128 = unscaled. Applied AFTER the animation
+   *  pose, which is why it rides the render transform instead of being baked
+   *  into the vertices. */
+  scaleX?: number
+  scaleY?: number
+  scaleZ?: number
+  /** Whole degrees about the vertical axis, applied after the resize. The
+   *  client only honours 90 / 180 / 270 and ignores everything else. */
+  rotation?: number
+}
+
 // The client projects icons through a 512-focal / 32px-tall viewport
 // (ItemDefinitions.getSprite → method6531(16, 16, 512, 512, ...)), i.e. a
 // near-orthographic 2·atan(16/512) ≈ 3.6° vertical FOV.
@@ -57,6 +79,10 @@ export type CameraState = { position: [number, number, number]; target: [number,
 type Props = {
   data: ModelData
   display?: ModelDisplayParams | null
+  /** Def lighting + post-pose resize/rotate for the world view (spot
+   *  animations). Ignored when `display` is posing an inventory icon, which
+   *  carries its own ambient/contrast/resize. */
+  world?: WorldRenderParams | null
   /** Animated vertex positions (skeletalAnimation.ts) applied in place to the
    *  live geometry — same length/order as data.vertexX/Y/Z. Changing this does
    *  NOT rebuild the Three.js scene; null/undefined shows the rest pose. */
@@ -227,6 +253,23 @@ function binaryAlphaTexture(bitmap: ImageBitmap): THREE.CanvasTexture {
 
 // Fallback when a producer has no material: a soft radial dot, which is what most
 // particle materials look like anyway.
+// Identity for "the same texture file". The cache used to compare the Blob by
+// reference, but `data.textures` is rebuilt by every model load out of fresh
+// `getFile()` results, so the same PNG arrived as a NEW File object each time
+// and the check missed 100% of the time across navigations — re-decoding every
+// texture and orphaning the previous ImageBitmap. size + lastModified changes
+// whenever the file on disk actually changes, which is the real question.
+function blobKey(blob: Blob): string {
+  const lastModified = (blob as File).lastModified
+  return `${blob.size}:${blob.type}:${typeof lastModified === 'number' ? lastModified : 0}`
+}
+
+/** Dispose a texture AND close the ImageBitmap it was uploaded from. */
+function disposeTexture(texture: THREE.Texture): void {
+  releaseBitmap(texture.image)
+  texture.dispose()
+}
+
 function makeDotTexture(): THREE.Texture {
   const canvas = document.createElement('canvas')
   canvas.width = 64
@@ -243,19 +286,26 @@ function makeDotTexture(): THREE.Texture {
   return texture
 }
 
-export default function ModelViewer({ data, display, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader }: Props) {
+export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader }: Props) {
+  // `world` is built inline by callers, so its identity churns every render —
+  // the in-place apply effect keys off its VALUE instead.
+  const worldKey = world ? JSON.stringify(world) : ''
   const mountRef = useRef<HTMLDivElement>(null)
   const matsRef = useRef<(THREE.MeshBasicMaterial | THREE.ShaderMaterial)[]>([])
   // Decoded material textures, keyed by texture id and kept across scene
   // rebuilds (e.g. reloading a different model that shares texture ids) —
   // without this, each rebuild re-decoded every texture from scratch via
   // createImageBitmap, and since that's async, the model visibly rendered
-  // flat-coloured (no texture) for a moment. Only disposed on true unmount,
-  // or when a texture id's blob actually changes underneath it.
-  const textureCacheRef = useRef(new Map<number, { blob: Blob; texture: THREE.Texture; detailBoost: number }>())
+  // flat-coloured (no texture) for a moment. Disposed on true unmount, when a
+  // texture id's blob changes underneath it, or when the cache outgrows its cap
+  // (below) — the component instance is reused as you click through an item
+  // list, so "keep everything forever" is a session-long leak of decoded
+  // ImageBitmaps.
+  const textureCacheRef = useRef(new Map<number, { key: string; texture: THREE.Texture; detailBoost: number }>())
   useEffect(() => () => {
-    for (const { texture } of textureCacheRef.current.values()) texture.dispose()
+    for (const { texture } of textureCacheRef.current.values()) disposeTexture(texture)
     textureCacheRef.current.clear()
+    memSet('modelTextures', 0)
   }, [])
   const [wireframe, setWireframe] = useState(false)
   const [applyPose, setApplyPose] = useState(true)
@@ -264,6 +314,8 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
   // rewrite the existing position buffer (and re-anchor billboards/emitters)
   // through this ref, never rebuild the scene.
   const applyPosedFnRef = useRef<((posed: PosedVertices | null) => void) | null>(null)
+  // Same idea for the def render params — see applyWorld.
+  const applyWorldFnRef = useRef<((next: WorldRenderParams | null | undefined) => void) | null>(null)
   const [particles, setParticles] = useState(true)
   const particlesRef = useRef(true)
   const particleObjectsRef = useRef<THREE.Points[]>([])
@@ -284,10 +336,25 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     const mount = mountRef.current
     if (!mount) return
 
+    // Drop decoded textures the incoming model can't use, once the cache has
+    // outgrown a session-reasonable size. Ids this build still references are
+    // never evicted, so a live material can't lose its map underneath it.
+    const texCache = textureCacheRef.current
+    if (texCache.size > 64) {
+      const live = new Set<number>([...data.textures.keys(), ...(display?.retextureBlobs?.keys() ?? [])])
+      for (const [id, entry] of texCache) {
+        if (live.has(id)) continue
+        disposeTexture(entry.texture)
+        texCache.delete(id)
+      }
+    }
+    memSet('modelTextures', texCache.size)
+
     const w = mount.clientWidth || 800
     const h = mount.clientHeight || 600
 
     const renderer = new THREE.WebGLRenderer({ antialias: true })
+    memCount('webglContexts')
     renderer.setPixelRatio(window.devicePixelRatio)
     renderer.setClearColor((typeof window !== 'undefined' ? (window as unknown as { __bg?: number }).__bg : undefined) ?? 0x000000)
     renderer.setSize(w, h)
@@ -303,6 +370,9 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     // Item pose (inventory-icon display params), resolved up front because the
     // item's recolours dye the face colours during the geometry build below.
     const pose = display && applyPose ? display : null
+    // Def render params only apply to the lit world view — an icon pose brings
+    // its own ambient/contrast/resize.
+    const worldParams = pose ? null : world
     const recolor = new Map<number, number>()
     if (pose) pose.recolorFrom.forEach((from, i) => recolor.set(from & 0xffff, pose.recolorTo[i] & 0xffff))
     const faceHsl = (f: number) => {
@@ -396,8 +466,16 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     }
     const LIGHT_LEN = Math.sqrt(50 * 50 + 10 * 10 + 50 * 50)
     const LX = -50 / LIGHT_LEN, LY = -10 / LIGHT_LEN, LZ = -50 / LIGHT_LEN
-    const ambientScale = 64 + (pose?.ambient ?? 0)
+    // Mutable: `applyWorld` below retunes ambient without rebuilding the scene
+    // (every keystroke in a def's Ambient field would otherwise cost a whole
+    // new WebGL context).
+    let ambientScale = 64 + (pose?.ambient ?? worldParams?.ambient ?? 0)
     const diffuseScale = 768 / (768 + 5 * (pose?.contrast ?? 0))
+    // World view: the client scales the sun by 768 / (contrast + 850)
+    // (MeshRasterizer_Sub3), so contrast flattens the shading. Left at 1 when
+    // no def params are supplied, which is every other caller.
+    const baseSunColor = modelLight().color.clone()
+    const sunScale = worldParams ? 768 / (850 + (worldParams.contrast ?? 0)) : 1
     // Client method13538: rescale the HSL16's 7-bit lightness by ambient/128.
     const litHsl = (hsl: number) => {
       let lum = ((hsl & 0x7f) * ambientScale) >> 7
@@ -595,7 +673,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
               uUseTexture: { value: false },
               uAmbient: { value: modelLight().ambient },
               uLightDir: { value: modelLight().direction },
-              uLightColor: { value: modelLight().color },
+              uLightColor: { value: baseSunColor.clone().multiplyScalar(sunScale) },
               uUvOffset: { value: new THREE.Vector2(0, 0) },
               uDetailBoost: { value: 1 },
             },
@@ -607,8 +685,9 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
         const blob = textureBlob(g.tex)!
         const speed = pose?.retextureSpeeds?.get(g.tex) ?? data.textureSpeeds.get(g.tex)
 
+        const key = blobKey(blob)
         const cached = textureCacheRef.current.get(g.tex)
-        if (cached && cached.blob === blob) {
+        if (cached && cached.key === key) {
           // same texture as last rebuild (e.g. the previous animation frame)
           // — reuse the already-decoded GPU texture, no async gap.
           if (cached.texture.colorSpace !== texColorSpace) {
@@ -623,17 +702,22 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
           // sample as rgb·a and render near-black (the effectId 1/7 specular
           // detail maps sit at alpha 40-70).
           createImageBitmap(blob, { premultiplyAlpha: 'none' }).then((bitmap) => {
-            if (disposed) { bitmap.close(); return }
+            trackBitmap(bitmap)
+            if (disposed) { releaseBitmap(bitmap); return }
             const { boost, cutout } = analyzeTexture(bitmap)
             // Foliage cutouts get binary alpha; the lit shader discards the clear
             // texels (alpha < 0.01), so the canopy reads as see-through leaves.
             const texture = cutout ? binaryAlphaTexture(bitmap) : new THREE.Texture(bitmap)
+            // The cutout path copies into a canvas, so the source bitmap is dead
+            // the moment it returns — it used to just be dropped on the floor.
+            if (cutout) releaseBitmap(bitmap)
             texture.wrapS = THREE.RepeatWrapping
             texture.wrapT = THREE.RepeatWrapping
             texture.colorSpace = texColorSpace
             texture.needsUpdate = true
-            cached?.texture.dispose()
-            textureCacheRef.current.set(g.tex, { blob, texture, detailBoost: boost })
+            if (cached) disposeTexture(cached.texture)
+            textureCacheRef.current.set(g.tex, { key, texture, detailBoost: boost })
+            memSet('modelTextures', textureCacheRef.current.size)
             if (speed) pushScroll(mat, texture, speed.u, speed.v)
             assignMap(mat, texture, boost)
           })
@@ -698,7 +782,8 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
 
         if (material) {
           createImageBitmap(material).then((bitmap) => {
-            if (disposed) { bitmap.close(); return }
+            trackBitmap(bitmap)
+            if (disposed) { releaseBitmap(bitmap); return }
             let source: CanvasImageSource = bitmap
             if (def.shape === 1) {
               const canvas = document.createElement('canvas')
@@ -710,6 +795,9 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
               ctx.clip()
               ctx.drawImage(bitmap, 0, 0)
               source = canvas
+              // Copied into the canvas — the bitmap is dead from here, and used
+              // to be abandoned without closing.
+              releaseBitmap(bitmap)
             }
             const texture = new THREE.Texture(source)
             texture.colorSpace = THREE.SRGBColorSpace
@@ -796,7 +884,11 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
           if (info.material) {
             const target = texture
             createImageBitmap(info.material).then((bitmap) => {
-              if (disposed) { bitmap.close(); return }
+              trackBitmap(bitmap)
+              if (disposed) { releaseBitmap(bitmap); return }
+              // The placeholder dot canvas is being replaced; if this ever swaps
+              // one bitmap for another, the outgoing one has to be closed.
+              releaseBitmap(target.image)
               target.image = bitmap
               target.needsUpdate = true
             })
@@ -916,9 +1008,24 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
       camera.near = Math.max(zoom * 0.01, 0.1)
       camera.far = zoom * 10 + span * 100
     } else {
-      camera.position.set(0, 0, span * fitScale)
-      camera.near = span * 0.001
-      camera.far  = span * 100
+      // Def resize + rotation (client order: animation pose → resize → rotate),
+      // so they ride the group transform rather than the vertex buffer the
+      // animation rewrites. Yaw negates through the (x, −y, −z) RS→Three map.
+      let worldSpan = span
+      if (worldParams) {
+        const sx = worldParams.scaleX ?? 128
+        const sy = worldParams.scaleY ?? 128
+        const sz = worldParams.scaleZ ?? 128
+        poseGroup.scale.set(sx / 128, sy / 128, sz / 128)
+        const deg = ((worldParams.rotation ?? 0) % 360 + 360) % 360
+        if (deg === 90 || deg === 180 || deg === 270) {
+          poseGroup.rotation.y = -(deg * Math.PI) / 180
+        }
+        worldSpan = span * Math.max(sx, sy, sz, 1) / 128
+      }
+      camera.position.set(0, 0, worldSpan * fitScale)
+      camera.near = worldSpan * 0.001
+      camera.far  = worldSpan * 100
     }
     camera.updateProjectionMatrix()
     updateParticleScale(h)
@@ -933,7 +1040,14 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     // whether the last applied pose rewrote face colours (so a later pose
     // without colour effects restores the base colours exactly once)
     let faceFxColors = false
+    // Set by applyWorld when a new `ambient` invalidates the baked colours; the
+    // pose pass below is what actually rewrites them.
+    let colorsDirty = false
+    // The pose currently on screen, so applyWorld can re-run the pass without
+    // waiting for the next animation frame (a static model never gets one).
+    let lastPosed: PosedVertices | null = null
     function applyPosed(posed: PosedVertices | null) {
+      lastPosed = posed
       const valid = posed != null && posed.x.length === vertexCount ? posed : null
       const X = valid ? valid.x : vertexX
       const Y = valid ? valid.y : vertexY
@@ -962,17 +1076,23 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
       positionAttr.needsUpdate = true
 
       // Type-7 face colour: rewrite the colour buffer from the posed HSLs
-      // (plain-colour path only — item-icon poses never animate).
+      // (plain-colour path only — item-icon poses never animate). This has to
+      // reproduce the non-pose branch of the build loop EXACTLY: ambient-scaled
+      // through litHsl, and written as raw display RGB — the lit shader is
+      // non-colour-managed, so the srgbToLinear this used to apply was the
+      // icon path's encoding and darkened every recoloured face. Also the path
+      // an `ambient` edit takes to re-bake without a scene rebuild.
       const posedFaceColor = valid?.faceColor ?? null
-      if (!pose && (posedFaceColor || faceFxColors)) {
+      if (!pose && (posedFaceColor || faceFxColors || colorsDirty)) {
         faceFxColors = posedFaceColor != null
+        colorsDirty = false
         const colorAttr = geo.getAttribute('color') as THREE.BufferAttribute
         for (let t = 0; t < cornerFace.length; t++) {
           const f = cornerFace[t]
-          const rgb = hslToRgb(posedFaceColor ? posedFaceColor[f] & 0xffff : faceHsl(f))
-          const r = srgbToLinear(((rgb >> 16) & 0xFF) / 255)
-          const g = srgbToLinear(((rgb >> 8) & 0xFF) / 255)
-          const b = srgbToLinear((rgb & 0xFF) / 255)
+          const rgb = hslToRgb(litHsl(posedFaceColor ? posedFaceColor[f] & 0xffff : faceHsl(f)))
+          const r = ((rgb >> 16) & 0xFF) / 255
+          const g = ((rgb >> 8) & 0xFF) / 255
+          const b = (rgb & 0xFF) / 255
           const base = t * 9
           colors[base]     = r; colors[base + 1] = g; colors[base + 2] = b
           colors[base + 3] = r; colors[base + 4] = g; colors[base + 5] = b
@@ -1018,6 +1138,35 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
       }
     }
     applyPosedFnRef.current = applyPosed
+
+    // --- Def render params, also applied in place. Editing a def's ambient /
+    // contrast / scale / rotation is a per-KEYSTROKE event, and rebuilding the
+    // scene for each one meant a new WebGLRenderer (and a new WebGL context)
+    // per keystroke — three's dispose() doesn't release the context, so they
+    // piled up until the tab ran out of memory. Nothing here needs new
+    // geometry: ambient rescales the baked colours, contrast is one uniform,
+    // and resize/rotate are group transforms.
+    function applyWorld(next: WorldRenderParams | null | undefined) {
+      if (pose) return
+      const nextAmbient = 64 + (next?.ambient ?? 0)
+      if (nextAmbient !== ambientScale) {
+        ambientScale = nextAmbient
+        colorsDirty = true
+      }
+      const nextSun = next ? 768 / (850 + (next.contrast ?? 0)) : 1
+      for (const material of materials) {
+        if (material instanceof THREE.ShaderMaterial) {
+          (material.uniforms.uLightColor.value as THREE.Vector3).copy(baseSunColor).multiplyScalar(nextSun)
+        }
+      }
+      poseGroup.scale.set((next?.scaleX ?? 128) / 128, (next?.scaleY ?? 128) / 128, (next?.scaleZ ?? 128) / 128)
+      const deg = ((next?.rotation ?? 0) % 360 + 360) % 360
+      poseGroup.rotation.y = deg === 90 || deg === 180 || deg === 270 ? -(deg * Math.PI) / 180 : 0
+      if (colorsDirty) applyPosed(lastPosed)
+    }
+    applyWorldFnRef.current = applyWorld
+
+
     // A rebuild mid-animation (this render's closure has the current prop)
     // starts from the active pose instead of flashing the rest pose.
     if (posedVertices) applyPosed(posedVertices)
@@ -1085,6 +1234,7 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
     return () => {
       disposed = true
       applyPosedFnRef.current = null
+      applyWorldFnRef.current = null
       if (cameraStateRef) {
         cameraStateRef.current = {
           position: [camera.position.x, camera.position.y, camera.position.z],
@@ -1098,18 +1248,25 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
       geo.dispose()
       // mesh textures live in textureCacheRef, not disposed per-rebuild — see its declaration
       for (const material of materials) material.dispose()
-      for (const texture of spriteTextures) texture.dispose()
+      for (const texture of spriteTextures) disposeTexture(texture)
       for (const material of spriteMaterials) material.dispose()
       for (const system of emitterSystems) {
         system.geometry.dispose()
         system.material.dispose()
       }
-      for (const texture of particleTextures) texture.dispose()
+      for (const texture of particleTextures) disposeTexture(texture)
       mount.removeChild(renderer.domElement)
+      memCount('webglContexts', -1)
+      // dispose() frees three's own GPU objects but NOT the WebGL context —
+      // the browser only reclaims that whenever the canvas is collected, so a
+      // viewer that rebuilds (model navigation, pose toggle) leaks a live
+      // context each time and eventually blows past the per-tab limit.
+      renderer.forceContextLoss()
     }
     // cameraStateRef is a mutable ref (stable identity, read at cleanup) and
     // posedVertices is applied in place by the effect below — both deliberately
-    // not dependencies (a pose change must not rebuild the scene).
+    // not dependencies (a pose change must not rebuild the scene). `world` is
+    // read here for the initial build and applied in place after that.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, display, applyPose])
 
@@ -1117,6 +1274,13 @@ export default function ModelViewer({ data, display, posedVertices, cameraStateR
   useEffect(() => {
     applyPosedFnRef.current?.(posedVertices ?? null)
   }, [posedVertices])
+
+  // Nor do def render-param changes; worldKey is the by-value trigger, since
+  // callers build the object inline.
+  useEffect(() => {
+    applyWorldFnRef.current?.(world)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [worldKey])
 
   useEffect(() => {
     for (const material of matsRef.current) material.wireframe = wireframe
