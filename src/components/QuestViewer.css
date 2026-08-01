@@ -195,11 +195,27 @@
 }
 
 /* Tables */
+/* Shared by every table in the app (21 components), so the default matters:
+   size to the CONTENT, not to the page. A three-column table stretched across
+   a 1400px panel puts metres of whitespace between related values and reads
+   badly; `fit-content` makes it as wide as it needs to be, and `max-width`
+   keeps a genuinely wide one inside the panel.
+
+   `overflow` stays visible on purpose — cell dropdowns (.cell-dropdown-*,
+   .badge-dropdown-*) are absolutely positioned and any other value clips them.
+
+   A table that SHOULD fill the width can opt in with `.quest-table-wrap.full`. */
 .quest-table-wrap {
+  width: fit-content;
+  max-width: 100%;
   border-radius: 8px;
   border: 1px solid var(--border);
   overflow: visible;
   margin-bottom: 8px;
+}
+
+.quest-table-wrap.full {
+  width: 100%;
 }
 
 .quest-table-wrap.uniform {
