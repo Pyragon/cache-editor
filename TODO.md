@@ -43,6 +43,41 @@ Open work only — completed passes live in git history and README.
 
 ## Sound / Music
 
+### PARKED: SFZ instrument export — module built, UI pulled (2026-07-31)
+
+`src/loaders/sfzExport.ts` exists and is verified, but **no UI reaches it**. The
+export buttons were added to `MusicViewer` (this song / all banks) and
+`SoundEffectViewer` (one .wav / whole index) and then removed the same day:
+Cody wants input from someone who actually composes before committing to a
+shape. The open question is product, not correctness — what a useful export
+looks like in practice.
+
+What is already verified in Node against the real dump, so it doesn't need
+redoing: all 247 banks generate 23,153 regions with zero out-of-range opcode
+values; `songBankUsage` matches an independent MIDI parser on all 1,662 songs;
+sound-effect rendering produces valid WAV headers and projects to 529 MB, which
+matches the dumped files.
+
+What was never done, and still isn't: **the File System Access half has never
+run** (directory picker, `samples/` creation, writing thousands of files), and
+no generated `.sfz` has been loaded into sforzando. That last one is the real
+acceptance test — check the envelope fit by ear against the in-app player.
+
+Sizing, for whenever this comes back: song-scoped export is 0.28 MB median /
+1.73 MB worst; all banks is ~53 MB; the whole sound-effect index is ~529 MB and
+~161 s of pure synthesis, so it likely needs chunking or a cancel button (an
+`AbortSignal` is plumbed through but nothing drives it).
+
+### `midi_instruments` viewer wants export buttons too, eventually
+
+Same parking as above, plus Cody wants to rework that viewer anyway — so this
+should land as part of that pass. It needs a "download this instrument" (the
+`.ogg` is already on disk, so close to free) and possibly a whole-index export.
+Note the index is 16,824 instruments but only **1,187 are referenced by any
+bank**, so "all instruments" means something different there than on the music
+page, where "all" means all 247 banks. Worth deciding whether the unreferenced
+~15,600 are useful to export at all, given no MIDI message can address them.
+
 - **`sound_effects_midi` keymap is read-only** — the 128-note keymap renders as grouped ranges with resolved sample links; per-note editing across six 128-entry parallel arrays needs a better UI concept before it's worth building.
 - **`sound_effects_midi` editor not tested in a real browser session** — typecheck/lint/build pass; the dumper/decoder is verified byte-identical independently.
 
