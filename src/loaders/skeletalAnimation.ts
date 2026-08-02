@@ -197,6 +197,62 @@ export type PosedVertices = {
 // animated map locs at 60fps) was pure allocation churn.
 const skinGroupCache = new WeakMap<ModelData, { vertexGroups: number[][]; faceGroups: number[][] | null }>()
 
+// A transform slot's vertices are `frameBase.labels[slot]` flattened through the
+// model's skin groups — a pure function of the two, and the same answer on
+// every frame. It used to be rebuilt per transform entry per pose (twice, since
+// each entry also resolves its skip reference), which on a 30-entity cutscene at
+// 60fps was the single biggest source of garbage in the frame. Resolved once
+// per (model, frame base) and reused.
+const EMPTY_SLOT: number[] = []
+
+/** Reusable pose buffers — see `applyAnimationFrame`'s `scratch` parameter. */
+export type PoseScratch = { x: Int32Array; y: Int32Array; z: Int32Array }
+
+export function makePoseScratch(model: ModelData): PoseScratch {
+  return {
+    x: new Int32Array(model.vertexX.length),
+    y: new Int32Array(model.vertexY.length),
+    z: new Int32Array(model.vertexZ.length),
+  }
+}
+
+type SlotLists = { vertices: (number[] | undefined)[]; faces: (number[] | undefined)[] }
+const slotListCache = new WeakMap<ModelData, WeakMap<AnimationFrameBaseDef, SlotLists>>()
+
+function slotListsFor(model: ModelData, frameBase: AnimationFrameBaseDef): SlotLists {
+  let perBase = slotListCache.get(model)
+  if (!perBase) slotListCache.set(model, perBase = new WeakMap())
+  const hit = perBase.get(frameBase)
+  if (hit) return hit
+
+  const { vertexGroups, faceGroups } = skinGroupsFor(model)
+  const count = frameBase.transformationTypes.length
+  const lists: SlotLists = { vertices: new Array(count), faces: new Array(count) }
+  for (let slot = 0; slot < count; slot++) {
+    const labels = frameBase.labels[slot]
+    if (!labels || labels.length === 0) continue
+    // one label is the overwhelmingly common case — hand back the group itself
+    // rather than a copy of it (read-only downstream)
+    if (labels.length === 1) {
+      lists.vertices[slot] = vertexGroups[labels[0]]
+      lists.faces[slot] = faceGroups?.[labels[0]]
+      continue
+    }
+    const vertices: number[] = []
+    const faces: number[] = []
+    for (const label of labels) {
+      const vGroup = vertexGroups[label]
+      if (vGroup) for (const v of vGroup) vertices.push(v)
+      const fGroup = faceGroups?.[label]
+      if (fGroup) for (const f of fGroup) faces.push(f)
+    }
+    lists.vertices[slot] = vertices
+    lists.faces[slot] = faces
+  }
+  perBase.set(frameBase, lists)
+  return lists
+}
+
 function skinGroupsFor(model: ModelData): { vertexGroups: number[][]; faceGroups: number[][] | null } {
   let cached = skinGroupCache.get(model)
   if (cached) return cached
@@ -337,39 +393,38 @@ export function applyAnimationFrame(
   /** Ticks elapsed within `frame` (fractional allowed) / its duration. */
   elapsed = 0,
   duration = 1,
+  /**
+   * Buffers to pose INTO, instead of allocating a fresh copy of the model's
+   * vertices every call. Three arrays the size of the model, per posed thing,
+   * per frame, is a lot of garbage on a crowded scene.
+   *
+   * The returned `PosedVertices` aliases these, so a caller may only share one
+   * between things whose poses it consumes before the next call — or, more
+   * simply, keep one per posed instance. Omit it and each call allocates, which
+   * is always safe.
+   */
+  scratch?: PoseScratch,
 ): PosedVertices | null {
   if (!model.vertexSkins || frame.rawFallbackBytes) return null
 
-  const { vertexGroups, faceGroups } = skinGroupsFor(model)
+  const slots = slotListsFor(model, frameBase)
+  const verticesForSlot = (slot: number): number[] => slots.vertices[slot] ?? EMPTY_SLOT
+  const facesForSlot = (slot: number): number[] => slots.faces[slot] ?? EMPTY_SLOT
 
-  function verticesForSlot(slot: number): number[] {
-    const labels = frameBase.labels[slot] ?? []
-    const vertices: number[] = []
-    for (const label of labels) {
-      const group = vertexGroups[label]
-      if (group) vertices.push(...group)
-    }
-    return vertices
-  }
-
-  function facesForSlot(slot: number): number[] {
-    if (!faceGroups) return []
-    const labels = frameBase.labels[slot] ?? []
-    const faces: number[] = []
-    for (const label of labels) {
-      const group = faceGroups[label]
-      if (group) faces.push(...group)
-    }
-    return faces
-  }
-
+  // set() on a right-sized buffer is a memcpy; from() allocates one first.
+  const reuse = scratch != null && scratch.x.length === model.vertexX.length
   const state: PoseState = {
-    x: Int32Array.from(model.vertexX),
-    y: Int32Array.from(model.vertexY),
-    z: Int32Array.from(model.vertexZ),
+    x: reuse ? scratch!.x : Int32Array.from(model.vertexX),
+    y: reuse ? scratch!.y : Int32Array.from(model.vertexY),
+    z: reuse ? scratch!.z : Int32Array.from(model.vertexZ),
     originX: 0, originY: 0, originZ: 0,
     withinOrigin: false,
     upscaled: false,
+  }
+  if (reuse) {
+    state.x.set(model.vertexX)
+    state.y.set(model.vertexY)
+    state.z.set(model.vertexZ)
   }
   // Copied lazily on the first face-group transform.
   let faceAlpha: Int8Array | null = null

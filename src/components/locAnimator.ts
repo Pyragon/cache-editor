@@ -5,8 +5,8 @@ import type { AnimationDef } from '../loaders/animations'
 import { frameFileId } from '../loaders/animations'
 import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
 import type { AnimationFrameSetData } from '../loaders/animation_frame_sets'
-import { applyAnimationFrame } from '../loaders/skeletalAnimation'
-import type { PosedVertices } from '../loaders/skeletalAnimation'
+import { applyAnimationFrame, makePoseScratch } from '../loaders/skeletalAnimation'
+import type { PosedVertices, PoseScratch } from '../loaders/skeletalAnimation'
 
 // Imperative (non-React) sequence playback for the map scene — the same
 // frameSet → frameBase → applyAnimationFrame pipeline as useSequencePlayback,
@@ -112,8 +112,23 @@ export class LocAnimator {
     if (!frame || frame.rawFallbackBytes) return null
     const base = this.frameBases.get(frame.frameBaseId)
     if (!base) return null
-    if (!this.def.tweened || this.frameCount <= 1) return applyAnimationFrame(model, base, frame)
+    const scratch = scratchFor(model)
+    if (!this.def.tweened || this.frameCount <= 1) return applyAnimationFrame(model, base, frame, null, 0, 1, scratch)
     const next = this.frameFor((index + 1) % this.frameCount)
-    return applyAnimationFrame(model, base, frame, next, tick, Math.max(1, durations[index] ?? 1))
+    return applyAnimationFrame(model, base, frame, next, tick, Math.max(1, durations[index] ?? 1), scratch)
   }
+}
+
+// Pose buffers per MODEL, shared by every animator and placement that uses it.
+// Safe because a posed frame is consumed synchronously by its caller — the map
+// scene and the cutscene player both do `update(posed)` and `billboards.pose
+// (posed)` immediately — so two placements of the same model never hold a pose
+// across each other's call. Without this, every animated loc allocated three
+// arrays the size of its model on every frame.
+const locScratch = new WeakMap<ModelData, PoseScratch>()
+
+function scratchFor(model: ModelData): PoseScratch {
+  let s = locScratch.get(model)
+  if (!s) locScratch.set(model, s = makePoseScratch(model))
+  return s
 }
