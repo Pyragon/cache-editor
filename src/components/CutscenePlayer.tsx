@@ -162,7 +162,7 @@ type EntityMesh = { tm: TexturedModelMesh; model: ModelData }
 const applyPose = (em: EntityMesh, posed: { x: Int32Array; y: Int32Array; z: Int32Array } | null) =>
   applyPoseToMesh(em.tm, em.model, posed)
 
-type AnimState = { def: AnimationDef; frame: number; acc: number; oneShot: boolean }
+type AnimState = { def: AnimationDef; frame: number; acc: number; oneShot: boolean; loops: number }
 
 /** Anything startAnim can drive. The two counters serialize the ASYNC anim
  *  swaps: each request takes a ticket at call time and only the latest may
@@ -193,6 +193,16 @@ type AnimHolder = {
  *  loops are their defs' idle animations. */
 type ObjectRt = AnimHolder & {
   group: THREE.Group
+  /** the composite the sequence poses, whether or not a mesh was built —
+   *  cutscene 12's rockfall dust locs 67857/67860 are anchor-only models
+   *  (a handful of emitter/billboard host faces, no drawable geometry) */
+  poseModel: ModelData
+  /** billboard/particle attachments spawned when REPLACE_OBJECT fires,
+   *  removed on DESTROY_OBJECT / scrub-back (see clearObjectAttachments) */
+  attachments: { pose: (posed: PosedVertices | null) => void; remove: () => void; setVisible?: (visible: boolean) => void }[]
+  /** bumped on every clear so an async particles.add landing late can tell
+   *  its spawn was superseded and remove itself */
+  attachGen: number
   /** the def's idle sequence — plays while spawned, and is what an
    *  ANIMATE_OBJECT one-shot falls back to */
   idleAnimId: number
@@ -200,6 +210,12 @@ type ObjectRt = AnimHolder & {
    *  base tile (SceneGraph.addObject) */
   sizeX: number
   sizeY: number
+  /** the def's world-space nudge (ObjectDefinition.method7971's final
+   *  translate) — buildLocsMesh applies it to every region loc, and cutscene
+   *  12's wall chunks hang 480 units below their tile height without it */
+  offX: number
+  offY: number
+  offZ: number
 }
 
 /** An in-flight entity gfx (spot animation riding an entity). Many gfx
@@ -440,6 +456,10 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       sphere: THREE.Sphere
       animator?: LocAnimator
       billboards?: import('./sceneBillboards').AnimatedBillboards
+      /** particle systems anchored to this model's emitter faces — the pose
+       *  re-anchors their triangles, which is how a sequence gates emission
+       *  (a fire's spark faces stay collapsed except when pouring) */
+      emitterPoses?: { pose(posed: PosedVertices): void }[]
     }[]
     scene: THREE.Scene
     camera: THREE.PerspectiveCamera
@@ -853,7 +873,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     }
     e.animCommitted = seq
     if (!animDef || !animDef.frameDurations?.length) return
-    e.anim = { def: animDef, frame: 0, acc: 0, oneShot }
+    e.anim = { def: animDef, frame: 0, acc: 0, oneShot, loops: 0 }
     poseEntityFrame(e)
   }
 
@@ -990,8 +1010,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       const bb = rt.current.billboards?.addAnimated(placed)
       if (bb) gfx.attachments.push(bb)
       if (composite.emitters?.length && rt.current.particles) {
-        const pt = await rt.current.particles.add(placed)
-        if (pt) gfx.attachments.push({ pose: () => {}, remove: pt.remove })
+        // a gfx always plays its sequence from birth — same rest-pose hold
+        const pt = await rt.current.particles.add(placed, true)
+        if (pt) gfx.attachments.push({ pose: (posed) => { if (posed) pt.pose(posed) }, remove: pt.remove })
       }
       gfx.onPosed = (posed) => { for (const a of gfx.attachments) a.pose(posed) }
       rt.current.gfx.push(gfx)
@@ -1013,6 +1034,16 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     }
     for (const a of g.attachments) a.remove()
     g.attachments = []
+  }
+
+  /** Tear down a spawned object's billboard/particle attachments — on
+   *  DESTROY_OBJECT, a scrub back to 0, and before a REPLACE re-fires. The
+   *  generation bump strands any particles.add still in flight. */
+  const clearObjectAttachments = (o: ObjectRt) => {
+    o.attachGen++
+    for (const a of o.attachments) a.remove()
+    o.attachments = []
+    o.onPosed = undefined
   }
 
   // ---------------------------------------------------------------- actions
@@ -1154,18 +1185,49 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
           const sizeY = swap ? o.sizeX : o.sizeY
           const fineX = (f.x << 9) + (sizeX << 8)
           const fineY = (f.y << 9) + (sizeY << 8)
-          o.group.position.set(fineX, groundY(fineX, fineY, f.plane), -fineY)
+          // same axes/signs as buildLocsMesh's def-offset translate: scene y
+          // is up and scene z is -RS y, so offsetY/offsetZ negate
+          o.group.position.set(fineX + o.offX, groundY(fineX, fineY, f.plane) - o.offY, -fineY - o.offZ)
           o.group.rotation.y = -(f.rotation * Math.PI) / 2
           // spawned objects play their def's idle sequence — cutscene 0's
           // battle crowd is loc-spawned fighters whose combat loops ARE their
           // idle animations; without this they stand frozen
           if (!o.anim && o.idleAnimId >= 0) void startAnim(o, o.idleAnimId, false)
+          // Emitter/billboard faces ride the placement just set, same shape as
+          // a gfx spawn: billboards follow the posed frames through onPosed,
+          // particles spawn off the rest-pose faces. Cleared first so a seek
+          // replaying this action doesn't stack a second copy.
+          clearObjectAttachments(o)
+          const gen = o.attachGen
+          const placement = new THREE.Matrix4().compose(
+            o.group.position.clone(),
+            new THREE.Quaternion().setFromEuler(new THREE.Euler(0, o.group.rotation.y, 0)),
+            new THREE.Vector3(1, 1, 1),
+          )
+          const placed = { model: o.poseModel, matrix: placement, upscale: modelUpscale(o.poseModel), plane: f.plane }
+          const bb = r.billboards?.addAnimated(placed)
+          if (bb) o.attachments.push(bb)
+          if (o.poseModel.emitters?.length && r.particles) {
+            // an object with an idle poses from this very cycle — hold the
+            // sims off the rest triangles so a burst face a sequence keeps
+            // collapsed doesn't leak an opening puff
+            void r.particles.add(placed, o.idleAnimId >= 0).then((pt) => {
+              if (!pt) return
+              if (o.attachGen !== gen || rt.current.disposed) { pt.remove(); return }
+              // posed frames re-anchor the emitter triangles — sequences gate
+              // emission by collapsing the face (see sceneParticles.add) —
+              // and the render loop feeds visibility so an off-camera host
+              // accumulates nothing, like the client's draw-created producers
+              o.attachments.push({ pose: (posed) => { if (posed) pt.pose(posed) }, remove: pt.remove, setVisible: pt.setVisible })
+            })
+          }
+          o.onPosed = (posed) => { for (const a of o.attachments) a.pose(posed) }
         }
         break
       }
       case 'DESTROY_OBJECT': {
         const o = r.objects[f.cutsceneObjectPtr]
-        if (o) { o.group.visible = false; o.anim = null }
+        if (o) { o.group.visible = false; o.anim = null; clearObjectAttachments(o) }
         break
       }
       case 'ANIMATE_OBJECT': {
@@ -1279,6 +1341,16 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         holder.anim.acc = 0
         if (holder.anim.frame + 1 >= durations.length) {
           if (holder.anim.oneShot) {
+            holder.anim = null
+            return true
+          }
+          // maxLoops caps replays even for "looping" idles (Animation.java
+          // counts wraps and finishes at defs.maxLoops, default 99). The
+          // rockfall dust anchors' 14813 is maxLoops 1 — looping it re-opened
+          // the emitter faces and fired the explosion burst a second time.
+          // Finished = hold the last frame, same as a one-shot.
+          holder.anim.loops++
+          if (holder.anim.loops >= (holder.anim.def.maxLoops ?? 99)) {
             holder.anim = null
             return true
           }
@@ -1512,6 +1584,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       for (const o of r.objects) {
         if (o) {
           o.group.visible = false; o.anim = null
+          clearObjectAttachments(o)
           if (o.em) applyPose(o.em, null)
         }
       }
@@ -1529,6 +1602,10 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   // the memoized action list calls seek through this, so its buttons don't have
   // to be rebuilt every render just to capture a fresh closure
   seekRef.current = seek
+  // render-rig hooks (scripts/render-rig): let the headless harness scrub the
+  // sim and inspect runtime state — same spirit as the map viewer's __gpu
+  ;(window as unknown as Record<string, unknown>).__cutsceneRt = rt.current
+  ;(window as unknown as Record<string, unknown>).__cutsceneSeek = seek
 
   // ------------------------------------------------------------ scene setup
 
@@ -1599,6 +1676,10 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         const env = await cutsceneEnvironment(rootHandle, def)
         particles.setAmbient(sunOf(env).ambient)
         const mosaic = new SceneMosaic(grid, 0, 0, configs, sunOf(env))
+
+        // particle handles per emitter-carrying model, so animated locs can
+        // feed poses to their emitter triangles (matched up after the build)
+        const emitterHandles = new Map<ModelData, { pose(posed: PosedVertices): void }[]>()
 
         for (const cell of assembled.cells) {
           if (cancelled) return
@@ -1680,7 +1761,10 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
 
           // Particle emitters (fires, torches) and billboard sprites (glow,
           // smoke). The cutscene scene has no plane toggles, so every plane's
-          // groups go straight in.
+          // groups go straight in. Handles are kept by MODEL so an animated
+          // loc's poses can re-anchor its emitter triangles below — poses are
+          // model-local, so systems from every placement of the model take
+          // the same posed frame.
           for (const built of locBuilds) {
             if (!built) continue
             for (const emitter of built.emitters) {
@@ -1688,7 +1772,12 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
                 ...emitter,
                 matrix: new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(emitter.matrix),
               }
-              await particles.add(placed)
+              const pt = await particles.add(placed)
+              if (pt) {
+                const list = emitterHandles.get(emitter.model) ?? []
+                list.push(pt)
+                emitterHandles.set(emitter.model, list)
+              }
               billboards.add(placed)
             }
           }
@@ -1710,6 +1799,37 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             for (const lm of built.transparentLocs) {
               lm.renderOrder = ORDER_TRANSPARENT_LOC
               group.add(lm)
+            }
+            // A held-back loc with an idle sequence comes out of buildLocsMesh
+            // in `animated`, not the merged mesh — dropping that list left
+            // cutscene 12's cave wall 65776 (idle anim 2232) missing entirely
+            // until its REPLACE_OBJECT fired. Its mesh joins the same group so
+            // the action's hide (and a scrub-back's restore) covers it; the
+            // matrix stays region-local because the group carries the offset.
+            for (const al of built.animated) {
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points, al.ambient, al.contrast)
+              if (cancelled) return
+              if (!anim) continue
+              anim.mesh.matrixAutoUpdate = false
+              anim.mesh.matrix.copy(al.matrix)
+              anim.mesh.renderOrder = ORDER_OPAQUE_LOC
+              group.add(anim.mesh)
+              const placedMatrix = new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(al.matrix)
+              anim.mesh.geometry.computeBoundingSphere()
+              const rest = anim.mesh.geometry.boundingSphere
+              const sphere = rest
+                ? rest.clone().applyMatrix4(placedMatrix)
+                : new THREE.Sphere(new THREE.Vector3().setFromMatrixPosition(placedMatrix), CULL_RADIUS)
+              sphere.radius = sphere.radius * 1.5 + 256
+              r.animLocs.push({
+                sphere,
+                update: anim.update,
+                model: al.model,
+                animationId: al.animationId,
+                billboards: billboards.addAnimated({
+                  model: al.model, matrix: placedMatrix, upscale: modelUpscale(al.model), plane: oplane,
+                }) ?? undefined,
+              })
             }
             group.position.set(offsetX, 0, offsetZ)
             r.scene.add(group)
@@ -1755,6 +1875,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             if (cancelled) return
             for (const rec of r.animLocs) rec.animator = animators.get(rec.animationId)
           }
+          // emitter systems whose host model this record poses — the pose loop
+          // re-anchors their triangles so sequences can gate emission
+          for (const rec of r.animLocs) rec.emitterPoses = emitterHandles.get(rec.model)
         }
 
         // The sun's COLOUR is a tint on the built materials rather than
@@ -1905,18 +2028,27 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
                 ambient: 64 + Number(objDef.ambient ?? 0),
                 contrast: 850 + Number(objDef.contrast ?? 0) * 5,
               })
-              if (tm) {
+              // same rule as gfx: an anchor-only model (no drawable mesh, just
+              // emitter/billboard host faces) is still a live object — the
+              // attachments spawned when its REPLACE_OBJECT fires ARE the effect
+              if (tm || composite.emitters?.length || composite.billboards?.length) {
                 const group = new THREE.Group()
-                group.add(tm.mesh)
+                if (tm) group.add(tm.mesh)
                 record = {
                   group,
-                  em: { tm, model: composite },
+                  em: tm ? { tm, model: composite } : null,
+                  poseModel: composite,
+                  attachments: [],
+                  attachGen: 0,
                   anim: null,
                   animPending: 0,
                   animCommitted: 0,
                   idleAnimId: Number((objDef.animations as number[] | undefined)?.[0] ?? -1),
                   sizeX: Number(objDef.sizeX ?? 1) || 1,
                   sizeY: Number(objDef.sizeY ?? 1) || 1,
+                  offX: Number(objDef.offsetX ?? 0),
+                  offY: Number(objDef.offsetY ?? 0),
+                  offZ: Number(objDef.offsetZ ?? 0),
                 }
                 group.visible = false
                 r.scene.add(group)
@@ -2214,6 +2346,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
               if (posed) {
                 rec.update(posed)
                 rec.billboards?.pose(posed)
+                if (rec.emitterPoses) for (const h of rec.emitterPoses) h.pose(posed)
               }
             }
           }
@@ -2255,8 +2388,17 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             }
             for (const o of r.objects) {
               if (!o) continue
-              if (!o.group.visible) { o.offScreen = true; continue }
-              poseIfDue(o, onScreen(o.group, CULL_RADIUS * Math.max(o.sizeX, o.sizeY)), o.anim?.def.tweened === true)
+              if (!o.group.visible) {
+                o.offScreen = true
+                for (const a of o.attachments) a.setVisible?.(false)
+                continue
+              }
+              const vis = onScreen(o.group, CULL_RADIUS * Math.max(o.sizeX, o.sizeY))
+              // particle systems only run while their host is in shot — the
+              // client creates producers on draw and kills them 750ms after
+              // the last one, so an off-camera wall gathers no dust cloud
+              for (const a of o.attachments) a.setVisible?.(vis)
+              poseIfDue(o, vis, o.anim?.def.tweened === true)
             }
             // gfx are short-lived and ride whatever the shot is about, so they
             // skip the test and always pose

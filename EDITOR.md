@@ -299,6 +299,26 @@ straight at, so any camera-distance radius switches fires off by view angle.
 HDR follows the scene's bloom toggle, exactly as loc materials do (the client
 gates HDR float textures on the bloom filter being live).
 
+**Animations gate emission through the face (TRACED 2026-08-02).** The client
+re-reads every emitter's triangle off the POSED model each frame
+(`ParticleProducer.updatePosition`), and a triangle whose three corners
+coincide sets `unmoved`, which stops emission — live particles keep updating.
+That is not an edge case, it's the authoring tool for burst timing: a sequence
+keeps the emitter face collapsed to a point for most of its run and expands it
+only for the frames that should pour. Cutscene 12's rockfall dust (anchor locs
+67857/67860, producers 185/186 at rates 96..192/64ths — a firehose if left
+ungated) pours once at the end of the collapse animation this way, and a fire's
+spark faces flicker on and off with its idle. Ported as
+`ParticleSim.unmoved` + the `pose` handle on `SceneParticles.add()`; the
+cutscene player feeds poses from spawned objects, gfx and animated locs, the
+map viewer from its animated-loc pose loop. A sim that never receives poses
+emits from the rest triangle forever — which is exactly what the pre-fix
+"constant spew" was. Hosts that pose from birth (spawned objects with an idle,
+gfx) pass `awaitFirstPose` so the sims hold until the first posed frame — the
+rest pose's open faces otherwise leak an opening puff in the tick before the
+sequence collapses them. `maxLoops` matters here too: 14813 is maxLoops 1, and
+looping it replayed the burst.
+
 **`adjustsLightIntensity` (TRACED 2026-07-29, DirectX path).** An earlier note
 here guessed it made the emitter light its surroundings — wrong. `Class54` is
 the HardwareRenderer's particle renderer (`aClass54_8837`), and the flag only

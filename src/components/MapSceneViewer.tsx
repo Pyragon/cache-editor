@@ -842,6 +842,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
   type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; billboards?: import('./sceneBillboards').AnimatedBillboards; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; mesh: THREE.Mesh; sphere: THREE.Sphere }
   const animLocsRef = useRef<AnimLocRecord[]>([])
+  // Particle systems keyed by their emitter-carrying model: an animated loc's
+  // posed frames re-anchor the emitter triangles (the client re-reads them off
+  // the posed model every frame), which is how sequences gate emission — a
+  // fire's spark faces stay collapsed except for the frames that pour.
+  // Looked up lazily in the pose loop so region rebuilds need no rewiring;
+  // systems are never partially removed, so entries stay valid for the
+  // viewer's lifetime.
+  const emitterPosesRef = useRef(new Map<ModelData, { pose(posed: import('../loaders/skeletalAnimation').PosedVertices): void }[]>())
   // Meshes carrying `userData.sortCentreY` — their per-frame sort depth is
   // recomputed from the model's vertical centre (see setTransparentSort above).
   const sortCentreRef = useRef<THREE.Object3D[]>([])
@@ -1999,6 +2007,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             // billboards ride the same frame: anchors follow the posed carrier
             // faces, alpha/colour follow type-5/7, scale/roll follow 9/10
             rec.billboards?.pose(posed)
+            // emitter triangles too — sequences gate emission through them
+            const eh = emitterPosesRef.current.get(rec.model)
+            if (eh) for (const h of eh) h.pose(posed)
             animVisible = true
           }
         }
@@ -2111,6 +2122,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         assets.brightness = brightnessMulRef.current
         assetsRef.current = assets
         animLocsRef.current = []
+        emitterPosesRef.current.clear()
         sortCentreRef.current = []
         const mapsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('maps'))
 
@@ -2559,7 +2571,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               if (offsetX !== 0 || offsetZ !== 0) {
                 placed.matrix = new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(emitter.matrix)
               }
-              await particles.add(placed)
+              const pt = await particles.add(placed)
+              if (pt) {
+                const list = emitterPosesRef.current.get(emitter.model) ?? []
+                list.push(pt)
+                emitterPosesRef.current.set(emitter.model, list)
+              }
               billboards.add(placed)
             }
             // Animated locs (waving flags etc.): a separate posable mesh each,

@@ -118,6 +118,13 @@ type System = {
   /** adjustsLightIntensity: lit by the scene ambient rather than full-bright */
   followsLight: boolean
   active: boolean
+  /** host model hidden/off-camera — the client only simulates particles for
+   *  models it is DRAWING (a system undrawn for 750ms is killed and pooled),
+   *  so a suspended system doesn't step, and one suspended long enough resets
+   *  to the fresh state a re-created producer would have */
+  suspended?: boolean
+  /** performance.now() when suspension began; cleared once the reset fires */
+  suspendedAt?: number | null
 }
 
 /** One client tick. The sim counts in these, not in frames. */
@@ -225,11 +232,26 @@ export class SceneParticles {
    * 4096 to undo the sim's 12-bit fixed point.
    *
    * Returns a removal handle for callers whose emitters are transient (an
-   * entity gfx that ends) — region locs just ignore it.
+   * entity gfx that ends) — region locs just ignore it — plus a pose hook:
+   * the client re-reads each emitter triangle from the POSED model every
+   * frame (ParticleProducer.updatePosition), and sequences use that to gate
+   * emission by collapsing the face to a point (see ParticleSim.unmoved).
+   * Callers that animate the host model should call `pose` with each posed
+   * frame — and pass `awaitFirstPose` so the sims don't leak a burst off the
+   * rest-pose triangles in the ticks before the first posed frame lands (the
+   * client's producers read the posed triangle from birth). Static hosts pass
+   * neither and emit from the rest pose, as they should.
+   *
+   * `setVisible` mirrors the client's render-driven lifecycle: producers only
+   * exist for models being DRAWN, so a host that is hidden or out of shot
+   * should suspend its systems (cutscene 12's wall spawns at cycle 0 but the
+   * camera doesn't reach it until 235 — the client meets it dust-free, not
+   * under four seconds of accumulated cloud).
    */
-  async add({ model, matrix, upscale, plane }: LocEmitter): Promise<{ remove(): void } | null> {
+  async add({ model, matrix, upscale, plane }: LocEmitter, awaitFirstPose = false): Promise<{ remove(): void; pose(posed: { x: Int32Array; y: Int32Array; z: Int32Array }): void; setVisible(visible: boolean): void } | null> {
     if (!model.emitters?.length) return null
     const created: System[] = []
+    const anchors: { sim: ParticleSim; ia: number; ib: number; ic: number }[] = []
     const effectors: Effector[] = []
     for (const effector of model.effectors ?? []) {
       const type = model.effectorTypes.get(effector.effectId)
@@ -263,6 +285,8 @@ export class SceneParticles {
       )
       const cap = capacityFor(info.producer as { maximumParticleRate?: number; maximumLifetime?: number })
       sim.maxParticles = cap
+      if (awaitFirstPose) sim.holdUntilPosed()
+      anchors.push({ sim, ia, ib, ic })
 
       const positions = new Float32Array(cap * 3)
       const colors = new Float32Array(cap * 4)
@@ -350,6 +374,22 @@ export class SceneParticles {
         }
         this.systems = this.systems.filter((s) => !created.includes(s))
       },
+      pose: (posed) => {
+        for (const { sim, ia, ib, ic } of anchors) {
+          sim.setTriangle({
+            ax: posed.x[ia], ay: posed.y[ia], az: posed.z[ia],
+            bx: posed.x[ib], by: posed.y[ib], bz: posed.z[ib],
+            cx: posed.x[ic], cy: posed.y[ic], cz: posed.z[ic],
+          })
+        }
+      },
+      setVisible: (visible) => {
+        for (const system of created) {
+          if (system.suspended === !visible) continue
+          system.suspended = !visible
+          system.suspendedAt = visible ? null : performance.now()
+        }
+      },
     }
   }
 
@@ -419,6 +459,18 @@ export class SceneParticles {
 
     this.live = 0
     for (const system of this.systems) {
+      // host not being drawn: no stepping (nothing accumulates off-camera),
+      // and past the client's 750ms kill window the system resets to what a
+      // freshly created producer would be
+      if (system.suspended) {
+        if (system.points.visible) system.points.visible = false
+        if (system.suspendedAt != null && performance.now() - system.suspendedAt > 750) {
+          system.sim.reset()
+          system.geometry.setDrawRange(0, 0)
+          system.suspendedAt = null
+        }
+        continue
+      }
       if (!system.active) {
         if (system.points.visible) system.points.visible = false
         continue

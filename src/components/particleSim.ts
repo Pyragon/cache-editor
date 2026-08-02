@@ -167,13 +167,19 @@ export class ParticleSim {
 
   // The emission axis: the triangle's face normal, normalised to 32767. The client
   // centres the angular spreads on this via atan2 (baseRotation in ParticleProducer),
-  // so a wall-mounted emitter sprays out of the wall, not straight up. Zero for a
-  // point emitter, which reproduces the client's degenerate-triangle case exactly.
+  // so a wall-mounted emitter sprays out of the wall, not straight up.
   private axisX = 0
   private axisY = 0
   private axisZ = 0
   private thetaH = 0
   private thetaV = 0
+  /** The client's `unmoved` gate: a triangle whose three corners coincide does
+   *  not emit (ParticleProducer.updatePosition). This is not an edge case —
+   *  it's how animators SWITCH emitters: a sequence keeps the face collapsed
+   *  to a point and expands it for the frames that should pour (cutscene 12's
+   *  rockfall dust bursts once, at the end of the collapse). Live particles
+   *  keep updating either way, exactly as in the client. */
+  private unmoved = false
   /** Sim age in client cycles, which the emission window gates on. */
   private age = 0
 
@@ -205,11 +211,23 @@ export class ParticleSim {
     if (triangle) this.setTriangle(triangle)
   }
 
+  /** Hold emission until the first setTriangle. For a host whose sequence
+   *  will pose the emitter faces, the rest pose is a lie — the client's
+   *  producers read the POSED triangle from birth, so a burst face that a
+   *  sequence keeps collapsed must not leak a puff of rest-pose particles in
+   *  the tick or two before the first posed frame arrives. */
+  holdUntilPosed() {
+    this.unmoved = true
+  }
+
   /** Re-anchor the emitter to a moved face (skeletal animation) without
    *  resetting live particles — recomputes the spawn centre and emission axis
    *  exactly like construction. */
   setTriangle(triangle: EmitterTriangle) {
     this.triangle = triangle
+    this.unmoved = triangle.ax === triangle.bx && triangle.bx === triangle.cx
+      && triangle.ay === triangle.by && triangle.by === triangle.cy
+      && triangle.az === triangle.bz && triangle.bz === triangle.cz
     this.centerX = Math.trunc((triangle.ax + triangle.bx + triangle.cx) / 3)
     this.centerY = Math.trunc((triangle.ay + triangle.by + triangle.cy) / 3)
     this.centerZ = Math.trunc((triangle.az + triangle.bz + triangle.cz) / 3)
@@ -253,6 +271,10 @@ export class ParticleSim {
   reset() {
     this.particles = []
     this.rate = 0
+    // the client doesn't reset producers, it KILLS and re-creates them (a
+    // system undrawn for 750ms is pooled) — a fresh producer starts at age 0,
+    // so its emission window does too
+    this.age = 0
   }
 
   /** One client cycle (20ms). `delta` is in cycles. */
@@ -262,8 +284,8 @@ export class ParticleSim {
     // when not. Non-periodic producers stop for good after one period. Particles
     // already in flight keep updating either way.
     const p = this.producer
-    let emitting = true
-    if (p.lifetime !== -1 && p.lifetime > 0) {
+    let emitting = !this.unmoved
+    if (emitting && p.lifetime !== -1 && p.lifetime > 0) {
       let timeAlive = this.age
       if (!p.periodic && timeAlive > p.lifetime) {
         emitting = false
