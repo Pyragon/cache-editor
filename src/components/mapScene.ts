@@ -5,6 +5,7 @@ import type { ModelData } from '../loaders/models'
 import type { LocEmitter } from './sceneParticles'
 import { hslToRgb, adjustLuminance, AMBIENT_DEFAULT, CONTRAST_DEFAULT, parseModel, applyRecolor, computeModelLitRgb, modelUpscale, upscaleModel, resolveModelEmitters, resolveModelBillboards, billboardHiddenFaces, DEFAULT_MODEL_SUN, type ModelSun, type PointLight } from '../loaders/models'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
+import { resolveMultiLocId } from '../loaders/varOverrides'
 import { makeUVWriter } from './modelUVs'
 import type { UVWriter } from './modelUVs'
 import type { PosedVertices } from '../loaders/skeletalAnimation'
@@ -4001,14 +4002,25 @@ export async function buildLocsMesh(
     done++
     if (onProgress && done % 64 === 0) onProgress(done, planeObjects.length)
     let def = await assets.getDef(objectId)
-    // Morph ("multiloc") objects carry no models of their own — the client
-    // swaps the whole def for `transformTo[varbit]` (getMultiLoc). There's no
-    // player here to read a varbit from, so take the first real target, which
-    // is what a fresh world shows (an unset varbit is 0). Without this the loc
-    // renders as nothing at all: object 69836 in Lumbridge is one.
-    if (def && (!def.objectModelIds || def.objectModelIds.length === 0) && def.transformTo?.length) {
-      const target = def.transformTo.find((id) => id !== -1 && id !== undefined)
-      if (target !== undefined) def = await assets.getDef(target) ?? def
+    // The FOOTPRINT belongs to the placed loc, not to whatever a morph swaps in
+    // below. The client keeps both (AnimatedGameObject holds `originalLoc`
+    // alongside the `computedLoc` it derives per render) and it has no choice:
+    // the morph target is chosen by a varbit that changes at runtime, while the
+    // scene slot and collision are fixed when the loc is added. Reading the
+    // size off the target put the roofs at 2938,3540 three tiles west and one
+    // and a half south — loc 67094 is 7×4 and every id it morphs to is 1×1.
+    const placedDef = def
+    // Morph ("multiloc"): the client swaps the whole def for one of
+    // `transformTo`, chosen by a var (`ObjectType.getMultiLoc` — see
+    // resolveMultiLocId, which is that rule). The LAST entry is the default and
+    // is deliberately unreachable by the var, so with no override set every
+    // morph lands on it, exactly as an unset var does in game. Taking the first
+    // non−−1 target instead showed the BROKEN roof at 2938,3540: loc 67094 is
+    // [−1, −1, 67096, 67095], where only varbit 10685 == 2 picks the smashed
+    // 67096 and the intact 67095 is the default. A −1 result draws nothing.
+    if (def?.transformTo?.length) {
+      const target = resolveMultiLocId(def)
+      def = target != null ? await assets.getDef(target) ?? def : null
     }
     if (!def || !def.objectModelIds || def.objectModelIds.length === 0) continue
     const isAnimated = (def.animations?.length ?? 0) > 0
@@ -4024,9 +4036,10 @@ export async function buildLocsMesh(
     const modelIds = def.objectModelIds[Math.min(shapeIdx, def.objectModelIds.length - 1)]
     if (!modelIds || modelIds.length === 0) continue
 
-    // SceneGraph.addObject: swap footprint for rotations 1/3, centre + average height
-    const sizeX = (rotation === 1 || rotation === 3 ? def.sizeY : def.sizeX) ?? 1
-    const sizeY = (rotation === 1 || rotation === 3 ? def.sizeX : def.sizeY) ?? 1
+    // SceneGraph.addObject: swap footprint for rotations 1/3, centre + average
+    // height. Off the PLACED def — see placedDef above.
+    const sizeX = (rotation === 1 || rotation === 3 ? placedDef?.sizeY : placedDef?.sizeX) ?? 1
+    const sizeY = (rotation === 1 || rotation === 3 ? placedDef?.sizeX : placedDef?.sizeY) ?? 1
 
     if (def.staticShadow !== false) {
       if (shape <= 3) {
