@@ -32,8 +32,9 @@ import { modelUpscale } from '../loaders/models'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
-import { assembleCutsceneScene } from './cutsceneScene'
+import { assembleCutsceneScene, replacedLocKey } from './cutsceneScene'
 import { CutsceneAudio } from './cutsceneAudio'
+import { NumberInput } from './defFields'
 import { CYCLE_MS, clockShort, clockSuffix, clockValue } from './cutsceneClock'
 import type { CutsceneClockUnit } from './cutsceneClock'
 import './AnimationViewer.css'
@@ -136,6 +137,10 @@ type ObjectRt = AnimHolder & {
   /** the def's idle sequence — plays while spawned, and is what an
    *  ANIMATE_OBJECT one-shot falls back to */
   idleAnimId: number
+  /** footprint in tiles: a loc's model sits at the CENTRE of it, not on the
+   *  base tile (SceneGraph.addObject) */
+  sizeX: number
+  sizeY: number
 }
 
 /** An in-flight entity gfx (spot animation riding an entity). Many gfx
@@ -171,6 +176,11 @@ type EntityRt = AnimHolder & {
   plane: number
   yaw: number // three.js rotation.y
   route: { tiles: [number, number][]; paces: number[]; next: number } | null
+  /** NPC def `size` in tiles. Like a loc, a multi-tile entity is positioned by
+   *  the centre of its footprint — every movement target in the client is
+   *  `tile * 512 + getSize() * 256` (EntityUpdating). Cutscene 15's carriages
+   *  are 2×2 and its smoke clouds 5×5. */
+  size: number
   standAnimId: number
   walkAnimId: number
   /** BAS runningSequence / teleportSequence — the client picks between these
@@ -352,6 +362,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     heightsByCell: Map<string, Int32Array[]>
     /** the same cells' terrain, for the bridge-flag lookup in groundY */
     terrainByCell: Map<string, MapTerrain>
+    /** region locs a REPLACE_OBJECT swaps out, keyed by tile + shape group;
+     *  visible until their action fires (see the REPLACE_OBJECT case) */
+    replacedLocs: Map<string, THREE.Group>
     entities: EntityRt[]
     objects: (ObjectRt | null)[]
     gfx: GfxRt[]
@@ -381,6 +394,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       camera: new THREE.PerspectiveCamera(2 * Math.atan(0.25) * 180 / Math.PI, 4 / 3, 50, 60000),
       heightsByCell: new Map(),
       terrainByCell: new Map(),
+      replacedLocs: new Map(),
       entities: [],
       objects: [],
       gfx: [],
@@ -438,6 +452,17 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   // Played to the end: the FINISHED action fired, or the clock ran out. Keyed
   // off `cycle` (state) rather than the runtime so the button re-renders.
   const atEnd = ready && (cycle >= durationCycles || rt.current.finished)
+
+  // Frame-stepping, for pinning down something that happens too fast to see.
+  // Cycle-sized rather than action-sized: the action steppers jump between
+  // events, this crawls THROUGH one.
+  const [stepSize, setStepSize] = useState(5)
+
+  const stepCycles = (dir: 1 | -1) => {
+    const target = Math.max(0, Math.min(durationCycles, rt.current.cycle + dir * stepSize))
+    seek(target)
+    setPlaying(false)
+  }
 
   const stepToAction = (dir: 1 | -1) => {
     const r = rt.current
@@ -908,8 +933,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         const e = r.entities[f.targetIndex]
         if (!e) break
         e.placed = true
-        e.fineX = f.x * 512 + 256
-        e.fineY = f.y * 512 + 256
+        e.fineX = (f.x << 9) + (e.size << 8)
+        e.fineY = (f.y << 9) + (e.size << 8)
         e.plane = f.plane
         e.route = null
         // Client entity angles run CLOCKWISE FROM NORTH (PathingEntity.turn's
@@ -931,8 +956,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         const tiles = m.bitpackedPositions.map((p) => [p >>> 16, p & 0xffff] as [number, number])
         e.placed = true
         e.plane = f.plane
-        e.fineX = tiles[0][0] * 512 + 256
-        e.fineY = tiles[0][1] * 512 + 256
+        e.fineX = (tiles[0][0] << 9) + (e.size << 8)
+        e.fineY = (tiles[0][1] << 9) + (e.size << 8)
         e.route = { tiles, paces: m.movementTypes, next: 1 }
         // the walking loop below starts the right sequence for the first leg's
         // pace on this very cycle — clearing it is what tells it to
@@ -963,11 +988,27 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         break
       }
       case 'REPLACE_OBJECT': {
+        // The REPLACE half: whatever region loc held this tile in this shape
+        // group goes, then ours takes its place (LocAction.destroyObject).
+        const shape = def.objects[f.locIndex]?.locShape
+        if (shape != null) {
+          const previous = r.replacedLocs.get(replacedLocKey(f.plane, f.x, f.y, shape))
+          if (previous) previous.visible = false
+        }
         const o = r.objects[f.locIndex]
         if (o) {
           o.group.visible = true
-          const fineX = f.x * 512 + 256
-          const fineY = f.y * 512 + 256
+          // A loc is positioned by the CENTRE of its footprint, not its base
+          // tile, and rotations 1/3 swap that footprint (SceneGraph.addObject:
+          // `sceneX = (x << 9) + (sizeX << 8)`) — the same maths buildLocsMesh
+          // uses for every region loc. Cutscene 8's portcullis is 2×6, so
+          // dropping it on the base tile put a six-tile gate 2½ tiles out of
+          // place, swinging it across the camera.
+          const swap = f.rotation === 1 || f.rotation === 3
+          const sizeX = swap ? o.sizeY : o.sizeX
+          const sizeY = swap ? o.sizeX : o.sizeY
+          const fineX = (f.x << 9) + (sizeX << 8)
+          const fineY = (f.y << 9) + (sizeY << 8)
           o.group.position.set(fineX, groundY(fineX, fineY, f.plane), -fineY)
           o.group.rotation.y = -(f.rotation * Math.PI) / 2
           // spawned objects play their def's idle sequence — cutscene 0's
@@ -1058,8 +1099,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       }
       const step = paceUnits(pace)
       const [tx, ty] = e.route.tiles[e.route.next]
-      const gx = tx * 512 + 256
-      const gy = ty * 512 + 256
+      const gx = (tx << 9) + (e.size << 8)
+      const gy = (ty << 9) + (e.size << 8)
       // gated exactly like the client (see turnsWhileWalking): an entity that
       // cannot turn keeps its scripted facing while it moves
       if (e.turnsWhileWalking) {
@@ -1168,6 +1209,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       }
       for (const g of r.gfx) removeGfx(g)
       r.gfx = []
+      // the region locs come back — a scrub to before the REPLACE_OBJECT that
+      // took them out should show the scene as the client built it
+      for (const group of r.replacedLocs.values()) group.visible = true
     }
     while (r.cycle < target) stepCycle()
     r.audible = wasAudible
@@ -1190,6 +1234,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     // audio outlives this effect, being keyed only on the cache handle.
     r.heightsByCell.clear()
     r.terrainByCell.clear()
+    r.replacedLocs.clear()
     audioRef.current?.stopAll()
     setCycle(0)
     setReady(false)
@@ -1325,6 +1370,29 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             }
           }
 
+          // Region locs a REPLACE_OBJECT takes over, each as its own group so
+          // it can be removed on the cycle the action fires — the client builds
+          // the scene with them present and only calls destroyObject when the
+          // action runs, so they must be here and then go, not never exist.
+          for (const loc of cell.replacedObjects) {
+            const [, shape, , ox, oy, oplane] = loc
+            const built = await buildLocsMesh(cell.terrain, [loc], oplane, heights, assets, undefined, lightGrid)
+            if (cancelled) return
+            if (!built) continue
+            const group = new THREE.Group()
+            if (built.mesh) {
+              built.mesh.renderOrder = ORDER_OPAQUE_LOC
+              group.add(built.mesh)
+            }
+            for (const lm of built.transparentLocs) {
+              lm.renderOrder = ORDER_TRANSPARENT_LOC
+              group.add(lm)
+            }
+            group.position.set(offsetX, 0, offsetZ)
+            r.scene.add(group)
+            r.replacedLocs.set(replacedLocKey(oplane, cell.rx * SIZE + ox, cell.ry * SIZE + oy, shape), group)
+          }
+
           const shadows = locBuilds.map((b) => blurShadowGrid(b?.shadows))
           for (let plane = 0; plane < 4; plane++) {
             setStatus(`Building region ${cell.rx},${cell.ry} terrain (plane ${plane})…`)
@@ -1405,7 +1473,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         for (const entity of def.entities) {
           const ert: EntityRt = {
             em: null, group: new THREE.Group(), placed: false,
-            fineX: 0, fineY: 0, plane: 0, yaw: 0, route: null, anim: null,
+            fineX: 0, fineY: 0, plane: 0, yaw: 0, route: null, anim: null, size: 1,
             animPending: 0, animCommitted: 0,
             standAnimId: -1, walkAnimId: -1, runAnimId: -1, halfWalkAnimId: -1, moveAnimId: -1,
             turnsWhileWalking: true,
@@ -1415,6 +1483,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             if (entity.id >= 0 && npcsDir) {
               const file = await (await npcsDir.getFileHandle(`${entity.id}.json`)).getFile()
               const npcDef = JSON.parse(await file.text()) as Record<string, unknown>
+              // CutsceneEntity.move: `npc.sizeInSquares = definitions.size`
+              ert.size = Math.max(1, Number(npcDef.size ?? 1) || 1)
               const composite = await loadModelComposite(rootHandle, npcCompositeSpec(npcDef))
               // baked with the client's model sun + the def's ambient/contrast,
               // like every loc — unlit NPCs read flat and over-bright
@@ -1518,6 +1588,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
                   animPending: 0,
                   animCommitted: 0,
                   idleAnimId: Number((objDef.animations as number[] | undefined)?.[0] ?? -1),
+                  sizeX: Number(objDef.sizeX ?? 1) || 1,
+                  sizeY: Number(objDef.sizeY ?? 1) || 1,
                 }
                 group.visible = false
                 r.scene.add(group)
@@ -1796,6 +1868,12 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             </ul>
           </div>
         </div>
+        {/* Right under the picture, which is what it describes — at the bottom
+            of the panel it read as a footnote to the transport. */}
+        <p className="cutscene-note cutscene-player-scope">
+          Simulated: terrain/locs from the areas recipe, camera splines, entity placement + walk routes + animations, object spawns, screen fades, entity gfx, sound.
+          Not simulated: projectiles, hitmarks, hint arrows, tile messages{warnings.length > 0 ? ` — ${warnings.length} warning${warnings.length === 1 ? '' : 's'}: ${[...new Set(warnings)].slice(0, 3).join('; ')}` : ''}.
+        </p>
         <div className="cutscene-player-bar">
           <button
             type="button"
@@ -1810,6 +1888,15 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             type="button"
             className="zoom-btn anim-preview-play"
             disabled={!ready}
+            title={`Back ${stepSize} cycle${stepSize === 1 ? '' : 's'} (${(stepSize * CYCLE_MS / 1000).toFixed(2)}s)`}
+            onClick={() => stepCycles(-1)}
+          >
+            ⏪
+          </button>
+          <button
+            type="button"
+            className="zoom-btn anim-preview-play"
+            disabled={!ready}
             title={atEnd ? 'Replay from the start' : playing ? 'Pause' : 'Play'}
             onClick={() => {
               if (atEnd) seek(0)
@@ -1817,6 +1904,15 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             }}
           >
             {atEnd ? '↺' : playing ? '⏸' : '▶'}
+          </button>
+          <button
+            type="button"
+            className="zoom-btn anim-preview-play"
+            disabled={!ready}
+            title={`Forward ${stepSize} cycle${stepSize === 1 ? '' : 's'} (${(stepSize * CYCLE_MS / 1000).toFixed(2)}s)`}
+            onClick={() => stepCycles(1)}
+          >
+            ⏩
           </button>
           <button
             type="button"
@@ -1854,10 +1950,17 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             />
           </label>
         </div>
-        <p className="cutscene-note">
-          Simulated: terrain/locs from the areas recipe, camera splines, entity placement + walk routes + animations, object spawns, screen fades, entity gfx, sound.
-          Not simulated: projectiles, hitmarks, hint arrows, tile messages{warnings.length > 0 ? ` — ${warnings.length} warning${warnings.length === 1 ? '' : 's'}: ${[...new Set(warnings)].slice(0, 3).join('; ')}` : ''}.
-        </p>
+        <div className="cutscene-player-stepbar">
+          <label className="cutscene-player-step">
+            <span>Step</span>
+            <NumberInput value={stepSize} min={1} max={durationCycles} onChange={setStepSize} />
+            <span>cycles</span>
+          </label>
+          <p className="cutscene-note cutscene-player-stephint">
+            How far ⏪ and ⏩ move the clock. A client cycle is 20ms — 50 to the second — so 1 steps a
+            single frame, which is how you catch something that happens too fast to watch.
+          </p>
+        </div>
       </div>
     </div>
   )

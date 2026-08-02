@@ -602,7 +602,12 @@ export type ModelData = {
   // Per-vertex bone-group id (darkan Mesh.kt vertexSkinBuf) — animation frame
   // bases index vertex groups by these ids via their `labels` arrays. Absent
   // on models with no skeletal animation (most static scenery).
-  vertexSkins: Uint8Array | null
+  // −1 = unlabelled, which is what the client's merge writes for vertices from
+  // a part with no skins of its own (RSMesh's merge constructor: `vertexSkins
+  // [n] = mesh.vertexSkins != null ? mesh.vertexSkins[i] : -1`). Signed for
+  // that reason — a real label is an unsigned byte, and 255 is meaningful
+  // (marker faces), so the sentinel cannot be folded into the same range.
+  vertexSkins: Int16Array | null
   // Per-face group label (darkan Mesh.kt faceGroups) — the type 5 (alpha) and
   // 7 (colour) animation transforms address face groups by these. −1 =
   // unlabelled (the client's merge default for parts without face skins).
@@ -745,7 +750,7 @@ function decodeVertices(
   vertexX: Int32Array,
   vertexY: Int32Array,
   vertexZ: Int32Array,
-  vertexSkins: Uint8Array | null,
+  vertexSkins: Int16Array | null,
 ) {
   let bx = 0, by = 0, bz = 0
   for (let v = 0; v < vertexCount; v++) {
@@ -847,7 +852,7 @@ function decodeNewFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceType = hasFaceRenderTypes ? new Int8Array(faceCount) : null
   const faceTextures = hasFaceTextures === 1 ? new Int32Array(faceCount) : null
   const texturePos = hasFaceTextures === 1 && texturedFaceCount > 0 ? new Int16Array(faceCount) : null
-  const vertexSkins = hasVertexSkins === 1 ? new Uint8Array(vertexCount) : null
+  const vertexSkins = hasVertexSkins === 1 ? new Int16Array(vertexCount) : null
   // −1 = unlabelled, matching the client's merge default (Mesh.kt writes −1
   // for faces from parts without skins; createFaceGroups skips group < 0)
   const faceSkins = hasFaceSkins === 1 ? new Int16Array(faceCount) : null
@@ -1116,7 +1121,7 @@ function decodeOldFormat(data: Uint8Array): Omit<ModelData, 'id'> {
   const faceType = hasFaceInfo === 1 ? new Int8Array(fc) : null
   const faceTextures = hasFaceInfo === 1 ? new Int32Array(fc) : null
   const texturePos = hasFaceInfo === 1 ? new Int16Array(fc) : null
-  const vertexSkins = hasVertexSkins === 1 ? new Uint8Array(vc) : null
+  const vertexSkins = hasVertexSkins === 1 ? new Int16Array(vc) : null
   const faceSkins = hasFaceSkins === 1 ? new Int16Array(fc) : null
 
   // Decode vertices
@@ -1376,7 +1381,11 @@ export function mergeModels(models: ModelData[]): ModelData {
   const anyTexturePos = models.some((m) => m.texturePos)
   const texturePos = anyTexturePos ? new Int16Array(faceCount).fill(-1) : null
   const anyVertexSkins = models.some((m) => m.vertexSkins)
-  const vertexSkins = anyVertexSkins ? new Uint8Array(vertexCount) : null
+  // −1 for vertices from parts without skins, exactly as the client's merge
+  // does it — folding them into group 0 hands them to whatever transform
+  // slot 0's labels drive, so a scale on that group collapses geometry that
+  // should never move (cutscene 8's portcullis flashed in and out this way).
+  const vertexSkins = anyVertexSkins ? new Int16Array(vertexCount).fill(-1) : null
   const anyFaceSkins = models.some((m) => m.faceSkins)
   // −1 for faces from parts without skins, per Mesh.kt's merge
   const faceSkins = anyFaceSkins ? new Int16Array(faceCount).fill(-1) : null
@@ -1415,7 +1424,7 @@ export function mergeModels(models: ModelData[]): ModelData {
       vertexX[vOff + v] = m.vertexX[v]
       vertexY[vOff + v] = m.vertexY[v]
       vertexZ[vOff + v] = m.vertexZ[v]
-      if (vertexSkins) vertexSkins[vOff + v] = m.vertexSkins?.[v] ?? 0
+      if (vertexSkins) vertexSkins[vOff + v] = m.vertexSkins?.[v] ?? -1
     }
     for (let f = 0; f < m.faceCount; f++) {
       triangleX[fOff + f] = m.triangleX[f] + vOff

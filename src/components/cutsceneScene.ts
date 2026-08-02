@@ -1,5 +1,5 @@
 import type { CutsceneDef } from '../loaders/cutscenes'
-import { createRegionDef, decodeTerrain, tileIndex } from '../loaders/maps'
+import { SIZE, createRegionDef, decodeTerrain, tileIndex } from '../loaders/maps'
 import type { MapRegionDef, MapTerrain } from '../loaders/maps'
 import { calculateTileHeight, loadRegionEnvironment } from './mapScene'
 import type { RegionLight } from './mapScene'
@@ -24,6 +24,10 @@ export type CutsceneSceneCell = {
   /** Point lights that travelled in with the chunks copied into this cell,
    *  already translated to its coordinates (see remapLights). */
   lights: RegionLight[]
+  /** Region locs a REPLACE_OBJECT will swap out, held back from `def.objects`
+   *  so the player can build them as their own meshes and remove them on the
+   *  cycle the action fires — see removeReplacedLocs. */
+  replacedObjects: MapRegionDef['objects']
 }
 
 /** One 8×8-tile chunk copy, kept so the region's lights can follow its tiles. */
@@ -118,7 +122,7 @@ export async function assembleCutsceneScene(
   for (let rx = 0; rx < 2; rx++) {
     for (let ry = 0; ry < 2; ry++) {
       const regionDef = createRegionDef(rx, ry)
-      cells.push({ rx, ry, def: regionDef, terrain: decodeTerrain(regionDef), lights: [] })
+      cells.push({ rx, ry, def: regionDef, terrain: decodeTerrain(regionDef), lights: [], replacedObjects: [] })
     }
   }
   const cellAt = (rx: number, ry: number) => cells.find((c) => c.rx === rx && c.ry === ry) ?? null
@@ -206,6 +210,61 @@ export async function assembleCutsceneScene(
   }
 
   if (rootHandle) await remapLights(rootHandle, copies, warnings)
+  removeReplacedLocs(def, cells)
   for (const cell of cells) cell.def.hasLocations = cell.def.objects.length > 0
   return { cells, warnings }
+}
+
+/** Shape → shape group, per the client's `ObjectShapes` enum: walls 0-3 are
+ *  group 0, wall decorations 4-8 group 1, scenery/roofs 9-21 group 2, ground
+ *  decoration 22 group 3. A tile holds at most one loc per group. */
+export function shapeGroup(shape: number): number {
+  if (shape <= 3) return 0
+  if (shape <= 8) return 1
+  if (shape <= 21) return 2
+  return 3
+}
+
+/** Scene-space key for "the loc occupying this tile in this shape group",
+ *  which is the slot a REPLACE_OBJECT takes over. */
+export function replacedLocKey(plane: number, x: number, y: number, shape: number): string {
+  return `${plane},${x},${y},${shapeGroup(shape)}`
+}
+
+/**
+ * REPLACE_OBJECT is a REPLACE, not an add. The client runs
+ * `LocAction.destroyObject(plane, x, y, group, locId, shape, rotation)`
+ * (CutsceneObject.replace), which clears the loc already occupying that tile
+ * in that shape group before putting the cutscene's own there — cutscene 8
+ * drops its animated portcullis 63962 onto the tile holding the map's static
+ * 63961, and drawing both left them coincident and z-fighting.
+ *
+ * The client does that MID-SCENE, when the action fires: the scene is built
+ * with the region loc present (Client's cutscene branch initialises the map
+ * region first, then performs actions as `cyclesPassed` reaches each one). So
+ * these are only held back from the merged region mesh here — the player
+ * builds them separately and hides each one on its action's cycle.
+ */
+function removeReplacedLocs(def: CutsceneDef, cells: CutsceneSceneCell[]): void {
+  const replaced = new Set<string>()
+  for (const action of def.actions ?? []) {
+    if (action.type !== 'REPLACE_OBJECT') continue
+    const f = (action.fields ?? {}) as Record<string, number>
+    const obj = def.objects?.[f.locIndex]
+    if (!obj) continue
+    replaced.add(replacedLocKey(f.plane, f.x, f.y, obj.locShape))
+  }
+  if (replaced.size === 0) return
+  for (const cell of cells) {
+    const keep: MapRegionDef['objects'] = []
+    for (const loc of cell.def.objects) {
+      const [, shape, , x, y, plane] = loc
+      if (replaced.has(replacedLocKey(plane, cell.rx * SIZE + x, cell.ry * SIZE + y, shape))) {
+        cell.replacedObjects.push(loc)
+      } else {
+        keep.push(loc)
+      }
+    }
+    cell.def.objects = keep
+  }
 }

@@ -42,11 +42,17 @@ const COSINE = new Int32Array(16384)
 
 // Inverted index: bone-group/label id -> the vertex indices carrying that
 // skin byte (darkan Mesh.kt createVertexGroups(), reading vertexSkinBuf).
-export function buildVertexGroups(vertexSkins: Uint8Array, vertexCount: number): number[][] {
+export function buildVertexGroups(vertexSkins: Int16Array, vertexCount: number): number[][] {
   let maxGroup = 0
   for (let v = 0; v < vertexCount; v++) if (vertexSkins[v] > maxGroup) maxGroup = vertexSkins[v]
   const groups: number[][] = Array.from({ length: maxGroup + 1 }, () => [])
-  for (let v = 0; v < vertexCount; v++) groups[vertexSkins[v]].push(v)
+  // label −1 = unlabelled (a merged part that carried no skins of its own):
+  // no group claims it, so no transform ever moves it — same rule the face
+  // groups below already follow.
+  for (let v = 0; v < vertexCount; v++) {
+    const group = vertexSkins[v]
+    if (group >= 0) groups[group].push(v)
+  }
   return groups
 }
 

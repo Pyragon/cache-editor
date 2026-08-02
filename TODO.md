@@ -118,6 +118,28 @@ page, where "all" means all 247 banks. Worth deciding whether the unreferenced
 
 ## Maps
 
+### Locs are merged into one mesh per plane — the client keeps them separate
+
+`buildLocsMesh` batches every loc on a plane into a single geometry. That makes
+the scene cheap to draw, but the client doesn't work that way: each placement is
+its own scene-graph node (`GraphNode_Sub1_Sub4_Sub1`), which is why it can add,
+remove, animate, recolour or morph ONE loc at any moment without touching
+anything else.
+
+The divergence has already cost us twice. `REPLACE_OBJECT` in a cutscene
+destroys the region loc holding that tile before adding its own
+(`LocAction.destroyObject`), and because a merged mesh can't give one loc back,
+`assembleCutsceneScene` has to identify replaced locs up front and build each as
+its own group so the player can hide it on the right cycle. Live edits in the
+map viewer have the same shape of problem — changing one placement rebuilds the
+whole plane.
+
+Worth trying: one mesh per loc (or per material batch keyed by loc) with the
+placement on the node rather than baked into vertices, and measure. If the draw
+call count is too high on a dense region, a middle ground is batching only
+static locs and keeping anything a cutscene or an edit can touch separate. Until
+then, every feature that needs to address a single loc pays for the merge.
+
 ### TEST: the region environment tab (2026-07-28)
 
 The 3D view's **Env** tab edits the environment record — the tail of the
