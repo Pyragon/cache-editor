@@ -1244,6 +1244,70 @@ what hand-authoring terrain needs.
 
 ---
 
+## Cutscene EXECUTE_SCRIPT — the fields are arguments, not ids (TRACED 2026-08-01)
+
+**What the client does with it.** `CutsceneExecuteScript.perform()` calls
+`CS2Executor.executeCutsceneScript(CURRENT_CUTSCENE, string, int)`, which looks
+the script up **from the cutscene id**, not from the action:
+
+```kotlin
+val script = CS2Script.getScript(ClientTriggerType.RUN_CUTSCENE_SCRIPT, cutsceneId, -1)
+executor.objectLocals[0] = scriptParam   // the string
+executor.intLocals[0]    = intParam      // the number
+```
+
+and `getScript` composes `triggerId or (scriptId shl 10)` with
+`RUN_CUTSCENE_SCRIPT = 20` — so for cutscene 1 that value is 1044.
+
+**That number is matched against a name HASH, not used as an id.** Every archive
+in a JS5 reference table carries a 32-bit `nameHash` field (cryogen:
+`ArchiveReference.getNameHash()`), and a lookup is a linear scan for the archive
+whose hash matches — `Js5ResourceProvider.getFileId` on the client,
+`Index.getArchiveId` in cryogen, the same scan with
+`CacheUtil.getNameHash("m43_50")` for maps. For a triggered script the composed
+value is compared against that column directly, rather than hashing a string.
+`getScript` tries three in order: `triggerId | (scriptId << 10)`, then
+`triggerId | ((alternateId + 65536) << 10)`, then the global
+`triggerId | 0x3fffc00`.
+
+**MEASURED against this cache (2026-08-01), and the answer is that cutscene
+scripts don't exist here.** Of 6,566 hashed CS2 archives, 350 fall below 2^26
+where composed values live (uniform 32-bit noise predicts ~102), and their low
+10 bits pile onto exactly two numbers: **trigger 10
+`MINIMENU_CLICK_MEC_OPTION1` (204 scripts)** and **trigger 17 `MEC_MOUSE_OVER`
+(65)** — map-element click and hover handlers. Everything else carries an
+ordinary jaghash of a string. **Trigger 20 `RUN_CUTSCENE_SCRIPT` has no archive
+under any of the three composed values**, so `getScript` returns null and
+`executeCutsceneScript`'s `if (script != null)` falls through. Cutscene 1's two
+lines of dialogue are in the data and nothing in this cache displays them.
+
+**Which fields drive it.** `cutscenes/<id>.json` → the action's
+`scriptStringParam` and `scriptIntParam`. Both are just the script's first
+string and int locals. Only cutscene 1 uses this action, twice.
+
+**Cryogen now dumps `cs2/name_hashes.json`** (`archiveId → nameHash`, non-zero
+only) — added 2026-08-01, since the dump wrote `cs2/<archiveId>.cs2` and threw
+the hash away, which made all 269 triggered scripts unreachable. It doesn't help
+cutscenes, which have none, but it's what lets a map element's click and hover
+handlers be found. `cs2/1044.cs2` is a chat-line builder writing to chatbox
+component 137 — a coincidence of numbering, not the hook.
+
+**What the int looks like (INFERRED, 2 samples — not traced).** It tracks the
+text length almost exactly:
+
+| text | chars | int | per char |
+| --- | --- | --- | --- |
+| "Lord Saradomin, is that you? I feel so cold." | 43 | 155 | 3.60 |
+| "Be healed, my loyal commander." | 29 | 106 | 3.66 |
+
+which reads as a subtitle display duration in client cycles (~72ms/char → 3.1s
+and 2.1s). It can't be confirmed — no script consumes it in this cache.
+
+**What is already editable.** Nothing — `CutsceneViewer` shows both fields
+read-only, and the preview doesn't run the hook.
+
+---
+
 ## Cutscene entity movement — pace, facing and the BAS sequence (TRACED 2026-08-01)
 
 **What the renderer does with it.** A cutscene walk (`BASIC_MOVEMENT`) queues a

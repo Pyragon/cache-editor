@@ -1,0 +1,101 @@
+/* Cutscene authoring page. Most of the furniture is shared (.quest-table,
+   .cell-input, .btn-pill, .save-bar); this covers the parts that are its own. */
+
+/* Clicks land on the stage wrapper rather than the canvas, so a pick still
+   works over the letterboxing either side of the 4:3 picture. */
+.cutscene-editor-stage {
+  cursor: crosshair;
+}
+
+.cutscene-editor-help {
+  max-width: 78ch;
+}
+
+.cutscene-editor-note {
+  margin: 8px 0 0;
+  color: #8fd3a0;
+}
+
+/* The current selection and what can be done with it. */
+.cutscene-editor-selection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #12141c;
+}
+
+.cutscene-editor-selname {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cfe0ff;
+}
+
+.cutscene-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cutscene-editor-empty {
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+
+.cutscene-editor-add {
+  width: auto;
+  min-width: 150px;
+}
+
+/* One action's fields, wrapping into rows rather than a column per field —
+   MOVEMENT has five, ENTITY_GFX six, and a column each made the table
+   unreadably wide. */
+.cutscene-editor-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: flex-start;
+}
+
+.cutscene-editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+}
+
+.cutscene-editor-field > span {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.cutscene-editor-field > em {
+  font-size: 10.5px;
+  font-style: normal;
+  color: #6f7688;
+  max-width: 22ch;
+  line-height: 1.35;
+}
+
+.cutscene-editor-field .cell-input,
+.cutscene-editor-field .cell-select {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  min-width: 88px;
+}
+
+/* Actions the format supports but the preview doesn't simulate — worth saying
+   so where you author them, rather than leaving you to wonder why nothing
+   happened on screen. */
+.cutscene-editor-unsimulated {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: #b08a5a;
+}
+
+.cutscene-editor-timeline td {
+  vertical-align: top;
+}

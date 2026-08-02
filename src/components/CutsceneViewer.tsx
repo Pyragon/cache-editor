@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CutsceneActionDef, CutsceneData, CutsceneDef } from '../loaders/cutscenes'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getNpcIcon, getObjectIcon, peekNpcIcon, peekObjectIcon } from './npcSnapshot'
@@ -6,6 +6,7 @@ import { SoundPlayerCell } from './SoundPlayerCell'
 import { InstrumentPlayerCell } from './InstrumentPlayerCell'
 import { SongPlayerCell } from './SongPlayerCell'
 import CutscenePlayer from './CutscenePlayer'
+import CutsceneEditor from './CutsceneEditor'
 import { CLOCK_UNITS, clockGranularity, clockShort } from './cutsceneClock'
 import type { CutsceneClockUnit } from './cutsceneClock'
 import './CutsceneViewer.css'
@@ -14,6 +15,8 @@ type Props = {
   data: CutsceneData
   onNavigate?: (entryName: string, itemId: number) => void
   cacheRoot?: FileSystemDirectoryHandle | null
+  onSave?: (data: CutsceneData) => void
+  onDirtyChange?: (dirty: boolean) => void
 }
 
 // One clear colour per camera path / entity movement on the overview canvas.
@@ -31,7 +34,44 @@ const moveTypeName = (t: number) => MOVE_TYPE_NAMES[t] ?? 'walk'
  *  the def's name and a rendered snapshot of its model. */
 type DefInfo = { name: string; icon: string | null }
 
-export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
+/** Collects resolved defs and commits them at most every `MS`, so a cast that
+ *  streams in doesn't re-render the page once per member. */
+const BATCH_MS = 250
+
+function batcher(
+  set: React.Dispatch<React.SetStateAction<Map<number, DefInfo>>>,
+  cancelled: () => boolean,
+) {
+  const pending = new Map<number, DefInfo>()
+  let last = 0
+  const commit = () => {
+    if (pending.size === 0 || cancelled()) return
+    const batch = new Map(pending)
+    pending.clear()
+    set((prev) => {
+      const next = new Map(prev)
+      for (const [id, info] of batch) next.set(id, info)
+      return next
+    })
+  }
+  return {
+    add(id: number, info: DefInfo) {
+      pending.set(id, info)
+      const now = performance.now()
+      if (now - last < BATCH_MS) return
+      last = now
+      commit()
+    },
+    done: commit,
+  }
+}
+
+export default function CutsceneViewer({ data, onNavigate, cacheRoot, onSave, onDirtyChange }: Props) {
+  // Read-only page by default; the editor is a separate surface over the same
+  // def (see CutsceneEditor). Reset when the cutscene changes so switching
+  // items never lands you in an editor for something you didn't open.
+  const [mode, setMode] = useState<'preview' | 'edit'>('preview')
+  useEffect(() => { setMode('preview') }, [data.def])
   // A hand-made or truncated JSON may omit whole sections — treat them as empty
   // rather than crashing the page. Memoized so effects can depend on it.
   const def: CutsceneDef = useMemo(() => ({
@@ -53,6 +93,11 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
     ;(async () => {
       const dir = await resolveEntryHandle(cacheRoot, getEntryPath('npcs'))
       if (!dir) return
+      // Batched at ~4Hz rather than one setState per NPC. Cast names feed the
+      // roll's lane labels, so each update rebuilt every mark in it — 21 NPCs
+      // in cutscene 11 meant 21 rebuilds of 341 marks while the page loaded.
+      // Still progressive, just not per icon.
+      const flush = batcher(setNpcInfo, () => cancelled)
       for (const id of ids) {
         try {
           const file = await (await dir.getFileHandle(`${id}.json`)).getFile()
@@ -60,9 +105,10 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
           const name = typeof npcDef.name === 'string' && npcDef.name !== 'null' ? npcDef.name : `NPC ${id}`
           const icon = peekNpcIcon(id) ?? await getNpcIcon(cacheRoot, id, npcDef)
           if (cancelled) return
-          setNpcInfo((prev) => new Map(prev).set(id, { name, icon }))
+          flush.add(id, { name, icon })
         } catch { /* NPC def unreadable — the id link still works */ }
       }
+      flush.done()
     })()
     return () => { cancelled = true }
   }, [def, cacheRoot])
@@ -78,6 +124,7 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
     ;(async () => {
       const dir = await resolveEntryHandle(cacheRoot, getEntryPath('objects'))
       if (!dir) return
+      const flush = batcher(setObjectInfo, () => cancelled)
       for (const id of ids) {
         try {
           const file = await (await dir.getFileHandle(`${id}.json`)).getFile()
@@ -85,9 +132,10 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
           const name = typeof objDef.name === 'string' && objDef.name !== 'null' ? objDef.name : `Object ${id}`
           const icon = peekObjectIcon(id) ?? await getObjectIcon(cacheRoot, id, objDef)
           if (cancelled) return
-          setObjectInfo((prev) => new Map(prev).set(id, { name, icon }))
+          flush.add(id, { name, icon })
         } catch { /* object def unreadable — the id link still works */ }
       }
+      flush.done()
     })()
     return () => { cancelled = true }
   }, [def, cacheRoot])
@@ -111,8 +159,13 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
   }
 
   const [selectedAction, setSelectedAction] = useState<number | null>(null)
-  // the preview's sim clock, so the roll can show where playback is
-  const [playCycle, setPlayCycle] = useState(0)
+  // The preview's clock reaches the roll's playhead through an imperative
+  // handle, not state: as state it re-rendered this whole page — cast table,
+  // areas, camera paths, the lot — ten times a second during playback, for a
+  // marker that moves a pixel. ActionRoll registers a setter that writes the
+  // element's `left` directly.
+  const rollHandle = useRef<{ setPlayCycle: (cycle: number) => void } | null>(null)
+  const reportCycle = useCallback((cycle: number) => rollHandle.current?.setPlayCycle(cycle), [])
   // the roll's ruler, and with it the preview's action list and transport:
   // seconds, 600ms game ticks, or the 20ms client cycles the cache stores
   const [rollUnit, setRollUnit] = useState<CutsceneClockUnit>('seconds')
@@ -132,11 +185,28 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
 
   const durationCycles = def.actions.reduce((max, a) => Math.max(max, a.lengthInCycles), 0)
 
+  if (mode === 'edit' && onSave) {
+    return (
+      <CutsceneEditor
+        data={data}
+        cacheRoot={cacheRoot ?? null}
+        onSave={onSave}
+        onDirtyChange={onDirtyChange}
+        onClose={() => setMode('preview')}
+      />
+    )
+  }
+
   return (
     <div className="item-viewer">
       <div className="item-header">
         <div className="item-title-row">
           <span className="cutscene-title">Cutscene {def.id}</span>
+          {onSave && (
+            <button type="button" className="field-link-btn" onClick={() => setMode('edit')}>
+              Edit cutscene
+            </button>
+          )}
         </div>
         <div className="item-badges">
           <span className="item-id-badge">ID {def.id}</span>
@@ -148,7 +218,7 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
       <section className="item-section">
         <h3>Preview</h3>
         {cacheRoot
-          ? <CutscenePlayer def={def} rootHandle={cacheRoot} onCycle={setPlayCycle} unit={rollUnit} />
+          ? <CutscenePlayer def={def} rootHandle={cacheRoot} onCycle={reportCycle} unit={rollUnit} />
           : <p className="cutscene-note">Reopen the cache to play this cutscene.</p>}
       </section>
 
@@ -178,7 +248,7 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot }: Props) {
           entityName={rollEntityName}
           selected={selectedAction}
           onSelect={setSelectedAction}
-          playCycle={playCycle}
+          handle={rollHandle}
           unit={rollUnit}
         />
         {/* A selected mark always shows its own row — that is what clicking it
@@ -391,16 +461,18 @@ function actionLane(a: CutsceneActionDef, entityName: (i: number) => string): { 
  *  of them — which is why some piles looked touching and others didn't. */
 const MARK_W = 9
 
-function ActionRoll({ def, entityName, selected, onSelect, playCycle, unit }: {
+function ActionRoll({ def, entityName, selected, onSelect, handle, unit }: {
   def: CutsceneDef
   entityName: (index: number) => string
   selected: number | null
   onSelect: (index: number | null) => void
-  /** where the preview's clock is, or 0 when it hasn't started */
-  playCycle: number
+  /** The preview writes its clock here. Deliberately imperative — see the note
+   *  at the call site; a state prop re-rendered the whole page per update. */
+  handle: React.RefObject<{ setPlayCycle: (cycle: number) => void } | null>
   /** what the ruler counts in — seconds, 600ms game ticks, or raw cycles */
   unit: CutsceneClockUnit
 }) {
+  const playheadRef = useRef<HTMLDivElement>(null)
   const { lanes, laneOf, stackAt, maxCycle } = useMemo(() => {
     const byKey = new Map<string, { key: string; label: string; order: number }>()
     const laneOf: string[] = []
@@ -429,29 +501,20 @@ function ActionRoll({ def, entityName, selected, onSelect, playCycle, unit }: {
     }
   }, [def, entityName])
 
-  // Aim for a dozen gridlines however long the cutscene is, snapped to the
-  // displayed unit's own granularity (50 cycles to a second, 30 to a tick) so
-  // every label comes out a whole number rather than 1.7t, 3.3t, 5t…
-  const gran = clockGranularity(unit)
-  const step = Math.max(gran, Math.ceil(maxCycle / 12 / gran) * gran)
-  const ticks: number[] = []
-  for (let c = 0; c <= maxCycle; c += step) ticks.push(c)
-
-  if (lanes.length === 0) return <p className="cutscene-note">No actions.</p>
-
-  return (
-    <div className="cutscene-roll">
-      <div className="cutscene-roll-side">
-        <div className="cutscene-roll-corner" />
-        {lanes.map((l) => <div key={l.key} className="cutscene-roll-lane-label">{l.label}</div>)}
-      </div>
-      <div className="cutscene-roll-grid">
-        {playCycle > 0 && (
-          <div
-            className="cutscene-roll-playhead"
-            style={{ left: `${Math.min(100, (playCycle / maxCycle) * 100)}%` }}
-          />
-        )}
+  // Everything except the playhead, built once and reused while playback moves.
+  // The playhead updates ~10× a second and this is 341 marks plus their lanes
+  // in cutscene 11 — without the memo, reconciling all of them was a
+  // significant slice of every frame. Nothing in here depends on playCycle.
+  const grid = useMemo(() => {
+    // Aim for a dozen gridlines however long the cutscene is, snapped to the
+    // displayed unit's own granularity (50 cycles to a second, 30 to a tick) so
+    // every label comes out a whole number rather than 1.7t, 3.3t, 5t…
+    const gran = clockGranularity(unit)
+    const step = Math.max(gran, Math.ceil(maxCycle / 12 / gran) * gran)
+    const ticks: number[] = []
+    for (let c = 0; c <= maxCycle; c += step) ticks.push(c)
+    return (
+      <>
         <div className="cutscene-roll-ticks">
           {ticks.map((c, i) => (
             <span
@@ -501,6 +564,35 @@ function ActionRoll({ def, entityName, selected, onSelect, playCycle, unit }: {
             })() : null))}
           </div>
         ))}
+      </>
+    )
+  }, [def, lanes, laneOf, stackAt, maxCycle, selected, onSelect, unit])
+
+  useEffect(() => {
+    handle.current = {
+      setPlayCycle: (cycle) => {
+        const el = playheadRef.current
+        if (!el) return
+        // hidden at 0 rather than parked on the left edge, which read as an
+        // event at cycle 0
+        el.style.display = cycle > 0 ? '' : 'none'
+        el.style.left = `${Math.min(100, (cycle / maxCycle) * 100)}%`
+      },
+    }
+    return () => { handle.current = null }
+  }, [handle, maxCycle])
+
+  if (lanes.length === 0) return <p className="cutscene-note">No actions.</p>
+
+  return (
+    <div className="cutscene-roll">
+      <div className="cutscene-roll-side">
+        <div className="cutscene-roll-corner" />
+        {lanes.map((l) => <div key={l.key} className="cutscene-roll-lane-label">{l.label}</div>)}
+      </div>
+      <div className="cutscene-roll-grid">
+        <div ref={playheadRef} className="cutscene-roll-playhead" style={{ display: 'none' }} />
+        {grid}
       </div>
     </div>
   )
@@ -715,7 +807,15 @@ function ActionDetails({ action, entityLabel, objectLabel, cacheRoot }: {
     case 'SET_BIT_VARIABLE':
       return <>set cutscene varbit {f.key} = {f.value}</>
     case 'EXECUTE_SCRIPT':
-      return <>run cutscene script hook “{f.scriptStringParam}” with arg {f.scriptIntParam}</>
+      // Both fields are ARGUMENTS, not identifiers: the client resolves the
+      // script from the cutscene itself — it scans the CS2 index for the
+      // archive whose 32-bit nameHash equals `20 | cutsceneId << 10` (trigger
+      // RUN_CUTSCENE_SCRIPT = 20) — and hands it these as its first string and
+      // int locals. See EDITOR.md; the dump drops those hashes, so we can't
+      // name the script.
+      return <>
+        run this cutscene’s script with “{f.scriptStringParam}” and {f.scriptIntParam}
+      </>
     case 'APPLY_HITMARK':
       return <>
         hit {entityLabel(f.entityIndex)}{f.hitsplatId != null ? <> — hitsplat {f.hitsplatId} showing {f.hitText}</> : null}

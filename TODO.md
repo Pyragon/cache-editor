@@ -330,6 +330,42 @@ real cache, in rough risk order:
 
 ## Cutscenes
 
+### Editor — first cut landed 2026-08-01, UNTESTED
+
+"Edit cutscene" on the cutscene page opens `CutsceneEditor`: the same simulated
+scene, plus picking and an editable timeline. The loader gained save/create/
+clone/delete, so the item list's Add, Clone and Remove buttons all work — Add
+makes a blank cutscene (one 8×8 area per plane, the fade-in every shipped
+cutscene opens with, and a FINISHED), Clone deep-copies the selected one. Both
+arrive staged in memory with the Discard/Save banner, so an unwanted one costs
+nothing.
+
+Working model is "the clock is the cursor" — scrub, then click. Picking hits
+entities, spawned objects and the ground; the ground pick reports a cutscene
+tile and the plane whose mesh was hit. An entity stays "active" across a tile
+click so walking is select-entity-then-click-tiles, and clicking more tiles at
+the same cycle extends the same route rather than starting new ones.
+
+Camera work is modelled as a SHOT — a DIRECT_CAMERA_MOVEMENT plus the two paths
+it names — because a move reads the position array of each path (the aim path's
+positions ARE the target; its target columns are the spline's control handles),
+and nothing in the format records which two paths belong together except the
+action. So capturing creates both at once and writes the action immediately.
+
+Not done / worth a look when testing:
+- **Keyframe timestamps are all 0.** Shipped paths have them too, and the sim
+  ignores them (progress comes from the action's spline speeds), but if the real
+  client uses them a captured shot will time differently.
+- **No undo.** Discard reverts to the last save, and that's it.
+- **Removing a ROUTE isn't repointed** the way cast and object removal now are
+  (`repointActions` drops the actions that used the removed entry and shifts
+  higher indices down) — there is no route-removal UI yet, so nothing can
+  trigger it, but adding one needs the same treatment. Camera paths likewise.
+- **No region picker** for map areas — the table takes raw region tile coords.
+- Field editing has no validation beyond min/max; a nonsense value saves.
+- `EXECUTE_SCRIPT` can be authored but does nothing (no cutscene script exists —
+  see EDITOR.md).
+
 - **OPEN BUG (2026-07-28, 3 failed fixes): Saradomin's eye billboards missing
   at his teleport-in and in the end wide shot of cutscene 1** (they DO show in
   the mid-scene close shots). VERIFIED NOT the cause: the data (host faces

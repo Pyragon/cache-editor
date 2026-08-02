@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import type { CutsceneDef } from '../loaders/cutscenes'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
@@ -17,7 +17,8 @@ import type { AnimationDef } from '../loaders/animations'
 import { frameFileId } from '../loaders/animations'
 import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
 import type { AnimationFrameSetData } from '../loaders/animation_frame_sets'
-import { applyAnimationFrame } from '../loaders/skeletalAnimation'
+import { applyAnimationFrame, makePoseScratch } from '../loaders/skeletalAnimation'
+import type { PoseScratch } from '../loaders/skeletalAnimation'
 import type { PosedVertices } from '../loaders/skeletalAnimation'
 import {
   DEFAULT_SUN, LocAssets, SceneMosaic, averageHeight, blurShadowGrid, buildAnimatedLocMesh, buildLightGrid,
@@ -43,6 +44,29 @@ import './CutsceneViewer.css'
 
 const REGION_UNITS = SIZE * 512
 const ONE_V3 = new THREE.Vector3(1, 1, 1)
+
+/** Cull sphere around a 1-tile thing, scaled by its footprint. Deliberately
+ *  loose — three tiles clears the tallest cutscene NPC, and over-including
+ *  costs a pose while under-including would pop one. */
+const CULL_RADIUS = 1536
+const frustum = new THREE.Frustum()
+const frustumMatrix = new THREE.Matrix4()
+const cullSphere = new THREE.Sphere()
+const yawEuler = new THREE.Euler()
+const yawQuat = new THREE.Quaternion()
+/** How far ahead of the camera the free-look control orbits — a few tiles, the
+ *  distance a cutscene camera usually frames its subject at. */
+const ORBIT_DISTANCE = 1800
+/** How far the selected-tile marker sits above the ground — enough to clear
+ *  z-fighting with the terrain, not enough to read as floating. */
+const TILE_MARK_LIFT = 6
+const picker = new THREE.Raycaster()
+const pickNdc = new THREE.Vector2()
+const pickDir = new THREE.Vector3()
+const splineFrom: [number, number, number] = [0, 0, 0]
+const splineTo: [number, number, number] = [0, 0, 0]
+const fadeNow: number[] = [0, 0, 0, 0]
+const ZERO_FADE: readonly number[] = [0, 0, 0, 0]
 
 // The client's pass order, same as the map scene: opaque objects, then ground,
 // then transparent objects back-to-front (MeshRasterizer_Sub3 /
@@ -91,11 +115,39 @@ const VOLUME_KEY = 'cache-editor:cutscene-volume'
 /** No def to read ambient/contrast from, so the client's base values. */
 const PLAYER_LIGHTING = { ambient: 64, contrast: 850 }
 
+/** What a scene tile pick resolves to, in CUTSCENE tile coords — the same
+ *  space every action's `x`/`y` is written in. */
+export type PickedTile = { x: number; y: number; plane: number }
+
+/** The editor's window into the running scene: what's under the pointer, where
+ *  the camera is, and whether the user may fly it. Deliberately imperative —
+ *  none of it belongs in React state, and the scene is rebuilt on its own
+ *  schedule (see sceneKey). */
+export type CutsceneSceneHandle = {
+  pickTile: (clientX: number, clientY: number) => PickedTile | null
+  /** Cast index of the entity under the pointer, or null. */
+  pickEntity: (clientX: number, clientY: number) => number | null
+  /** Index into `def.objects` of the spawned object under the pointer. */
+  pickObject: (clientX: number, clientY: number) => number | null
+  /** Camera position and look-at target, in the units camera paths store. */
+  cameraPose: () => { pos: [number, number, number]; target: [number, number, number] }
+  /** Point the camera somewhere, for previewing a keyframe being authored. */
+  setCameraPose: (pos: [number, number, number], target: [number, number, number]) => void
+  /** Outline a tile in the scene, or clear it with null. */
+  setTileHighlight: (tile: PickedTile | null) => void
+  /** While on, the user orbits/dollies the camera and the cutscene's own camera
+   *  actions stop driving it. */
+  setFreeCamera: (on: boolean) => void
+  isFreeCamera: () => boolean
+}
+
 type Props = {
   def: CutsceneDef
   rootHandle: FileSystemDirectoryHandle
   /** Reports the sim clock so the page's action roll can draw a playhead. */
   onCycle?: (cycle: number) => void
+  /** Editing surface. Present = the editor is driving; see CutsceneSceneHandle. */
+  sceneHandle?: React.RefObject<CutsceneSceneHandle | null>
   /** Clock unit for the action list and transport readout, shared with the
    *  roll's pill so the whole page counts the same way. */
   unit?: CutsceneClockUnit
@@ -125,6 +177,12 @@ type AnimHolder = {
   em: EntityMesh | null
   animPending: number
   animCommitted: number
+  /** pose buffers owned by this instance — see tryPoseSync */
+  scratch?: PoseScratch
+  /** outside the camera on the last frame, so posing it is wasted work */
+  offScreen?: boolean
+  /** its frame advanced while off-screen — pose it as soon as it's visible */
+  poseDirty?: boolean
   /** attachment driver — called with every posed frame */
   onPosed?: (posed: PosedVertices) => void
 }
@@ -222,8 +280,7 @@ type FadeRt = { from: number[]; to: number[]; startCycle: number; endCycle: numb
 /** Client Bezier segment (Camera.calculateCutsceneCameraPosition): rows are the
  *  interleaved [pos, target] keyframe pairs; the segment from keyframe k to k+1
  *  uses rows 2k..2k+3, with the target rows acting as control handles. */
-function splinePoint(rows: number[][], kf: number, t: number): [number, number, number] {
-  const out: [number, number, number] = [0, 0, 0]
+function splinePoint(rows: number[][], kf: number, t: number, out: [number, number, number] = [0, 0, 0]): [number, number, number] {
   const i4 = kf * 2
   const r0 = rows[i4] ?? [0, 0, 0, 0]
   const r1 = rows[i4 + 1] ?? r0
@@ -283,9 +340,10 @@ function actionGroupClass(type: string): string {
   return 'misc'
 }
 
-export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'seconds' }: Props) {
+export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'seconds', sceneHandle }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fadeRef = useRef<HTMLDivElement>(null)
+  const perfRef = useRef<HTMLSpanElement>(null)
   // The scene build's teardown force-loses the WebGL context: three's dispose()
   // doesn't free it and a tab only gets ~16. But a canvas lost that way can
   // never hand out another context — getContext keeps returning the same dead
@@ -301,11 +359,22 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   // anyway, so a full rebuild is the honest option rather than a special case.
   const [varGen, setVarGen] = useState(0)
   useEffect(() => onVarOverridesChanged(() => setVarGen((g) => g + 1)), [])
-  const buildGen = useRef({ def, rootHandle, varGen, n: 0 })
-  const switchedBuild = buildGen.current.def !== def
+
+  // What the BUILD depends on, as a value rather than an identity. Areas decide
+  // the terrain, entities and objects decide which meshes exist; everything else
+  // — actions, walk routes, camera paths — is read live by the sim, so editing
+  // the timeline must not tear the scene down and reload it. The editor hands
+  // this component a new def object on every keystroke, and without this each
+  // one would cost a full rebuild.
+  const sceneKey = useMemo(
+    () => JSON.stringify({ a: def.areas, e: def.entities, o: def.objects }),
+    [def],
+  )
+  const buildGen = useRef({ sceneKey, rootHandle, varGen, n: 0 })
+  const switchedBuild = buildGen.current.sceneKey !== sceneKey
     || buildGen.current.rootHandle !== rootHandle
     || buildGen.current.varGen !== varGen
-  if (switchedBuild) buildGen.current = { def, rootHandle, varGen, n: buildGen.current.n + 1 }
+  if (switchedBuild) buildGen.current = { sceneKey, rootHandle, varGen, n: buildGen.current.n + 1 }
   const [status, setStatus] = useState('Assembling scene…')
   const [ready, setReady] = useState(false)
   // Not autoplaying: the player is a page section now rather than something
@@ -315,7 +384,6 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   // kept in a ref so the rAF loop can report without re-subscribing
   const onCycleRef = useRef(onCycle)
   onCycleRef.current = onCycle
-  useEffect(() => { onCycleRef.current?.(cycle) }, [cycle])
   const [warnings, setWarnings] = useState<string[]>([])
   // Volume is a preference, not scene state: it outlives this cutscene, the
   // next one, and the session (same convention as the map viewer's POV
@@ -341,7 +409,12 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   useEffect(() => {
     rt.current.audible = playing
     if (playing) audioRef.current?.resume()
-    else audioRef.current?.pause()
+    else {
+      audioRef.current?.pause()
+      // the sim clock is only pushed into state at ~10Hz while playing, so on
+      // pause it can be a few cycles stale — land on the real one
+      setCycle(rt.current.cycle)
+    }
   }, [playing])
 
   useEffect(() => {
@@ -363,6 +436,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void
       model: ModelData
       animationId: number
+      /** world-space bounds, for skipping the pose when it's out of shot */
+      sphere: THREE.Sphere
       animator?: LocAnimator
       billboards?: import('./sceneBillboards').AnimatedBillboards
     }[]
@@ -390,6 +465,12 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     /** false while a seek replays history, so it stays silent */
     audible: boolean
     disposed: boolean
+    /** terrain meshes, kept for the editor's tile picking */
+    terrainMeshes: THREE.Mesh[]
+    /** the editor's selected-tile marker, built on first use */
+    tileHighlight: THREE.Group | null
+    /** editor is flying the camera — cutscene camera actions stop applying */
+    freeCamera: boolean
   }>(null!)
   if (!rt.current) {
     rt.current = {
@@ -416,6 +497,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       finished: false,
       audible: false,
       disposed: false,
+      terrainMeshes: [],
+      tileHighlight: null,
+      freeCamera: false,
       composer: null,
       sky: null,
       particles: null,
@@ -449,14 +533,22 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   // +1 because an action fires when the clock REACHES its cycle: stopping the
   // sim at the FINISHED cycle itself would leave that action (and anything else
   // sharing the cycle) unapplied, which is what made the end read 134/135.
-  const finishCycle = def.actions.find((a) => a.type === 'FINISHED')?.lengthInCycles
-  const durationCycles = finishCycle != null
-    ? finishCycle + 1
-    : def.actions.reduce((m, a) => Math.max(m, a.lengthInCycles), 0) + 50
-  // Distinct action start cycles, for the step-by-action buttons. An action at
-  // start s is applied once the sim clock passes it (cycle > s), so "jump to
-  // this action" means seek(s + 1).
-  const actionStarts = [...new Set(def.actions.map((a) => a.lengthInCycles))].sort((a, b) => a - b)
+  //
+  // Both derived once per cutscene rather than per render — the clock re-renders
+  // this component several times a second and these are a find, a reduce, a Set
+  // and a sort over every action (341 of them in cutscene 11).
+  const { durationCycles, actionStarts } = useMemo(() => {
+    const finishCycle = def.actions.find((a) => a.type === 'FINISHED')?.lengthInCycles
+    return {
+      durationCycles: finishCycle != null
+        ? finishCycle + 1
+        : def.actions.reduce((m, a) => Math.max(m, a.lengthInCycles), 0) + 50,
+      // Distinct action start cycles, for the step-by-action buttons. An action
+      // at start s is applied once the sim clock passes it (cycle > s), so
+      // "jump to this action" means seek(s + 1).
+      actionStarts: [...new Set(def.actions.map((a) => a.lengthInCycles))].sort((a, b) => a - b),
+    }
+  }, [def])
 
   // Played to the end: the FINISHED action fired, or the clock ran out. Keyed
   // off `cycle` (state) rather than the runtime so the button re-renders.
@@ -487,16 +579,51 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   }
 
 
+  // Tooltips built once per cutscene, not per render: the list re-renders on
+  // every clock update and this was 341 JSON.stringify calls each time.
+  const actionTitles = useMemo(
+    () => def.actions.map((a) => `Jump here (${JSON.stringify(a.fields ?? {})})`),
+    [def],
+  )
+
   // Sidebar action list: the most recently applied start's actions are
   // "current"; keep them scrolled into view as playback advances.
   const actionListRef = useRef<HTMLUListElement>(null)
+  const cursor = rt.current.cursor
   // `?.` on principle: the cursor is sim state and this is render, so any future
   // path that lets the two drift must not be able to take the panel down again.
-  const lastAppliedStart = def.actions[rt.current.cursor - 1]?.lengthInCycles ?? -1
+  const lastAppliedStart = def.actions[cursor - 1]?.lengthInCycles ?? -1
+
+  // Built only when the CURSOR moves, not on every clock update. The clock goes
+  // into state ~10×/s while cutscene 11's actions fire about 4×/s, so most of
+  // those updates would reconcile all 341 items for no visual change. `seek` is
+  // reached through a ref because it's a fresh closure every render, which
+  // would defeat the memo.
+  const seekRef = useRef<(target: number) => void>(null!)
+  const actionItems = useMemo(() => def.actions.map((a, i) => {
+    const state = i < cursor ? (a.lengthInCycles === lastAppliedStart ? 'current' : 'done') : 'pending'
+    return (
+      <li key={i}>
+        <button
+          type="button"
+          className={`cutscene-player-action cutscene-player-action-${state}`}
+          title={actionTitles[i]}
+          onClick={() => { seekRef.current(a.lengthInCycles + 1); setPlaying(false) }}
+        >
+          <span className="cutscene-player-action-time">{clockShort(a.lengthInCycles, unit)}</span>
+          <span className={`cutscene-action-badge cutscene-action-${actionGroupClass(a.type)}`}>{a.type.toLowerCase().replace(/_/g, ' ')}</span>
+        </button>
+      </li>
+    )
+  }), [def, cursor, lastAppliedStart, actionTitles, unit])
+  // Keyed on the CURSOR, not the clock: the row to scroll to only moves when an
+  // action fires, so following the clock re-ran this (and its layout reads) for
+  // nothing most of the time. The row is indexed off `children` rather than
+  // found with querySelector, which was a scan of all 341 items.
   useEffect(() => {
     const list = actionListRef.current
-    if (!list) return
-    const current = list.querySelector<HTMLElement>('.cutscene-player-action-current')
+    if (!list || cursor === 0) return
+    const current = list.children[cursor - 1] as HTMLElement | undefined
     if (!current) return
     // Scroll the LIST, never scrollIntoView. That walks every scrollable
     // ancestor including the page, so while playing it fired on each cycle and
@@ -505,7 +632,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     const bottom = top + current.offsetHeight
     if (top < list.scrollTop) list.scrollTop = top
     else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight
-  }, [cycle])
+  }, [cursor])
 
   // ------------------------------------------------------------------ helpers
 
@@ -543,7 +670,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     // model billboards (Saradomin's eyes) live outside the group — move and
     // show/hide them with it, re-anchoring at the held pose if any
     if (e.bb && e.bbMatrix) {
-      e.bbMatrix.compose(e.group.position, new THREE.Quaternion().setFromEuler(new THREE.Euler(0, e.yaw, 0)), ONE_V3)
+      // scratch, not fresh objects: this runs per entity per cycle
+      yawEuler.set(0, e.yaw, 0)
+      e.bbMatrix.compose(e.group.position, yawQuat.setFromEuler(yawEuler), ONE_V3)
       e.bb.setVisible(e.placed)
       if (e.placed) e.bb.pose(e.lastPosed)
     }
@@ -650,6 +779,8 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     poseModel?: ModelData
     /** attachment driver (billboards riding the pose) */
     onPosed?: (posed: PosedVertices) => void
+    /** this instance's pose buffers, allocated on first use */
+    scratch?: PoseScratch
   }
 
   /** Pose from the resolved mirrors. False = something still loading. */
@@ -676,7 +807,12 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     // clock, so a 60fps render tweens smoothly through 20ms sim ticks
     const elapsed = anim.acc + Math.min(rt.current.msAcc / CYCLE_MS, 0.999)
     const duration = Math.max(1, anim.def.frameDurations?.[anim.frame] ?? 1)
-    const posed = applyAnimationFrame(poseModel, frameBase, frame, next, elapsed, duration)
+    // Posed into this holder's OWN buffers rather than three fresh arrays each
+    // time. Per holder, not per model: gfx of the same id share a composite,
+    // and entities keep their last pose (billboards read it), so a buffer
+    // shared between two live things would have them overwrite each other.
+    e.scratch ??= makePoseScratch(poseModel)
+    const posed = applyAnimationFrame(poseModel, frameBase, frame, next, elapsed, duration, e.scratch)
     if (posed) {
       if (e.em) applyPose(e.em, posed)
       e.onPosed?.(posed)
@@ -1072,9 +1208,13 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     }
   }
 
-  const fadeColorAt = (fade: NonNullable<FadeRt>, at: number): number[] => {
+  /** `out` lets the per-frame caller avoid allocating; FADE_SCREEN's own use
+   *  needs a fresh array, since it stores the result. */
+  const fadeColorAt = (fade: NonNullable<FadeRt>, at: number, out?: number[]): number[] => {
     const t = fade.endCycle <= fade.startCycle ? 1 : Math.min(Math.max((at - fade.startCycle) / (fade.endCycle - fade.startCycle), 0), 1)
-    return fade.from.map((v, i) => v + (fade.to[i] - v) * t)
+    const target = out ?? new Array<number>(fade.from.length)
+    for (let i = 0; i < fade.from.length; i++) target[i] = fade.from[i] + (fade.to[i] - fade.from[i]) * t
+    return target
   }
 
   // ------------------------------------------------------------ per-cycle sim
@@ -1130,7 +1270,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     }
     // animation frames for entities, spawned objects and in-flight gfx
     // (durations are client cycles). Returns true when a one-shot finished.
-    const stepAnim = (holder: { anim: AnimState | null; em: EntityMesh | null }): boolean => {
+    const stepAnim = (holder: AnimHolder): boolean => {
       if (!holder.anim) return false
       const durations = holder.anim.def.frameDurations ?? []
       if (durations.length === 0) return false
@@ -1146,7 +1286,11 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         } else {
           holder.anim.frame++
         }
-        void poseEntityFrame(holder)
+        // Off-screen, the new frame is noted and posed when it next comes into
+        // view — the pose is what's expensive and nothing can see it meanwhile.
+        // The animation's own state advanced either way, so it stays in step.
+        if (holder.offScreen) holder.poseDirty = true
+        else void poseEntityFrame(holder)
       }
       return false
     }
@@ -1171,18 +1315,173 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     r.cycle++
   }
 
+  // ----------------------------------------------------------------- editing
+  //
+  // Everything below is inert unless the editor passed a `sceneHandle`. It
+  // reads the live scene rather than React state, because the scene is rebuilt
+  // on its own schedule and a click has to resolve against what's on screen.
+
+  /** Pointer position in normalised device coords, or null if off the canvas. */
+  const ndcAt = (clientX: number, clientY: number): THREE.Vector2 | null => {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) return null
+    pickNdc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1)
+    return pickNdc
+  }
+
+  /**
+   * The selected-tile marker: a translucent quad with a bright outline, built
+   * once and moved. Its four corners each take the ground height at that
+   * corner, so it lies flush on a slope instead of hovering over one edge —
+   * lifted a few units and drawn without depth writes so it reads as paint on
+   * the ground rather than a box sunk into it.
+   */
+  const tileHighlight = (): THREE.Group => {
+    const r = rt.current
+    if (r.tileHighlight) return r.tileHighlight
+    const group = new THREE.Group()
+    const positions = new THREE.BufferAttribute(new Float32Array(4 * 3), 3)
+    const fill = new THREE.BufferGeometry()
+    fill.setAttribute('position', positions)
+    fill.setIndex([0, 1, 2, 0, 2, 3])
+    const fillMesh = new THREE.Mesh(fill, new THREE.MeshBasicMaterial({
+      color: 0x4fc3f7,
+      transparent: true,
+      opacity: 0.3,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }))
+    // the outline shares the same buffer, so moving the tile moves both
+    const outline = new THREE.BufferGeometry()
+    outline.setAttribute('position', positions)
+    const outlineMesh = new THREE.LineLoop(outline, new THREE.LineBasicMaterial({
+      color: 0x9fe4ff,
+      transparent: true,
+      depthWrite: false,
+    }))
+    for (const mesh of [fillMesh, outlineMesh]) {
+      mesh.frustumCulled = false
+      mesh.renderOrder = ORDER_TRANSPARENT_LOC + 1
+      mesh.raycast = () => {} // never picks itself
+      group.add(mesh)
+    }
+    group.visible = false
+    r.scene.add(group)
+    r.tileHighlight = group
+    return group
+  }
+
+  const raycastAt = (clientX: number, clientY: number, targets: THREE.Object3D[]) => {
+    const ndc = ndcAt(clientX, clientY)
+    if (!ndc || targets.length === 0) return null
+    picker.setFromCamera(ndc, rt.current.camera)
+    const hits = picker.intersectObjects(targets, true)
+    return hits.length > 0 ? hits[0] : null
+  }
+
+  useEffect(() => {
+    if (!sceneHandle) return
+    const r = rt.current
+    sceneHandle.current = {
+      pickTile: (clientX, clientY) => {
+        const hit = raycastAt(clientX, clientY, r.terrainMeshes)
+        if (!hit) return null
+        // Scene space is x = fine east, z = −fine north (see placeEntity), and
+        // a tile is 512 fine units.
+        const x = Math.floor(hit.point.x / 512)
+        const y = Math.floor(-hit.point.z / 512)
+        if (x < 0 || y < 0) return null
+        // The plane a cutscene action names is the CUTSCENE plane; the visible
+        // ground is whichever plane's mesh was hit, and the terrain meshes are
+        // added plane by plane, so the hit's own mesh knows.
+        return { x, y, plane: (hit.object.userData.cutscenePlane as number) ?? 0 }
+      },
+      pickEntity: (clientX, clientY) => {
+        const groups = r.entities.filter((e) => e.placed).map((e) => e.group)
+        const hit = raycastAt(clientX, clientY, groups)
+        if (!hit) return null
+        let node: THREE.Object3D | null = hit.object
+        while (node) {
+          const index = r.entities.findIndex((e) => e.group === node)
+          if (index >= 0) return index
+          node = node.parent
+        }
+        return null
+      },
+      pickObject: (clientX, clientY) => {
+        const groups = r.objects.filter((o): o is ObjectRt => o != null && o.group.visible).map((o) => o.group)
+        const hit = raycastAt(clientX, clientY, groups)
+        if (!hit) return null
+        let node: THREE.Object3D | null = hit.object
+        while (node) {
+          const index = r.objects.findIndex((o) => o?.group === node)
+          if (index >= 0) return index
+          node = node.parent
+        }
+        return null
+      },
+      cameraPose: () => {
+        // Camera paths store (x, height, z) with z POSITIVE north, the mirror
+        // of the scene's −z; the look target is a point on the view ray.
+        r.camera.getWorldDirection(pickDir)
+        const p = r.camera.position
+        return {
+          pos: [Math.round(p.x), Math.round(p.y), Math.round(-p.z)],
+          target: [
+            Math.round(p.x + pickDir.x * 512),
+            Math.round(p.y + pickDir.y * 512),
+            Math.round(-(p.z + pickDir.z * 512)),
+          ],
+        }
+      },
+      setCameraPose: (pos, target) => {
+        r.camera.position.set(pos[0], pos[1], -pos[2])
+        r.camera.lookAt(target[0], target[1], -target[2])
+      },
+      setTileHighlight: (tile) => {
+        const group = tileHighlight()
+        if (!tile) { group.visible = false; return }
+        const attr = (group.children[0] as THREE.Mesh).geometry.getAttribute('position') as THREE.BufferAttribute
+        const corners: [number, number][] = [
+          [tile.x, tile.y],
+          [tile.x + 1, tile.y],
+          [tile.x + 1, tile.y + 1],
+          [tile.x, tile.y + 1],
+        ]
+        for (let i = 0; i < 4; i++) {
+          const fineX = corners[i][0] * 512
+          const fineY = corners[i][1] * 512
+          attr.setXYZ(i, fineX, groundY(fineX, fineY, tile.plane) + TILE_MARK_LIFT, -fineY)
+        }
+        attr.needsUpdate = true
+        group.visible = true
+      },
+      setFreeCamera: (on) => { r.freeCamera = on },
+      isFreeCamera: () => r.freeCamera,
+    }
+    return () => { sceneHandle.current = null }
+    // the handle closes over refs, which are stable for the component's life
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sceneHandle])
+
   const applyCameraAndFade = () => {
     const r = rt.current
-    if (r.camRt) {
+    // While the editor is flying the camera, the cutscene's own camera actions
+    // stop moving it — otherwise composing a shot fights the timeline. Fades
+    // still apply, so what you frame is what the scene looks like.
+    if (r.camRt && !r.freeCamera) {
       const t = r.camRt.progress / 65535
-      const from = splinePoint(r.camRt.posRows, r.camRt.posKf, t)
-      const to = splinePoint(r.camRt.lookRows, r.camRt.lookKf, t)
+      // into scratch — this runs every rendered frame
+      const from = splinePoint(r.camRt.posRows, r.camRt.posKf, t, splineFrom)
+      const to = splinePoint(r.camRt.lookRows, r.camRt.lookKf, t, splineTo)
       r.camera.position.set(from[0], from[1], -from[2])
       r.camera.lookAt(to[0], to[1], -to[2])
       r.focusY = to[1]
     }
     if (fadeRef.current) {
-      const c = r.fade ? fadeColorAt(r.fade, r.cycle) : [0, 0, 0, 0]
+      const c = r.fade ? fadeColorAt(r.fade, r.cycle, fadeNow) : ZERO_FADE
       fadeRef.current.style.background = `rgba(${c[1] | 0}, ${c[2] | 0}, ${c[3] | 0}, ${(c[0] / 255).toFixed(3)})`
     }
   }
@@ -1227,6 +1526,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     applyCameraAndFade()
     setCycle(r.cycle)
   }
+  // the memoized action list calls seek through this, so its buttons don't have
+  // to be rebuilt every render just to capture a fresh closure
+  seekRef.current = seek
 
   // ------------------------------------------------------------ scene setup
 
@@ -1253,6 +1555,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     let cancelled = false
     let disposeResize: (() => void) | null = null
     let stopLoop: (() => void) | null = null
+    let disposeControls: (() => void) | null = null
     ;(async () => {
       try {
         const mapsDir = await resolveEntryHandle(rootHandle, getEntryPath('maps'))
@@ -1353,7 +1656,18 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
               // keep the pose hook — rendered at rest, a torch's flame model is
               // a tall authored stack of licks; the idle animation is what
               // collapses it into a flame. Billboards ride the same pose.
+              // World-space bounds for the frustum test below. Off the rest
+              // pose, so it's padded: an animated flame stretches well past the
+              // geometry it was built from, and over-including only costs a
+              // pose while under-including would freeze one in view.
+              anim.mesh.geometry.computeBoundingSphere()
+              const rest = anim.mesh.geometry.boundingSphere
+              const sphere = rest
+                ? rest.clone().applyMatrix4(placedMatrix)
+                : new THREE.Sphere(new THREE.Vector3().setFromMatrixPosition(placedMatrix), CULL_RADIUS)
+              sphere.radius = sphere.radius * 1.5 + 256
               r.animLocs.push({
+                sphere,
                 update: anim.update,
                 model: al.model,
                 animationId: al.animationId,
@@ -1413,6 +1727,10 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
               terrainMesh.position.set(offsetX, 0, offsetZ)
               terrainMesh.renderOrder = ORDER_TERRAIN
               r.scene.add(terrainMesh)
+              // the editor raycasts these to turn a click into a tile, and needs
+              // to know which plane it landed on
+              terrainMesh.userData.cutscenePlane = plane
+              r.terrainMeshes.push(terrainMesh)
             }
           }
         }
@@ -1682,6 +2000,92 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
 
         const canvas = canvasRef.current!
         r.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
+        // three resets renderer.info at the top of every render(), and the
+        // composer runs several per frame — so reading the counters afterwards
+        // reports only its final fullscreen pass. Take over the reset (see the
+        // same note in MapSceneViewer).
+        r.renderer.info.autoReset = false
+
+        // Free-camera controls, live only while the editor has turned them on.
+        // Orbit around the point the camera looks at, dolly with the wheel,
+        // right-drag to pan — enough to frame a shot and capture it as a
+        // keyframe. Deliberately not OrbitControls: the camera here is defined
+        // by a position and a look-at pair that get written into a cutscene's
+        // camera path, so the control has to keep those two as the truth.
+        {
+          let dragging: 0 | 1 | 2 = 0
+          let lastX = 0
+          let lastY = 0
+          const target = new THREE.Vector3()
+          const offset = new THREE.Vector3()
+          const spherical = new THREE.Spherical()
+          const focus = () => {
+            r.camera.getWorldDirection(pickDir)
+            // orbit about a point a few tiles ahead, which is what a cutscene
+            // camera is almost always framing
+            target.copy(r.camera.position).addScaledVector(pickDir, ORBIT_DISTANCE)
+          }
+          const onDown = (e: PointerEvent) => {
+            if (!r.freeCamera) return
+            dragging = e.button === 2 ? 2 : 1
+            lastX = e.clientX
+            lastY = e.clientY
+            focus()
+            canvas.setPointerCapture(e.pointerId)
+            e.preventDefault()
+          }
+          const onMove = (e: PointerEvent) => {
+            if (!r.freeCamera || dragging === 0) return
+            const dx = e.clientX - lastX
+            const dy = e.clientY - lastY
+            lastX = e.clientX
+            lastY = e.clientY
+            if (dragging === 1) {
+              offset.copy(r.camera.position).sub(target)
+              spherical.setFromVector3(offset)
+              spherical.theta -= dx * 0.005
+              spherical.phi = Math.min(Math.PI - 0.05, Math.max(0.05, spherical.phi - dy * 0.005))
+              offset.setFromSpherical(spherical)
+              r.camera.position.copy(target).add(offset)
+            } else {
+              // pan both the camera and what it orbits, so framing survives
+              const panScale = ORBIT_DISTANCE / 900
+              r.camera.getWorldDirection(pickDir)
+              const right = new THREE.Vector3().crossVectors(pickDir, r.camera.up).normalize()
+              const up = new THREE.Vector3().crossVectors(right, pickDir).normalize()
+              const shift = right.multiplyScalar(-dx * panScale).add(up.multiplyScalar(dy * panScale))
+              r.camera.position.add(shift)
+              target.add(shift)
+            }
+            r.camera.lookAt(target)
+          }
+          const onUp = (e: PointerEvent) => {
+            if (dragging === 0) return
+            dragging = 0
+            try { canvas.releasePointerCapture(e.pointerId) } catch { /* already released */ }
+          }
+          const onWheel = (e: WheelEvent) => {
+            if (!r.freeCamera) return
+            e.preventDefault()
+            r.camera.getWorldDirection(pickDir)
+            r.camera.position.addScaledVector(pickDir, e.deltaY < 0 ? 256 : -256)
+          }
+          const onContext = (e: MouseEvent) => { if (r.freeCamera) e.preventDefault() }
+          canvas.addEventListener('pointerdown', onDown)
+          canvas.addEventListener('pointermove', onMove)
+          canvas.addEventListener('pointerup', onUp)
+          canvas.addEventListener('pointercancel', onUp)
+          canvas.addEventListener('wheel', onWheel, { passive: false })
+          canvas.addEventListener('contextmenu', onContext)
+          disposeControls = () => {
+            canvas.removeEventListener('pointerdown', onDown)
+            canvas.removeEventListener('pointermove', onMove)
+            canvas.removeEventListener('pointerup', onUp)
+            canvas.removeEventListener('pointercancel', onUp)
+            canvas.removeEventListener('wheel', onWheel)
+            canvas.removeEventListener('contextmenu', onContext)
+          }
+        }
         // setPixelRatio + setSize together own the drawing buffer AND the GL
         // viewport — sizing the canvas by hand leaves the viewport stale and
         // the render squeezed into a corner on any DPR > 1 display
@@ -1735,6 +2139,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
           rafId = requestAnimationFrame(loop)
           const dt = Math.min(now - last, 250)
           last = now
+          const tSimStart = performance.now()
           if (playingRef.current && !r.finished && r.cycle < durationCycles) {
             r.msAcc += dt
             let stepped = false
@@ -1743,12 +2148,41 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
               stepCycle()
               stepped = true
             }
-            if (stepped) setCycle(r.cycle)
+            // React state at ~10Hz, NOT once per frame. Every update re-renders
+            // this panel's action list AND, through onCycle, the page's roll —
+            // 341 actions in cutscene 11, so ~680 elements reconciled per
+            // update. At 60Hz that work dwarfed the render: sim, pose and draw
+            // together measured 8.5ms of a 62ms frame, and the missing 54ms was
+            // React. Nothing driven by `cycle` needs more than 10Hz — the clock
+            // reads to a tenth of a second and the playhead moves a pixel.
+            if (stepped && now - lastCycleReport >= 100) {
+              lastCycleReport = now
+              setCycle(r.cycle)
+            }
             // the sim stops at FINISHED; drop out of "playing" so the transport
             // shows Replay instead of a pause button over a frozen picture
-            if (r.finished || r.cycle >= durationCycles) setPlaying(false)
+            if (r.finished || r.cycle >= durationCycles) {
+              setCycle(r.cycle) // land exactly on the end rather than up to 100ms short
+              setPlaying(false)
+            }
           }
+          const tSimEnd = performance.now()
           applyCameraAndFade()
+          // Straight from the sim clock every frame, not from React state at
+          // 10Hz: the receiver writes a style directly (see ActionRoll's
+          // handle), so a smooth playhead costs nothing. Unconditional, which
+          // also covers scrubbing while paused.
+          onCycleRef.current?.(r.cycle)
+          // One frustum per frame, shared by the animated-loc and entity pose
+          // passes below. Built from a FRESHLY updated camera matrix: three
+          // only refreshes matrixWorld inside render(), so reading it here
+          // without this would cull against where the camera was last frame.
+          r.camera.updateMatrixWorld()
+          frustumMatrix.multiplyMatrices(
+            r.camera.projectionMatrix,
+            r.camera.matrixWorldInverse.copy(r.camera.matrixWorld).invert(),
+          )
+          frustum.setFromProjectionMatrix(frustumMatrix)
           // Plane visibility for loc attachments follows the camera's FOCUS:
           // the client buckets particles per plane band and draws them under
           // the viewpoint's plane visibility. Without this, upper-plane
@@ -1770,8 +2204,12 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
           // with keyframe interpolation for tweened sequences.
           if (r.animLocs.length > 0) {
             const seconds = (performance.now() % 3600000) / 1000
+            // Same frustum the entity poses use, and the same reasoning: a town
+            // scene has torches and flags all over it and only a few are ever
+            // in shot. (The map viewer culls its animated locs identically.)
             for (const rec of r.animLocs) {
               if (!rec.animator) continue
+              if (!frustum.intersectsSphere(rec.sphere)) continue
               const posed = rec.animator.poseAt(rec.model, seconds)
               if (posed) {
                 rec.update(posed)
@@ -1782,16 +2220,86 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
           // Tweened entity/object/gfx sequences re-pose every render frame so
           // the sub-tick interpolation actually shows (frame-change posing
           // alone would step at the keyframe rate).
-          if (playingRef.current) {
-            for (const e of r.entities) if (e.anim?.def.tweened && e.placed) void poseEntityFrame(e)
-            for (const o of r.objects) if (o?.anim?.def.tweened && o.group.visible) void poseEntityFrame(o)
-            for (const g of r.gfx) if (g.anim?.def.tweened) void poseEntityFrame(g)
+          // Posing is the expensive part of a crowded scene, and nothing can see
+          // the result for something the camera isn't pointed at. Each frame
+          // marks what's on screen and poses only that — tweened things while
+          // playing (their pose changes every frame), plus anything whose frame
+          // advanced while it was off-screen, so it comes back current rather
+          // than holding a stale pose. The sim is untouched: animations still
+          // advance off-screen, so an entity walking into shot arrives right.
+          //
+          // Runs even when paused, because a seek steps the sim and a scrub can
+          // bring a marked-dirty entity into view with the clock stopped.
+          //
+          // The test is a fixed radius around the placement rather than the
+          // mesh's real bounds: over-including costs one pose, under-including
+          // would pop.
+          const tPoseStart = performance.now()
+          {
+            const onScreen = (obj: THREE.Object3D, radius: number) => {
+              cullSphere.center.copy(obj.position)
+              cullSphere.radius = radius
+              return frustum.intersectsSphere(cullSphere)
+            }
+            const playing = playingRef.current
+            const poseIfDue = (h: AnimHolder, visible: boolean, tweened: boolean) => {
+              h.offScreen = !visible
+              if (!visible) return
+              if (!h.poseDirty && !(playing && tweened)) return
+              h.poseDirty = false
+              void poseEntityFrame(h)
+            }
+            for (const e of r.entities) {
+              if (!e.placed) { e.offScreen = true; continue }
+              poseIfDue(e, onScreen(e.group, CULL_RADIUS * Math.max(1, e.size)), e.anim?.def.tweened === true)
+            }
+            for (const o of r.objects) {
+              if (!o) continue
+              if (!o.group.visible) { o.offScreen = true; continue }
+              poseIfDue(o, onScreen(o.group, CULL_RADIUS * Math.max(o.sizeX, o.sizeY)), o.anim?.def.tweened === true)
+            }
+            // gfx are short-lived and ride whatever the shot is about, so they
+            // skip the test and always pose
+            for (const g of r.gfx) if (playing && g.anim?.def.tweened) void poseEntityFrame(g)
           }
+          const tPoseEnd = performance.now()
           r.particles?.step(dt, r.camera)
           if (r.sky) r.sky.position.copy(r.camera.position)
+          const tDrawStart = performance.now()
+          r.renderer!.info.reset()
           if (r.composer) r.composer.render()
           else r.renderer!.render(r.scene, r.camera)
+          const tDrawEnd = performance.now()
+          simMs += tSimEnd - tSimStart
+          poseMs += tPoseEnd - tPoseStart
+          drawMs += tDrawEnd - tDrawStart
+          // Averaged over 20 frames rather than instantaneous, which jitters
+          // too much to read. Written straight to the DOM node — a state update
+          // per frame would re-render the whole panel, action list included.
+          if (perfLast) { perfSum += 1000 / (now - perfLast); perfN++ }
+          perfLast = now
+          if (perfN >= 20 && perfRef.current) {
+            const info = r.renderer!.info.render
+            const ms = (total: number) => (total / perfN).toFixed(1)
+            perfRef.current.textContent =
+              `${Math.round(perfSum / perfN)} fps · ${info.calls} calls · ${(info.triangles / 1000).toFixed(0)}k tris`
+              + ` · sim ${ms(simMs)} pose ${ms(poseMs)} draw ${ms(drawMs)} ms`
+            perfSum = 0
+            perfN = 0
+            simMs = 0
+            poseMs = 0
+            drawMs = 0
+          }
         }
+        let perfLast = 0, perfSum = 0, perfN = 0
+        /** last `now` at which the sim clock was pushed into React state */
+        let lastCycleReport = 0
+        // Where a frame's time actually goes, averaged over the same window:
+        // `sim` is the cycle stepper, `pose` the per-frame skeletal re-pose of
+        // every tweened entity, `draw` the composer. Only `sim` and `pose` run
+        // while playing, so a large gap between paused and playing frame rates
+        // has to be one of them.
+        let simMs = 0, poseMs = 0, drawMs = 0
         rafId = requestAnimationFrame(loop)
         stopLoop = () => cancelAnimationFrame(rafId)
       } catch (e) {
@@ -1804,6 +2312,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       // render against a disposed renderer
       stopLoop?.()
       disposeResize?.()
+      disposeControls?.()
       const rr = rt.current
       rr.disposed = true
       // Prebuilt gfx meshes are held OUTSIDE the scene graph while unused, so
@@ -1819,6 +2328,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       rr.gfx = []
       rr.objects = []
       rr.entities = []
+      rr.terrainMeshes = []
+      // disposed with the rest of the scene by the traverse below
+      rr.tileHighlight = null
       rr.composer?.dispose()
       rr.renderer?.dispose()
       // dispose() frees three's GPU objects but NOT the WebGL context — the
@@ -1841,11 +2353,11 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       rr.scene.clear()
       rr.sky = null
     }
-    // the scene build runs once per cutscene, plus once per variable save —
-    // exactly the deps buildGen keys the canvas on, which it must, since
-    // teardown force-loses the context and a canvas lost that way is dead
+    // Keyed on the SCENE, not the def — see sceneKey. Exactly the deps buildGen
+    // keys the canvas on, which it must, since teardown force-loses the context
+    // and a canvas lost that way is dead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [def, rootHandle, varGen])
+  }, [sceneKey, rootHandle, varGen])
 
   return (
     <div className="cutscene-player">
@@ -1854,29 +2366,15 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
           <div className="cutscene-player-stage">
             <canvas key={buildGen.current.n} ref={canvasRef} className="cutscene-player-canvas" />
             <div ref={fadeRef} className="cutscene-player-fade" />
+            <span
+              ref={perfRef}
+              className="cutscene-player-perf"
+              title="Render frames per second, draw calls and triangles per frame"
+            >–</span>
             {status && <p className="anim-preview-status cutscene-player-status">{status}</p>}
           </div>
           <div className="cutscene-player-actions">
-            <ul ref={actionListRef}>
-              {def.actions.map((a, i) => {
-                const state = i < rt.current.cursor
-                  ? (a.lengthInCycles === lastAppliedStart ? 'current' : 'done')
-                  : 'pending'
-                return (
-                  <li key={i}>
-                    <button
-                      type="button"
-                      className={`cutscene-player-action cutscene-player-action-${state}`}
-                      title={`Jump here (${JSON.stringify(a.fields ?? {})})`}
-                      onClick={() => { seek(a.lengthInCycles + 1); setPlaying(false) }}
-                    >
-                      <span className="cutscene-player-action-time">{clockShort(a.lengthInCycles, unit)}</span>
-                      <span className={`cutscene-action-badge cutscene-action-${actionGroupClass(a.type)}`}>{a.type.toLowerCase().replace(/_/g, ' ')}</span>
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
+            <ul ref={actionListRef}>{actionItems}</ul>
           </div>
         </div>
         {/* Right under the picture, which is what it describes — at the bottom

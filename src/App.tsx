@@ -1667,7 +1667,7 @@ function App() {
                 : npcContent != null
                 ? <NpcViewer data={npcContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} />
                 : cutsceneContent
-                ? <CutsceneViewer data={cutsceneContent} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} />
+                ? <CutsceneViewer data={cutsceneContent} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : varbitContent != null
                 ? <VarbitViewer data={varbitContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : structContent != null

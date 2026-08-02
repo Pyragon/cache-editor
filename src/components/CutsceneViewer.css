@@ -211,6 +211,24 @@
   display: block;
 }
 
+/* Perf readout, over the picture's top-right corner. Deliberately not in the
+   transport: it updates several times a second and the bar's controls shouldn't
+   shuffle around it. */
+.cutscene-player-perf {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 2;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #b8c4d8;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .cutscene-player-fade {
   position: absolute;
   inset: 0;
