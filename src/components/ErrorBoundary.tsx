@@ -26,13 +26,23 @@ type Props = {
   children: ReactNode
 }
 
-type State = { error: Error | null; stack: string | null }
+type State = { error: Error | null; stack: string | null; lastKey: unknown }
 
 export default class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null, stack: null }
+  state: State = { error: null, stack: null, lastKey: undefined }
 
   static getDerivedStateFromError(error: Error): Partial<State> {
     return { error }
+  }
+
+  /** Clearing the error during render rather than in componentDidUpdate: the
+   *  latter needs a second render pass to take effect, and would briefly show
+   *  the fallback for the item you just navigated TO. */
+  static getDerivedStateFromProps(props: Props, state: State): Partial<State> | null {
+    if (props.resetKey === state.lastKey) return null
+    return state.error
+      ? { error: null, stack: null, lastKey: props.resetKey }
+      : { lastKey: props.resetKey }
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
@@ -40,12 +50,6 @@ export default class ErrorBoundary extends Component<Props, State> {
     // swallowed stack trace is worse than the blank page was.
     console.error(`[${this.props.label ?? 'panel'}] render failed`, error, info.componentStack)
     this.setState({ stack: info.componentStack ?? null })
-  }
-
-  componentDidUpdate(prev: Props) {
-    if (this.state.error && prev.resetKey !== this.props.resetKey) {
-      this.setState({ error: null, stack: null })
-    }
   }
 
   private retry = () => this.setState({ error: null, stack: null })
