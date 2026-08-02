@@ -53,15 +53,25 @@ export async function buildTexturedModelMesh(
 ): Promise<TexturedModelMesh | null> {
   const { vertexCount, faceCount, vertexX, vertexY, vertexZ, triangleX, triangleY, triangleZ, faceColor, faceAlpha, faceTextures, textures } = model
 
-  // Bucket visible faces by texture id (-1 = flat colour; ids without a
-  // dumped material PNG fall back to flat so nothing renders untinted-white).
+  // Collect visible faces (-1 texture = flat colour; ids without a dumped
+  // material PNG fall back to flat so nothing renders untinted-white).
   // A zero-scale mapping poisons one UV coordinate; the writer pins it to a
   // texture edge and the face still draws, as it does in the client.
   // Faces replaced by a hasUid billboard never draw (the client drops them).
+  // Then reorder ONCE with the client's build-time face sort
+  // (MeshRasterizer_Sub3's quicksorted key — the client never resorts):
+  // opaque faces first, transparent last (a face is transparent when it bakes
+  // faceAlpha or its texture-def blends), facePriorities applied to
+  // transparent faces only, then texture id (-1 masks to 0xffff = last), then
+  // original index. Without this a translucent face drawn before the faces
+  // BEHIND it z-writes over them and blends with the void — the QBD's baked
+  // neck fade (npc 15454, model 70260: 160 alpha-gradient faces sharing
+  // texture 1549 with 2918 opaque body faces) cut a see-through hole in her
+  // own body.
   const writeUVs = makeUVWriter(model)
   const uvScratch = new Float32Array(6)
   const bbHidden = billboardHiddenFaces(model)
-  const buckets = new Map<number, number[]>()
+  const recs: { f: number; tex: number; trans: boolean; pri: number }[] = []
   for (let f = 0; f < faceCount; f++) {
     if (faceAlpha[f] === -1) continue
     if (bbHidden?.has(f)) continue
@@ -70,20 +80,24 @@ export async function buildTexturedModelMesh(
     let tex = faceTextures?.[f] ?? -1
     if (tex >= 0 && !textures.get(tex)) tex = -1
     if (tex >= 0 && !writeUVs(f, ia, ib, ic, uvScratch, 0)) continue
-    const bucket = buckets.get(tex)
-    if (bucket) bucket.push(f)
-    else buckets.set(tex, [f])
+    const trans = (faceAlpha[f] & 0xff) !== 0 || (tex >= 0 && !!model.textureBlendTypes.get(tex))
+    recs.push({ f, tex, trans, pri: trans ? model.facePriorities?.[f] ?? 0 : 0 })
   }
-  const bucketOrder = [...buckets.keys()].sort((a, b) => a - b) // -1 first
-  const validFaces = [...buckets.values()].reduce((n, b) => n + b.length, 0)
+  const validFaces = recs.length
   if (validFaces === 0) return null
+  recs.sort((a, b) =>
+    (a.pri - b.pri) ||
+    (Number(a.trans) - Number(b.trans)) ||
+    ((a.tex & 0xffff) - (b.tex & 0xffff)) ||
+    (a.f - b.f))
 
   // Decode the material PNGs up front: the geometry pass needs each detail
   // map's average luma (a `detailsOnly` texture carries no colour of its own,
   // so the face colour must be boosted by 255/avgLuma or every textured face
   // darkens by the map's brightness — same normalisation the loc meshes get).
   const decoded = new Map<number, { bitmap: ImageBitmap; boost: number }>()
-  await Promise.all(bucketOrder.filter((t) => t >= 0).map(async (tex) => {
+  const texIds = [...new Set(recs.filter((r) => r.tex >= 0).map((r) => r.tex))]
+  await Promise.all(texIds.map(async (tex) => {
     try {
       // 'none': Chromium premultiplies by default and three uploads an
       // ImageBitmap verbatim, so a material with a sub-255 alpha would sample
@@ -129,48 +143,53 @@ export async function buildTexturedModelMesh(
   const cornerFace = new Int32Array(validFaces * 3)
   const cornerMaterial = new Uint16Array(validFaces * 3)
 
-  const groups: { start: number; count: number; tex: number; hasAlpha: boolean }[] = []
+  // Walk the sorted faces, starting a new group when the texture OR the
+  // transparency class changes (the client starts a new static batch on
+  // texture change; the opaque/transparent boundary must also split here
+  // because OUR transparency lives on the group's material, not the pass).
+  const groups: { start: number; count: number; tex: number; trans: boolean }[] = []
   let vert = 0
-  for (const tex of bucketOrder) {
-    const faces = buckets.get(tex)!
-    const group = { start: vert, count: faces.length * 3, tex, hasAlpha: false }
-    const materialIndex = groups.length
-    groups.push(group)
-    const boost = tex >= 0 ? decoded.get(tex)?.boost ?? 1 : 1
-    for (const f of faces) {
-      const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
-      const rgb = hslToRgb(faceColor[f] & 0xffff)
-      const r = srgbToLinear(((rgb >> 16) & 0xff) / 255)
-      const g = srgbToLinear(((rgb >> 8) & 0xff) / 255)
-      const b = srgbToLinear((rgb & 0xff) / 255)
-      const baked = faceAlpha[f] & 0xff
-      const opacity = (255 - baked) / 255
-      if (baked !== 0) group.hasAlpha = true
-      const corners = [ia, ib, ic]
-      for (let i = 0; i < 3; i++) {
-        const v = corners[i]
-        const base = (vert + i) * 3
-        // RS → three: (x, −y, −z)
-        positions[base] = vertexX[v]
-        positions[base + 1] = -vertexY[v]
-        positions[base + 2] = -vertexZ[v]
-        const cbase = (vert + i) * 4
-        if (lit) {
-          const lb = (f * 3 + i) * 3
-          colors[cbase] = lit[lb] * boost
-          colors[cbase + 1] = lit[lb + 1] * boost
-          colors[cbase + 2] = lit[lb + 2] * boost
-        } else {
-          colors[cbase] = r * boost; colors[cbase + 1] = g * boost; colors[cbase + 2] = b * boost
-        }
-        colors[cbase + 3] = opacity
-        cornerVertex[vert + i] = v
-        cornerFace[vert + i] = f
-        cornerMaterial[vert + i] = materialIndex
-      }
-      if (tex >= 0) writeUVs(f, ia, ib, ic, uvs, vert * 2)
-      vert += 3
+  let group: (typeof groups)[number] | null = null
+  let boost = 1
+  for (const rec of recs) {
+    const { f, tex } = rec
+    if (!group || group.tex !== tex || group.trans !== rec.trans) {
+      group = { start: vert, count: 0, tex, trans: rec.trans }
+      groups.push(group)
+      boost = tex >= 0 ? decoded.get(tex)?.boost ?? 1 : 1
     }
+    group.count += 3
+    const materialIndex = groups.length - 1
+    const ia = triangleX[f], ib = triangleY[f], ic = triangleZ[f]
+    const rgb = hslToRgb(faceColor[f] & 0xffff)
+    const r = srgbToLinear(((rgb >> 16) & 0xff) / 255)
+    const g = srgbToLinear(((rgb >> 8) & 0xff) / 255)
+    const b = srgbToLinear((rgb & 0xff) / 255)
+    const opacity = (255 - (faceAlpha[f] & 0xff)) / 255
+    const corners = [ia, ib, ic]
+    for (let i = 0; i < 3; i++) {
+      const v = corners[i]
+      const base = (vert + i) * 3
+      // RS → three: (x, −y, −z)
+      positions[base] = vertexX[v]
+      positions[base + 1] = -vertexY[v]
+      positions[base + 2] = -vertexZ[v]
+      const cbase = (vert + i) * 4
+      if (lit) {
+        const lb = (f * 3 + i) * 3
+        colors[cbase] = lit[lb] * boost
+        colors[cbase + 1] = lit[lb + 1] * boost
+        colors[cbase + 2] = lit[lb + 2] * boost
+      } else {
+        colors[cbase] = r * boost; colors[cbase + 1] = g * boost; colors[cbase + 2] = b * boost
+      }
+      colors[cbase + 3] = opacity
+      cornerVertex[vert + i] = v
+      cornerFace[vert + i] = f
+      cornerMaterial[vert + i] = materialIndex
+    }
+    if (tex >= 0) writeUVs(f, ia, ib, ic, uvs, vert * 2)
+    vert += 3
   }
 
   const geo = new THREE.BufferGeometry()
@@ -183,15 +202,15 @@ export async function buildTexturedModelMesh(
   await Promise.all(groups.map(async (g, i) => {
     geo.addGroup(g.start, g.count, i)
     const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
-    // A group blends when its texture-def effectCombiner ("blendType") is
-    // non-zero — drawn in the client's transparent pass with the texture's
-    // ALPHA as opacity (the ghostly cutscene props: object 61435, texture
-    // 1219, alpha ~70/255) — or when any of its faces bakes translucency (the
-    // Stone of Jas's aura shell: model 44495, every face at faceAlpha 192).
-    // z-write stays ON like the client's transparent objects. blendType-0
-    // materials keep their PNG alpha as a gloss mask, never opacity — do not
-    // sniff the bitmap instead of the def.
-    if ((g.tex >= 0 && model.textureBlendTypes.get(g.tex)) || g.hasAlpha) {
+    // A group blends when its faces are transparent per the client's rule
+    // (see the sort above): texture-def effectCombiner ("blendType") non-zero
+    // — drawn with the texture's ALPHA as opacity (the ghostly cutscene
+    // props: object 61435, texture 1219, alpha ~70/255) — or baked face
+    // translucency (the Stone of Jas's aura shell: model 44495, every face at
+    // faceAlpha 192). z-write stays ON like the client's transparent objects.
+    // blendType-0 materials keep their PNG alpha as a gloss mask, never
+    // opacity — do not sniff the bitmap instead of the def.
+    if (g.trans) {
       mat.transparent = true
     }
     materials[i] = mat
