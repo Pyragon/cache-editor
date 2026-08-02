@@ -22,6 +22,7 @@ import ModelPreviewModal from './components/ModelPreviewModal'
 import SettingsMenu from './components/SettingsMenu'
 import { forgetCacheRoot, getRememberedCache, rememberCacheRoot, requestCachePermission } from './loaders/cachePersist'
 import PlayerDefaultsModal from './components/PlayerDefaultsModal'
+import VarOverridesModal from './components/VarOverridesModal'
 import { resolveRetextureAssets } from './components/modelDisplay'
 import { invalidateAnimCompatIndex } from './loaders/animCompat'
 import { invalidateNpcIcon, invalidateObjectIcon } from './components/npcSnapshot'
@@ -319,6 +320,7 @@ function App() {
   const [openingStage, setOpeningStage] = useState<string | null>(null)
   const [downloadNotice, setDownloadNotice] = useState('')
   const [showPlayerDefaults, setShowPlayerDefaults] = useState(false)
+  const [showVarOverrides, setShowVarOverrides] = useState(false)
   // A remembered folder whose permission didn't survive the reload — Chromium
   // needs a user gesture to re-grant, so it becomes a button rather than
   // reopening silently.
@@ -1368,6 +1370,8 @@ function App() {
         />
       )}
 
+      {showVarOverrides && <VarOverridesModal onClose={() => setShowVarOverrides(false)} />}
+
       <aside id="sidebar">
         <div className="sidebar-header">
           <div className="sidebar-title-row">
@@ -1378,6 +1382,11 @@ function App() {
                   label: 'Player Look…',
                   hint: 'The look and equipment used for previews',
                   onSelect: openPlayerDefaults,
+                },
+                {
+                  label: 'Variables…',
+                  hint: 'Set varbits and varps to pick which version of an object shows',
+                  onSelect: () => setShowVarOverrides(true),
                 },
                 {
                   label: 'Close cache',

@@ -140,6 +140,14 @@ call count is too high on a dense region, a middle ground is batching only
 static locs and keeping anything a cutscene or an edit can touch separate. Until
 then, every feature that needs to address a single loc pays for the merge.
 
+### Variable overrides don't reach a cutscene preview live
+
+Settings → Variables feeds `resolveMultiLocId`, and the map scene re-resolves
+the affected placements on save. The cutscene player reads the same values
+through `buildLocsMesh`, but only when it builds — saving a variable while a
+cutscene is open does nothing until you reselect it. Either subscribe it to
+`onVarOverridesChanged` and rebuild, or leave it and say so in the modal.
+
 ### TEST: the region environment tab (2026-07-28)
 
 The 3D view's **Env** tab edits the environment record — the tail of the

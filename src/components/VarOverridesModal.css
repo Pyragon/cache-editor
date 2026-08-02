@@ -1,0 +1,35 @@
+/* Variables modal. Everything inside is shared furniture (.quest-table,
+   .cell-input, .cell-select, .add-row-btn, .row-remove-btn, .save-bar) — this
+   file only sizes the dialog and the couple of bits that are its own. */
+.var-overrides {
+  width: 460px;
+  max-width: 92vw;
+}
+
+.var-overrides-note {
+  max-width: 60ch;
+}
+
+/* The table is three narrow columns and a remove button; left to itself the id
+   and value fields stretch to fill the dialog. */
+.var-overrides .quest-table {
+  width: 100%;
+}
+
+.var-overrides .quest-table .cell-input,
+.var-overrides .quest-table .cell-select {
+  min-width: 88px;
+}
+
+.var-overrides-empty {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  padding: 10px 6px;
+}
+
+/* The save bar elsewhere is pinned to the bottom of a scrolling panel; here it
+   is simply the last row of the dialog. */
+.var-overrides-save {
+  position: static;
+  margin-top: 14px;
+}

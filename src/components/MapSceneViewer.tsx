@@ -19,6 +19,7 @@ import { SceneBillboards } from './sceneBillboards'
 import type { AnimationDef } from '../loaders/animations'
 import type { ModelData } from '../loaders/models'
 import type { SceneConfigs, LocRef, MarkerInfo, ObjectDefJson, RegionEnvironment, RegionLight, SunConfig } from './mapScene'
+import { onVarOverridesChanged, resolveMultiLocId } from '../loaders/varOverrides'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import ObjectDefEditor from './ObjectDefEditor'
 import type { AreaInfo, MapSpriteInfo } from './ObjectDefEditor'
@@ -372,6 +373,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
    *  not update. Resolves false when the edit is too broad, and the caller
    *  falls back to the full rebuild. */
   const patchLocsRef = useRef<((prev: LocEntry[], next: LocEntry[]) => Promise<boolean>) | null>(null)
+  /** What each morph loc id last resolved to, so a variable change can rebuild
+   *  only the placements whose answer moved. */
+  const lastMultiLocRef = useRef(new Map<number, number>())
   // list-row click → select + highlight + fly the camera over the loc
   const selectFromListRef = useRef<((entry: LocEntry, index: number) => void) | null>(null)
   // light-list row click → select the light + fly the camera to it
@@ -3263,6 +3267,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           })
         }
         patchLocsRef.current = (prev, next) => enqueueBuild(() => patchLocsImpl(prev, next))
+        // Remember what every morph loc resolved to under the current variable
+        // values. Without this baseline the first save after a build would see
+        // every morph as changed and fall back to a full rebuild; with it, only
+        // the ones whose answer actually moved get patched. The defs are all in
+        // the LocAssets cache by now, so this is a pass over a Map.
+        {
+          const baseline = new Map<number, number>()
+          for (const entry of initialObjects) {
+            const objectId = entry[0]
+            if (baseline.has(objectId)) continue
+            const objDef = await assets.getDef(objectId)
+            if (!objDef?.transformTo?.length) continue
+            const target = resolveMultiLocId(objDef)
+            if (target != null) baseline.set(objectId, target)
+          }
+          lastMultiLocRef.current = baseline
+        }
         setStatus('')
       } catch (e) {
         setStatus(`scene build failed: ${e}`)
@@ -3415,6 +3436,46 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     assets.setDefOverrides(merged)
     void refreshMarkersRef.current?.()
   }, [objectDefs, previewDef, status])
+
+  // Variables saved → re-resolve the morph locs they moved.
+  //
+  // Only the placements whose `getMultiLoc` answer actually CHANGED need
+  // touching, which on a real region is a handful out of thousands, so this
+  // goes through the same placement patch a drag uses rather than the full
+  // rebuild and its "recomputing…" status. Remove-then-re-add, because the
+  // placement tuples are identical before and after — it's the def behind them
+  // that moved, and the re-add resolves against the new values.
+  useEffect(() => onVarOverridesChanged(() => {
+    void (async () => {
+      const assets = assetsRef.current
+      const patch = patchLocsRef.current
+      const rebuild = rebuildCenterRef.current
+      if (!assets || !rebuild) return
+      const objects = objectsPropRef.current ?? data.def.objects
+      const affected: LocEntry[] = []
+      const resolvedNow = new Map<number, number | null>()
+      for (const entry of objects) {
+        const objectId = entry[0]
+        if (!resolvedNow.has(objectId)) {
+          const def = await assets.getDef(objectId)
+          resolvedNow.set(objectId, def?.transformTo?.length ? resolveMultiLocId(def) : null)
+        }
+        const target = resolvedNow.get(objectId)
+        if (target != null && target !== lastMultiLocRef.current.get(objectId)) affected.push(entry)
+      }
+      for (const [id, target] of resolvedNow) {
+        if (target != null) lastMultiLocRef.current.set(id, target)
+      }
+      if (affected.length === 0) return
+      if (patch && await patch(affected, [])) {
+        if (await patch([], affected)) return
+      }
+      await rebuild(terrainPropRef.current ?? data.terrain, objects)
+    })()
+    // the subscription lives as long as the viewer; the refs it reads are
+    // always current
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [])
 
   // leaving Place mode (cancel, Esc, or a committed placement) drops the ghost
   useEffect(() => {
