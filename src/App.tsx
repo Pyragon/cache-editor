@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ENTRY_ORDER, getEntryPath, getLoader, resolveEntryHandle } from './loaders'
-import { memLabel } from './components/memoryDebug'
 import type { LoadedItem, QuestServerData } from './loaders'
 import HuffmanViewer from './components/HuffmanViewer'
 import { CS2Viewer } from './components/CS2Viewer'
@@ -393,12 +392,6 @@ function App() {
   const selectedEntry = entries.find((e) => e.id === selectedEntryId) ?? null
   const selectedItem = activeItems.find((i) => i.id === selectedItemId) ?? null
 
-  // Tags the crash-surviving memory trail with whatever is on screen, so a
-  // climbing heap can be read back as "it grew while clicking spot_animations"
-  // rather than just a column of numbers. See memoryDebug.ts.
-  useEffect(() => {
-    memLabel(selectedEntry ? `${selectedEntry.name}${selectedItem ? `/${selectedItem.id}` : ''}` : '')
-  }, [selectedEntry, selectedItem])
   const currentLoader = selectedEntry ? getLoader(selectedEntry.name) : null
   const noPanel = currentLoader?.noPanel ?? false
 
