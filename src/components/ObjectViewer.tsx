@@ -833,7 +833,6 @@ export default function ObjectViewer({ data, onSave, onDirtyChange, onNavigate, 
           recolor={modelPreview.recolor}
           scale={modelPreview.scale}
           tint={modelPreview.tint}
-          hideMarkerFaces
           sequenceId={modelPreview.sequenceId}
           sequenceOptions={modelPreview.sequenceOptions}
           rootHandle={cacheRoot}

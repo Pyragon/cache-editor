@@ -63,7 +63,12 @@ export function objectCompositeSpec(def: Record<string, unknown>): ModelComposit
   let shapeIndex = shapes.indexOf(10)
   if (shapeIndex < 0) shapeIndex = 0
   return {
-    hideMarkerFaces: true,
+    // NOT hideMarkerFaces: on loc models skin 255 marks the part of a rigged
+    // mesh the skeleton DOESN'T move, not an invisible marker — cutscene 12's
+    // cave wall 47302 keeps its whole static shell on 255 (1382 of 3154 faces,
+    // boulders ride labels 0-19) and the modal/player showed it half-gone.
+    // buildLocsMesh renders every region-loc face unconditionally, same as the
+    // client; this path now matches it.
     modelIds: [...(modelLists[shapeIndex] ?? [])],
     recolor: {
       from: def.originalColors as number[] | undefined,
