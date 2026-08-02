@@ -12,6 +12,7 @@ import { loadModelComposite, npcCompositeSpec, objectCompositeSpec } from '../lo
 import { buildLookModel } from '../loaders/playerAppearance'
 import { loadPlayerGender, loadPlayerLooks } from '../loaders/playerLook'
 import { resolveRenderEmote } from '../loaders/renderEmote'
+import { onVarOverridesChanged } from '../loaders/varOverrides'
 import type { AnimationDef } from '../loaders/animations'
 import { frameFileId } from '../loaders/animations'
 import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
@@ -294,9 +295,17 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
   // changes in the very render that re-runs the effect, which makes React swap
   // the node instead of reusing it. (Every other viewer avoids the problem by
   // letting three create its own canvas into a mount div.)
-  const buildGen = useRef({ def, rootHandle, n: 0 })
-  const switchedBuild = buildGen.current.def !== def || buildGen.current.rootHandle !== rootHandle
-  if (switchedBuild) buildGen.current = { def, rootHandle, n: buildGen.current.n + 1 }
+  // Variable overrides feed the morph locs the scene is built from, so a save
+  // has to rebuild it. Unlike the map viewer there's no partial path here — the
+  // whole scene is assembled in one pass — and a cutscene rebuilds on selection
+  // anyway, so a full rebuild is the honest option rather than a special case.
+  const [varGen, setVarGen] = useState(0)
+  useEffect(() => onVarOverridesChanged(() => setVarGen((g) => g + 1)), [])
+  const buildGen = useRef({ def, rootHandle, varGen, n: 0 })
+  const switchedBuild = buildGen.current.def !== def
+    || buildGen.current.rootHandle !== rootHandle
+    || buildGen.current.varGen !== varGen
+  if (switchedBuild) buildGen.current = { def, rootHandle, varGen, n: buildGen.current.n + 1 }
   const [status, setStatus] = useState('Assembling scene…')
   const [ready, setReady] = useState(false)
   // Not autoplaying: the player is a page section now rather than something
@@ -1832,9 +1841,11 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       rr.scene.clear()
       rr.sky = null
     }
-    // the scene build runs once per cutscene
+    // the scene build runs once per cutscene, plus once per variable save —
+    // exactly the deps buildGen keys the canvas on, which it must, since
+    // teardown force-loses the context and a canvas lost that way is dead
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [def, rootHandle])
+  }, [def, rootHandle, varGen])
 
   return (
     <div className="cutscene-player">
@@ -1872,7 +1883,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             of the panel it read as a footnote to the transport. */}
         <p className="cutscene-note cutscene-player-scope">
           Simulated: terrain/locs from the areas recipe, camera splines, entity placement + walk routes + animations, object spawns, screen fades, entity gfx, sound.
-          Not simulated: projectiles, hitmarks, hint arrows, tile messages{warnings.length > 0 ? ` — ${warnings.length} warning${warnings.length === 1 ? '' : 's'}: ${[...new Set(warnings)].slice(0, 3).join('; ')}` : ''}.
+          Not simulated: projectiles, hitmarks, hint arrows and tile messages — none of which any cutscene in this cache uses{warnings.length > 0 ? ` — ${warnings.length} warning${warnings.length === 1 ? '' : 's'}: ${[...new Set(warnings)].slice(0, 3).join('; ')}` : ''}.
         </p>
         <div className="cutscene-player-bar">
           <button
