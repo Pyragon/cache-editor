@@ -32,6 +32,19 @@ export const RESIZABLE_MIN = { width: 800, height: 600 }
 
 export type GameframeMode = 'fixed' | 'resizable'
 
+/** Is this interface one of the two window panes (IF_OPENTOP targets)? */
+export function isGameframeRoot(id: number): boolean {
+  return id === FIXED_ROOT || id === RESIZABLE_ROOT
+}
+
+/** The mode a gameframe root can only be viewed in — editing 548 means the
+ *  fixed frame, editing 746 means the resizable one. null = not a root. */
+export function modeForRoot(id: number): GameframeMode | null {
+  if (id === FIXED_ROOT) return 'fixed'
+  if (id === RESIZABLE_ROOT) return 'resizable'
+  return null
+}
+
 /** hash = (interfaceId << 16) | componentId — the client's parent uid. */
 const hash = (iface: number, comp: number) => (iface << 16) | comp
 
@@ -126,8 +139,15 @@ export async function loadGameframeScene(
 
   const slot = EDIT_SLOTS.find((s) => s.key === slotKey)
   const target = slot ? (mode === 'fixed' ? slot.fixed : slot.resizable) : null
-  if (edited && target && edited.id !== rootId) {
-    attachments.set(hash(target[0], target[1]), edited.id)
+  // A gameframe root is the window pane itself — it can never be a sub of
+  // anything, so it's previewed AS the root (the substitution below) and
+  // never plugged into a slot. Excluding only the CURRENT mode's root left
+  // the other one attachable, which composed 746 inside 548: two gameframes
+  // drawn at once, and the placement map (first-write-wins per interface)
+  // then pointed selection at the wrong copy.
+  const attachedTarget = edited && target && !isGameframeRoot(edited.id) ? target : null
+  if (edited && attachedTarget) {
+    attachments.set(hash(attachedTarget[0], attachedTarget[1]), edited.id)
   }
 
   const needed = new Set<number>([rootId, ...attachments.values()])
@@ -147,7 +167,7 @@ export async function loadGameframeScene(
   // the tab content slot ships hidden until the client selects a tab — unhide
   // the one holding whatever we attached there (inventory or the edited iface)
   const shown = new Set<number>([hash(rootId, mode === 'fixed' ? TAB_CONTENT[1] : TAB_CONTENT[2])])
-  if (target) shown.add(hash(target[0], target[1]))
+  if (attachedTarget) shown.add(hash(attachedTarget[0], attachedTarget[1]))
   return { rootId, interfaces, attachments, hidden, shown }
 }
 

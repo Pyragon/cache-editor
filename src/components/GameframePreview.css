@@ -217,3 +217,16 @@
   font-size: 11px;
   cursor: help;
 }
+
+/* Shown instead of the placement pills when the edited interface IS the
+   window pane — there's no slot to place it in. */
+.gfp-root-note {
+  color: #8b96ab;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.gfp-modes button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

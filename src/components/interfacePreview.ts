@@ -70,6 +70,57 @@ export function childrenByParent(components: (IComponentDefinition | null)[]): M
   return byParent
 }
 
+/**
+ * Which component does a click at (px, py) select? Deepest nesting first, and
+ * on a tie the SMALLEST rect.
+ *
+ * The size tie-break is what makes small targets reachable. Interface 548
+ * stacks a dozen full-screen 765×503 containers at the same depth as the HUD
+ * slots, so "deepest, last one wins" always resolved an orb click to whichever
+ * full-screen container came last in the array (403) — the orbs, and anything
+ * else small, were unselectable. Picking the tightest box under the cursor is
+ * both predictable and what an editor wants.
+ */
+export function hitTestComponent(
+  comps: readonly (IComponentDefinition | null)[],
+  layout: Map<number, LayoutRect>,
+  px: number,
+  py: number,
+  showHidden: boolean,
+): number | null {
+  const byId = new Map<number, IComponentDefinition>()
+  for (const c of comps) if (c) byId.set(c.componentId, c)
+  const depthOf = (c: IComponentDefinition): number => {
+    let depth = 0
+    let cur = c
+    const seen = new Set<number>()
+    while (cur.parent !== -1) {
+      const pid = cur.parent & 0xffff
+      if (seen.has(pid)) break
+      seen.add(pid)
+      const parent = byId.get(pid)
+      if (!parent) break
+      depth++
+      cur = parent
+    }
+    return depth
+  }
+
+  let best: { id: number; depth: number; area: number } | null = null
+  for (const c of comps) {
+    if (!c || (c.hidden && !showHidden)) continue
+    const rect = layout.get(c.componentId)
+    if (!rect) continue
+    if (px < rect.x || px > rect.x + rect.width || py < rect.y || py > rect.y + rect.height) continue
+    const depth = depthOf(c)
+    const area = rect.width * rect.height
+    if (!best || depth > best.depth || (depth === best.depth && area <= best.area)) {
+      best = { id: c.componentId, depth, area }
+    }
+  }
+  return best?.id ?? null
+}
+
 /** Absolute screen rect per componentId for a given root viewport. */
 export function resolveAbsoluteLayout(
   components: (IComponentDefinition | null)[],

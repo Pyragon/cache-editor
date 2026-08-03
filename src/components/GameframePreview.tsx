@@ -3,9 +3,9 @@ import type { InterfaceData } from '../loaders/interfaces'
 import { InterfaceAssets } from './interfacePreview'
 import type { PreviewOptions } from './interfacePreview'
 import {
-  EDIT_SLOTS, FIXED_SIZE, RESIZABLE_MIN, loadGameframeScene, paintGameframe, runGameframeCs2,
+  EDIT_SLOTS, FIXED_SIZE, RESIZABLE_MIN, loadGameframeScene, modeForRoot, paintGameframe, runGameframeCs2,
 } from './gameframe'
-import { resolveAbsoluteLayout } from './interfacePreview'
+import { hitTestComponent, resolveAbsoluteLayout } from './interfacePreview'
 import type { GameframeMode, GameframeScene } from './gameframe'
 import type { Cs2Warning } from '../cs2/runtime'
 import { Cs2Cache } from '../cs2/cache'
@@ -32,7 +32,13 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   /** clicking a component of the edited interface selects it in the editor */
   onSelect?: (componentId: number) => void
 }) {
-  const [mode, setMode] = useState<GameframeMode>('fixed')
+  const [pickedMode, setPickedMode] = useState<GameframeMode>('fixed')
+  // Editing a window pane pins the preview to that pane's mode: 548 IS the
+  // fixed frame and 746 IS the resizable one, so the other mode would draw
+  // the on-disk copy of a different root and hide the edits entirely.
+  const pinnedMode = modeForRoot(data.id)
+  const mode = pinnedMode ?? pickedMode
+  const setMode = setPickedMode
   const [slotKey, setSlotKey] = useState('screen')
   const [size, setSize] = useState({ width: 1024, height: 768 })
   const [status, setStatus] = useState<string | null>('Loading gameframe…')
@@ -187,42 +193,26 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     const py = ((e.clientY - bounds.top) / bounds.height) * height - hit.place.y
     if (px < 0 || py < 0 || px > hit.place.w || py > hit.place.h) return
     const layout = resolveAbsoluteLayout(hit.comps, hit.place.w, hit.place.h)
-    // deepest (most-nested) hit wins, same as the flat canvas
-    const byId = new Map(hit.comps.filter((c) => c != null).map((c) => [c!.componentId, c!]))
-    const depthOf = (c: NonNullable<typeof hit.comps[number]>) => {
-      let depth = 0
-      let cur = c
-      const seen = new Set<number>()
-      while (cur.parent !== -1) {
-        const pid = cur.parent & 0xffff
-        if (seen.has(pid)) break
-        seen.add(pid)
-        const parent = byId.get(pid)
-        if (!parent) break
-        depth++
-        cur = parent
-      }
-      return depth
-    }
-    let best: { id: number; depth: number } | null = null
-    for (const c of hit.comps) {
-      if (!c || (c.hidden && !opts.showHidden)) continue
-      const rect = layout.get(c.componentId)
-      if (!rect) continue
-      if (px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height) {
-        const depth = depthOf(c)
-        if (!best || depth >= best.depth) best = { id: c.componentId, depth }
-      }
-    }
-    if (best) onSelect(best.id)
+    const id = hitTestComponent(hit.comps, layout, px, py, opts.showHidden === true)
+    if (id != null) onSelect(id)
   }
 
   return (
     <div className="gfp">
       <div className="gfp-toolbar">
         <div className="gfp-modes">
-          <button className={mode === 'fixed' ? 'selected' : ''} onClick={() => setMode('fixed')}>Fixed 765×553</button>
-          <button className={mode === 'resizable' ? 'selected' : ''} onClick={() => setMode('resizable')}>Resizable</button>
+          <button
+            className={mode === 'fixed' ? 'selected' : ''}
+            disabled={pinnedMode != null}
+            title={pinnedMode ? `Interface ${data.id} is the ${pinnedMode} window pane, so the mode follows it` : undefined}
+            onClick={() => setMode('fixed')}
+          >Fixed 765×553</button>
+          <button
+            className={mode === 'resizable' ? 'selected' : ''}
+            disabled={pinnedMode != null}
+            title={pinnedMode ? `Interface ${data.id} is the ${pinnedMode} window pane, so the mode follows it` : undefined}
+            onClick={() => setMode('resizable')}
+          >Resizable</button>
         </div>
         {mode === 'resizable' && (
           <div className="gfp-presets">
@@ -232,6 +222,11 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
             <span className="gfp-size">{size.width}×{size.height}</span>
           </div>
         )}
+        {pinnedMode ? (
+          <span className="gfp-root-note">
+            window pane — the frame itself, not placed in a slot
+          </span>
+        ) : (
         <div className="gfp-slot-pills" title="Where the interface is shown — the client decides this by which packet sends it (sendTab / sendChatBoxInterface / sendInterface / setOverlay), not by anything in the data">
           {EDIT_SLOTS.map((s) => (
             <button
@@ -244,6 +239,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
             </button>
           ))}
         </div>
+        )}
         <label className="gfp-cs2">
           <input type="checkbox" checked={cs2Enabled} onChange={(e) => setCs2Enabled(e.target.checked)} />
           CS2 hooks

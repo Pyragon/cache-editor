@@ -7,7 +7,7 @@ import type { ModelData } from '../loaders/models'
 import ModelViewer from './ModelViewer'
 import { NumberInput, NumGrid, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
-import { InterfaceAssets, childrenByParent, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
+import { InterfaceAssets, childrenByParent, hitTestComponent, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
 import GameframePreview from './GameframePreview'
 import './InterfaceViewer.css'
 
@@ -146,22 +146,6 @@ function ScriptInput({ script, onCommit }: { script: CS2Script | null; onCommit:
       }}
     />
   )
-}
-
-function depthOf(byId: Map<number, IComponentDefinition>, c: IComponentDefinition): number {
-  let depth = 0
-  let cur = c
-  const seen = new Set<number>()
-  while (cur.parent !== -1) {
-    const parentId = cur.parent & 0xffff
-    if (seen.has(parentId)) break
-    seen.add(parentId)
-    const parent = byId.get(parentId)
-    if (!parent) break
-    depth++
-    cur = parent
-  }
-  return depth
 }
 
 /** Collapsible inspector group. Everything relevant to the selected component
@@ -338,17 +322,8 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     const px = ((e.clientX - rectBounds.left) / rectBounds.width) * viewportW
     const py = ((e.clientY - rectBounds.top) / rectBounds.height) * viewportH
 
-    // Topmost (deepest) hit wins.
-    let best: { id: number; depth: number } | null = null
-    for (const c of list) {
-      const rect = layout.get(c.componentId)
-      if (!rect || (c.hidden && !showHidden)) continue
-      if (px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height) {
-        const depth = depthOf(byId, c)
-        if (!best || depth >= best.depth) best = { id: c.componentId, depth }
-      }
-    }
-    if (best) setSelectedId(best.id)
+    const id = hitTestComponent(list, layout, px, py, showHidden)
+    if (id != null) setSelectedId(id)
   }
 
   function updateSelected(patch: Partial<IComponentDefinition>) {
