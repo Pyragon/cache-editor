@@ -1459,8 +1459,10 @@ class BucketSet {
     /** Face culling. The client culls back faces and never turns it off —
      *  `DirectXRenderer` sets `D3DRS_CULLMODE = D3DCULL_CW` once at init and
      *  `OpenGLRenderer` does `glEnable(GL_CULL_FACE); glCullFace(GL_BACK)`.
-     *  Loc meshes pass FrontSide to match; terrain and the skybox still default
-     *  to DoubleSide because they haven't been checked for winding yet. */
+     *  Loc meshes and terrain pass FrontSide to match (double-sided terrain
+     *  painted its own underside as a screen-wide band when the cutscene
+     *  camera skimmed a water surface — cutscene 14, cycle ~1053); the skybox
+     *  keeps DoubleSide since the camera lives inside the dome. */
     side: THREE.Side = THREE.DoubleSide,
   ): Promise<THREE.Mesh | null> {
     const entries = [...this.buckets.entries()].filter(([key, b]) => {
@@ -2098,7 +2100,7 @@ export async function buildTerrainMesh(
     }
   }
 
-  const mesh = await buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id))
+  const mesh = await buckets.toMesh((id) => assets.getTexture(id), (id) => assets.getMaterialMeta(id), false, 'all', undefined, THREE.FrontSide)
   if (mesh) mesh.userData.isTerrain = true
   return mesh
 }

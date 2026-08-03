@@ -201,7 +201,15 @@ export async function buildTexturedModelMesh(
   const gpuTextures: THREE.Texture[] = []
   await Promise.all(groups.map(async (g, i) => {
     geo.addGroup(g.start, g.count, i)
-    const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
+    // FrontSide: the client culls back faces and never turns it off
+    // (DirectXRenderer sets D3DRS_CULLMODE = D3DCULL_CW once at init;
+    // OpenGLRenderer does glEnable(GL_CULL_FACE)) — same rule the loc meshes
+    // follow. Double-siding drew the INSIDE of models whenever the cutscene
+    // camera clipped into one (cutscene 14, cycle ~1053: a screen-wide band of
+    // an object's interior). Entity placements here are position + yaw +
+    // positive scale, never mirrored, so no BackSide flip is needed (the loc
+    // path's determinant check covers its mirrored placements).
+    const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.FrontSide })
     // A group blends when its faces are transparent per the client's rule
     // (see the sort above): texture-def effectCombiner ("blendType") non-zero
     // — drawn with the texture's ALPHA as opacity (the ghostly cutscene
