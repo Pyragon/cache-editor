@@ -1,0 +1,219 @@
+/* In-game gameframe preview: a "client window" on a dark stage, resizable by
+   its corner handle in resizable mode. Shares the app's dark palette. */
+
+.gfp {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.gfp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.gfp-modes,
+.gfp-presets {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.gfp-modes button,
+.gfp-presets button {
+  background: var(--bg-elevated, #1c1f27);
+  color: var(--text-dim, #aab3c5);
+  /* the app's --border is an 8% white hairline (panel edges) — buttons need
+     a border you can actually see */
+  border: 1px solid #3d4457;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.gfp-modes button:hover,
+.gfp-presets button:hover {
+  color: var(--text, #dfe6f2);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.gfp-modes button.selected,
+.gfp-presets button.selected {
+  background: rgba(0, 102, 255, 0.18);
+  color: #fff;
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.gfp-size {
+  color: #7f8a9e;
+  font-size: 12px;
+  min-width: 70px;
+}
+
+.gfp-slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #aab3c5;
+  font-size: 12px;
+}
+
+.gfp-slot select {
+  background: #1c1f27;
+  color: #dfe6f2;
+  border: 1px solid #2a2e39;
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+/* The stage scrolls when the "client" outgrows the panel — the window itself
+   never squishes, exactly like a real client on a small monitor. */
+.gfp-stage {
+  overflow: auto;
+  background: #0c0e12;
+  border: 1px solid #232733;
+  border-radius: 6px;
+  padding: 16px;
+  max-height: calc(100vh - 260px);
+}
+
+.gfp-frame {
+  position: relative;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.55);
+  border: 1px solid #333a4a;
+}
+
+.gfp-canvas {
+  display: block;
+  image-rendering: pixelated;
+  cursor: crosshair;
+}
+
+.gfp-resize-handle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  border-right: 3px solid #56617a;
+  border-bottom: 3px solid #56617a;
+  border-radius: 0 0 4px 0;
+}
+
+.gfp-resize-handle:hover {
+  border-color: #7f8fb0;
+}
+
+.gfp-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b96ab;
+  font-size: 13px;
+  background: rgba(10, 12, 16, 0.7);
+}
+
+.gfp-cs2 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #aab3c5;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.gfp-cs2-warnings {
+  background: transparent;
+  border: 1px solid #4a3f2a;
+  color: #d9b45c;
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.gfp-warning-list {
+  max-height: 140px;
+  overflow-y: auto;
+  border: 1px solid #2a2e39;
+  border-radius: 6px;
+  background: #14161c;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
+.gfp-warning-row {
+  display: flex;
+  gap: 10px;
+  color: #8b96ab;
+  line-height: 1.6;
+}
+
+.gfp-warning-op {
+  color: #d9b45c;
+  min-width: 160px;
+}
+
+.gfp-warning-count {
+  min-width: 40px;
+}
+
+.gfp-warning-example {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Placement pills: where the edited interface plugs in. Mirrors the client's
+   packet-determined placement (sendTab / chatbox / screen / overlay). */
+.gfp-slot-pills {
+  display: flex;
+  gap: 0;
+  border: 1px solid #2a2e39;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.gfp-slot-pills button {
+  background: #1c1f27;
+  color: #aab3c5;
+  border: none;
+  border-right: 1px solid #2a2e39;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.gfp-slot-pills button:last-child {
+  border-right: none;
+}
+
+.gfp-slot-pills button:hover {
+  color: #dfe6f2;
+}
+
+.gfp-slot-pills button.selected {
+  background: rgba(0, 102, 255, 0.22);
+  color: #fff;
+}
+
+/* Page-zoom notice: the preview can't be pixel-accurate below 100% zoom. */
+.gfp-zoom-warning {
+  color: #d9b45c;
+  border: 1px solid #4a3f2a;
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: help;
+}

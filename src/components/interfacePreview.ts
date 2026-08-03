@@ -558,7 +558,33 @@ function buildModelGeometry(model: ModelData): { geometry: THREE.BufferGeometry 
 export type PreviewOptions = {
   showHidden: boolean
   showContainerOutlines: boolean
+  /** Draw labelled placeholders for runtime-filled contentType components
+   *  (hitbars, debug info, dynamic panels). The flat editor view wants them
+   *  (you need to see something IS there); the gameframe preview turns them
+   *  off — a normal client frame draws nothing for them (debug info needs
+   *  the debug pref, hitbars only render over entities). Default on. */
+  showPlaceholders?: boolean
 }
+
+/** contentType values the client special-cases before the type dispatch
+ *  (IComponentDefinitions.render :983-1033; constants at :28-39). */
+export const CONTENT_TYPE_LABELS: Record<number, string> = {
+  1337: 'hitbar',
+  1338: 'minimap',
+  1339: 'compass',
+  1400: 'content 1400',
+  1401: 'minimap',
+  1403: 'hitbar',
+  1405: 'debug info',
+  1407: 'world view',
+  1408: 'content 1408',
+  1409: 'content 1409',
+}
+
+/** The compass rose the client rotates onto ct-1339's mask sprite. Looked up
+ *  by NAME in the sprites index (getArchiveId("compass")) — resolved to 169
+ *  against this cache's js5 name table, same id family as mapdots=300 etc. */
+const COMPASS_SPRITE_ID = 169
 
 type ResolvedAssets = {
   sprites: Map<number, SpriteAsset>
@@ -612,6 +638,7 @@ export async function loadPreviewAssets(
   for (const c of components) {
     if (!c || (c.hidden && !opts.showHidden)) continue
     if (c.type === 'SPRITE' && c.spriteId >= 0) spriteIds.add(c.spriteId)
+    if (c.contentType === 1339) spriteIds.add(COMPASS_SPRITE_ID)
     if (c.type === 'TEXT' && c.fontId >= 0) fontIds.add(c.fontId)
     if (c.type === 'MODEL' && c.modelType === 'RAW_MODEL' && c.modelId >= 0) modelComps.push(c)
   }
@@ -880,11 +907,15 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D, rect: LayoutRect, label:
   ctx.strokeStyle = `hsla(${hue}, 70%, 60%, 0.45)`
   ctx.setLineDash([4, 3])
   ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1)
-  if (rect.width > 30 && rect.height > 11) {
-    ctx.fillStyle = `hsla(${hue}, 70%, 70%, 0.9)`
-    ctx.font = '9px system-ui'
+  if (rect.width > 40 && rect.height > 14) {
+    ctx.font = '11px system-ui'
     ctx.textBaseline = 'top'
-    ctx.fillText(label, rect.x + 3, rect.y + 2, rect.width - 6)
+    const w = Math.min(ctx.measureText(label).width + 8, rect.width - 2)
+    ctx.setLineDash([])
+    ctx.fillStyle = 'rgba(10, 10, 14, 0.75)'
+    ctx.fillRect(rect.x + 1, rect.y + 1, w, 15)
+    ctx.fillStyle = `hsla(${hue}, 70%, 78%, 1)`
+    ctx.fillText(label, rect.x + 5, rect.y + 3, rect.width - 8)
   }
   ctx.restore()
 }
@@ -928,7 +959,47 @@ export function paintInterface(
       if (c.hidden) ctx.globalAlpha *= 0.35 // showHidden mode: ghost them
 
       if (c.contentType !== 0) {
-        drawPlaceholder(ctx, rect, `content ${c.contentType}`, 275)
+        // The client special-cases these before the type dispatch
+        // (IComponentDefinitions.render :983-1033). ct 1338/1339 carry a
+        // SPRITE whose pixels are just a black disc — it's the MASK the
+        // client composites the minimap / rotated compass through, not
+        // chrome. Drawing the disc still matters (it fills the stone
+        // frame's round cutout), and for the compass we then draw the
+        // rose (sprite "compass") north-up clipped to that circle.
+        if (c.contentType === 1339) {
+          drawSpriteComponent(ctx, c, rect, resolved.sprites.get(c.spriteId) ?? null)
+          const rose = resolved.sprites.get(COMPASS_SPRITE_ID)
+          if (rose) {
+            ctx.save()
+            ctx.beginPath()
+            ctx.ellipse(rect.x + rect.width / 2, rect.y + rect.height / 2, rect.width / 2, rect.height / 2, 0, 0, Math.PI * 2)
+            ctx.clip()
+            ctx.imageSmoothingEnabled = false
+            // client: drawRotatedSprite(cx, cy, camAngle, mask) — native
+            // size, centred; the preview has no camera so north stays up
+            ctx.drawImage(rose.canvas, Math.round(rect.x + (rect.width - rose.canvas.width) / 2), Math.round(rect.y + (rect.height - rose.canvas.height) / 2))
+            ctx.restore()
+          }
+        } else if (c.type === 'SPRITE' && c.spriteId >= 0 && resolved.sprites.get(c.spriteId)) {
+          drawSpriteComponent(ctx, c, rect, resolved.sprites.get(c.spriteId) ?? null)
+        } else if (c.contentType === 1407) {
+          // the unrendered 3D world: a faint vertical wash rather than pure
+          // black, so HUD sprites floating over it read as "over the world"
+          // instead of looking like missing draws
+          const sky = ctx.createLinearGradient(0, rect.y, 0, rect.y + rect.height)
+          sky.addColorStop(0, '#181b22')
+          sky.addColorStop(1, '#0e1013')
+          ctx.fillStyle = sky
+          ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
+        } else if (c.contentType === 1401) {
+          ctx.fillStyle = '#0b0d10'
+          ctx.beginPath()
+          ctx.ellipse(rect.x + rect.width / 2, rect.y + rect.height / 2, rect.width / 2, rect.height / 2, 0, 0, Math.PI * 2)
+          ctx.fill()
+        } else if (opts.showPlaceholders !== false) {
+          const label = CONTENT_TYPE_LABELS[c.contentType] ?? `content ${c.contentType}`
+          drawPlaceholder(ctx, rect, label, 275)
+        }
       } else {
         switch (c.type) {
           case 'FIGURE': {

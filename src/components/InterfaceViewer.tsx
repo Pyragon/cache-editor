@@ -7,7 +7,8 @@ import type { ModelData } from '../loaders/models'
 import ModelViewer from './ModelViewer'
 import { NumberInput, NumGrid, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
-import { InterfaceAssets, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
+import { InterfaceAssets, childrenByParent, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
+import GameframePreview from './GameframePreview'
 import './InterfaceViewer.css'
 
 // CS2 script hooks a component may carry — shown as a flat list of the ones
@@ -45,7 +46,7 @@ const SCRIPT_FIELDS: [key: keyof IComponentDefinition, label: string][] = [
   ['anObjectArray1421', 'Script 1421'],
   ['anObjectArray1346', 'Script 1346'],
   ['anObjectArray1353', 'Script 1353'],
-  ['anObjectArray1271', 'Script 1271'],
+  ['anObjectArray1271', 'On Resize (1271)'],
 ]
 
 const LAYOUT_FIELDS: NumFieldDef[] = [
@@ -89,6 +90,24 @@ const CURSOR_FIELDS: NumFieldDef[] = [
   ['dragDeadTime', 'Drag Dead Time'],
   ['dragType', 'Drag Type'],
 ]
+
+// The client's layout-mode semantics (Class246.method4204 / Class484.initSizes
+// — traced 2026-08-02, see interfaces.md). Editing these as named modes
+// instead of bare numbers is most of the point of the inspector.
+const X_MODES = ['Absolute (from left)', 'Centred + offset', 'Right-anchored', 'Proportional', 'Centred + proportional', 'Right + proportional']
+const Y_MODES = ['Absolute (from top)', 'Centred + offset', 'Bottom-anchored', 'Proportional', 'Centred + proportional', 'Bottom + proportional']
+const SIZE_MODES = ['Absolute px', 'Parent minus base (fill/inset)', 'Proportional (base/16384)', '(unused)', 'Aspect-ratio from other axis']
+
+function ModeSelect({ label, value, modes, onChange }: { label: string; value: number; modes: string[]; onChange: (v: number) => void }) {
+  return (
+    <label className="item-field">
+      <span className="item-field-label">{label}</span>
+      <select value={value} onChange={(e) => onChange(Number(e.target.value))}>
+        {modes.map((m, i) => <option key={i} value={i}>{i} — {m}</option>)}
+      </select>
+    </label>
+  )
+}
 
 function rgbInputHex(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`
@@ -145,6 +164,24 @@ function depthOf(byId: Map<number, IComponentDefinition>, c: IComponentDefinitio
   return depth
 }
 
+/** Collapsible inspector group. Everything relevant to the selected component
+ *  is on screen at once — sections collapse for reading comfort but nothing is
+ *  hidden behind an exclusive tab (the old section rail meant clicking a MODEL
+ *  component showed no model fields unless "Model" happened to be selected). */
+function Group({ title, badge, defaultOpen = true, children }: { title: string; badge?: string; defaultOpen?: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <section className={`iface-group${open ? '' : ' closed'}`}>
+      <button type="button" className="iface-group-head" onClick={() => setOpen((o) => !o)}>
+        <span className={`iface-group-arrow${open ? ' open' : ''}`}>▸</span>
+        {title}
+        {badge && <span className="iface-group-badge">{badge}</span>}
+      </button>
+      {open && <div className="iface-group-body">{children}</div>}
+    </section>
+  )
+}
+
 export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigate }: {
   data: InterfaceData
   onSave: (data: InterfaceData) => Promise<void>
@@ -158,13 +195,17 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   const [viewportW, setViewportW] = useState(765)
   const [viewportH, setViewportH] = useState(503)
   const [showHidden, setShowHidden] = useState(false)
-  const [showOutlines, setShowOutlines] = useState(true)
+  const [showOutlines, setShowOutlines] = useState(false)
   /** null = fit the panel; a number = explicit scale with scrollable overflow. */
   const [zoom, setZoom] = useState<number | null>(null)
-  const [activeSection, setActiveSection] = useState('layout')
+  /** flat single-interface canvas vs the composed in-game gameframe */
+  const [gamePreview, setGamePreview] = useState(false)
+  /** collapsed tree parents (componentIds) */
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
   const [modelPreview, setModelPreview] = useState<{ modelId: number; loading: boolean; data: ModelData | null } | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const assetsRef = useRef<InterfaceAssets | null>(null)
+  const [assetsReady, setAssetsReady] = useState(0)
 
   useEffect(() => {
     setComponents(data.components)
@@ -178,6 +219,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     if (!data.rootHandle) return
     const assets = new InterfaceAssets(data.rootHandle)
     assetsRef.current = assets
+    setAssetsReady((n) => n + 1)
     return () => {
       assets.dispose()
       if (assetsRef.current === assets) assetsRef.current = null
@@ -190,11 +232,59 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
 
   const list = useMemo(() => components.filter((c): c is IComponentDefinition => c != null), [components])
   const byId = useMemo(() => new Map(list.map((c) => [c.componentId, c])), [list])
+  // The sidebar tree: a depth-first walk so every component sits directly
+  // under its parent (sibling order = components-array order, which is the
+  // client's draw order). Orphans whose parent id doesn't resolve are
+  // appended at the end rather than vanishing.
+  const treeRows = useMemo(() => {
+    const byParent = childrenByParent(components)
+    const rows: { c: IComponentDefinition; depth: number; hasChildren: boolean }[] = []
+    const visited = new Set<number>()
+    const walk = (parentId: number, depth: number) => {
+      if (depth > 32) return
+      for (const c of byParent.get(parentId) ?? []) {
+        if (visited.has(c.componentId)) continue
+        visited.add(c.componentId)
+        const hasChildren = (byParent.get(c.componentId)?.length ?? 0) > 0
+        rows.push({ c, depth, hasChildren })
+        if (!collapsed.has(c.componentId)) walk(c.componentId, depth + 1)
+      }
+    }
+    walk(-1, 0)
+    for (const c of list) {
+      if (!visited.has(c.componentId) && !isDescendantOfCollapsed(c)) rows.push({ c, depth: 0, hasChildren: false })
+    }
+    function isDescendantOfCollapsed(c: IComponentDefinition): boolean {
+      let cur = c
+      const seen = new Set<number>()
+      while (cur.parent !== -1) {
+        const pid = cur.parent & 0xffff
+        if (seen.has(pid)) return false
+        seen.add(pid)
+        if (collapsed.has(pid)) return true
+        const parent = byId.get(pid)
+        if (!parent) return false
+        cur = parent
+      }
+      return false
+    }
+    return rows
+  }, [components, list, collapsed, byId])
+
+  const toggleCollapsed = (id: number) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
   const layout = useMemo(() => resolveAbsoluteLayout(components, viewportW, viewportH), [components, viewportW, viewportH])
   const selected = selectedId != null ? byId.get(selectedId) ?? null : null
 
   // --- draw preview: load whatever assets this frame needs, then paint ---
   useEffect(() => {
+    if (gamePreview) return // the gameframe component owns the canvas then
     const canvas = canvasRef.current
     const assets = assetsRef.current
     if (!canvas) return
@@ -239,7 +329,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
       paintSelection(ctx)
     })()
     return () => { cancelled = true }
-  }, [components, layout, selectedId, viewportW, viewportH, showHidden, showOutlines])
+  }, [components, layout, selectedId, viewportW, viewportH, showHidden, showOutlines, gamePreview, assetsReady])
 
   function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
     const canvas = canvasRef.current
@@ -297,35 +387,43 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     }
   }
 
-  const attachedScripts = selected ? SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null).length : 0
-  const hasTypeSection = selected != null && ['SPRITE', 'MODEL', 'TEXT', 'FIGURE', 'LINE'].includes(selected.type)
-  const sections: { key: string; label: string }[] = selected
-    ? [
-        { key: 'layout', label: 'Layout' },
-        ...(hasTypeSection ? [{ key: 'type', label: selected.type }] : []),
-        { key: 'ops', label: 'Ops & Cursors' },
-        { key: 'scripts', label: attachedScripts > 0 ? `CS2 Scripts (${attachedScripts})` : 'CS2 Scripts' },
-      ]
-    : []
-  // fall back when the selected component has no type-specific section
-  const active = activeSection === 'type' && !hasTypeSection ? 'layout' : activeSection
+  const attachedScripts = selected ? SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null) : []
+  const hasOps = selected != null && (selected.hasInteraction || selected.opBase !== '' || selected.targetVerb !== '' || (selected.options?.some((o) => o) ?? false))
 
   return (
     <div className="iface-viewer">
       <div className="iface-header">
         <span className="item-id-badge">Interface {data.id}</span>
         <span className="iface-count">{list.length} components</span>
-        <label className="iface-viewport-field">
-          Viewport
-          <NumberInput className="cell-input" value={viewportW} onChange={setViewportW} min={16} />
-          ×
-          <NumberInput className="cell-input" value={viewportH} onChange={setViewportH} min={16} />
-        </label>
-        <div className="iface-presets">
-          <button type="button" title="Classic fixed game screen" onClick={() => { setViewportW(765); setViewportH(503) }}>765×503</button>
-          <button type="button" title="Fixed-mode 3D viewport" onClick={() => { setViewportW(512); setViewportH(334) }}>512×334</button>
-          <button type="button" title="A resizable-mode window" onClick={() => { setViewportW(1024); setViewportH(768) }}>1024×768</button>
-        </div>
+        <button
+          type="button"
+          className={`iface-gameframe-btn${gamePreview ? ' selected' : ''}`}
+          title="Render this interface inside the real gameframe (chatbox, minimap, tabs) at a resizable client size"
+          onClick={() => setGamePreview((v) => !v)}
+        >
+          In-game preview
+        </button>
+        {!gamePreview && (
+          <>
+            <label className="iface-viewport-field">
+              Viewport
+              <NumberInput value={viewportW} onChange={setViewportW} min={16} digits={4} />
+              ×
+              <NumberInput value={viewportH} onChange={setViewportH} min={16} digits={4} />
+            </label>
+            <div className="iface-presets">
+              <button type="button" title="Classic fixed game screen" onClick={() => { setViewportW(765); setViewportH(503) }}>765×503</button>
+              <button type="button" title="Fixed-mode 3D viewport" onClick={() => { setViewportW(512); setViewportH(334) }}>512×334</button>
+              <button type="button" title="A resizable-mode window" onClick={() => { setViewportW(1024); setViewportH(768) }}>1024×768</button>
+            </div>
+            <div className="iface-zoom">
+              <button type="button" onClick={() => setZoom((z) => Math.max(0.25, (z ?? 1) - 0.25))}>−</button>
+              <span>{zoom == null ? 'Fit' : `${Math.round(zoom * 100)}%`}</span>
+              <button type="button" onClick={() => setZoom((z) => Math.min(4, (z ?? 1) + 0.25))}>+</button>
+              {zoom != null && <button type="button" className="iface-zoom-fit" onClick={() => setZoom(null)}>Fit</button>}
+            </div>
+          </>
+        )}
         <label className="iface-toggle">
           <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />
           Show hidden
@@ -334,73 +432,73 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
           <input type="checkbox" checked={showOutlines} onChange={(e) => setShowOutlines(e.target.checked)} />
           Container outlines
         </label>
-        <div className="iface-zoom">
-          <button type="button" onClick={() => setZoom((z) => Math.max(0.25, (z ?? 1) - 0.25))}>−</button>
-          <span>{zoom == null ? 'Fit' : `${Math.round(zoom * 100)}%`}</span>
-          <button type="button" onClick={() => setZoom((z) => Math.min(4, (z ?? 1) + 0.25))}>+</button>
-          {zoom != null && <button type="button" className="iface-zoom-fit" onClick={() => setZoom(null)}>Fit</button>}
-        </div>
       </div>
 
       <div className="iface-body">
         <div className="iface-tree">
-          {list
-            .slice()
-            .sort((a, b) => a.componentId - b.componentId)
-            .map((c) => (
-              <div
-                key={c.componentId}
-                className={`iface-tree-row${c.componentId === selectedId ? ' selected' : ''}${c.hidden ? ' hidden-row' : ''}`}
-                style={{ paddingLeft: `${8 + depthOf(byId, c) * 12}px` }}
-                onClick={() => setSelectedId(c.componentId)}
-              >
-                <span className="iface-tree-id">{c.componentId}</span>
-                <span className="iface-tree-type">{c.type}</span>
-                {c.name && <span className="iface-tree-name">{c.name}</span>}
-              </div>
-            ))}
+          {treeRows.map(({ c, depth, hasChildren }) => (
+            <div
+              key={c.componentId}
+              className={`iface-tree-row${c.componentId === selectedId ? ' selected' : ''}${c.hidden ? ' hidden-row' : ''}`}
+              style={{ paddingLeft: `${8 + depth * 12}px` }}
+              onClick={() => setSelectedId(c.componentId)}
+            >
+              {hasChildren ? (
+                <button
+                  type="button"
+                  className={`iface-tree-arrow${collapsed.has(c.componentId) ? '' : ' open'}`}
+                  onClick={(e) => { e.stopPropagation(); toggleCollapsed(c.componentId) }}
+                >
+                  ▸
+                </button>
+              ) : (
+                <span className="iface-tree-arrow-spacer" />
+              )}
+              <span className="iface-tree-id">{c.componentId}</span>
+              <span className="iface-tree-type">{c.type}</span>
+              {c.name && <span className="iface-tree-name">{c.name}</span>}
+            </div>
+          ))}
         </div>
 
         <div className="iface-main">
-          <div className="iface-canvas-wrap">
-            <canvas
-              ref={canvasRef}
-              className="iface-canvas"
-              onClick={handleCanvasClick}
-              style={zoom == null ? undefined : { width: `${viewportW * zoom}px`, maxWidth: 'none', maxHeight: 'none' }}
+          {gamePreview ? (
+            <GameframePreview
+              data={{ ...data, components }}
+              assets={assetsRef.current}
+              opts={{ showHidden, showContainerOutlines: showOutlines }}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
             />
-          </div>
+          ) : (
+            <div className="iface-canvas-wrap">
+              <canvas
+                ref={canvasRef}
+                className="iface-canvas"
+                onClick={handleCanvasClick}
+                style={zoom == null ? undefined : { width: `${viewportW * zoom}px`, maxWidth: 'none', maxHeight: 'none' }}
+              />
+            </div>
+          )}
+        </div>
 
+        <div className="iface-inspector">
+          {!selected && (
+            <div className="iface-side-hint">Click a component in the preview or the tree to inspect it.</div>
+          )}
           {selected && (
-            <div className="iface-fields">
+            <>
               <div className="iface-fields-title">
                 Component {selected.componentId} — {selected.type}
-                {selected.parent !== -1 && <span className="iface-parent-note"> (parent {selected.parent & 0xffff})</span>}
+                {selected.parent !== -1 && (
+                  <button type="button" className="iface-parent-link" onClick={() => setSelectedId(selected.parent & 0xffff)}>
+                    parent {selected.parent & 0xffff}
+                  </button>
+                )}
               </div>
 
-              {active === 'layout' && (
-                <section className="item-section">
-                  <h3>Layout</h3>
-                  <NumGrid fields={LAYOUT_FIELDS} values={selected} onChange={(k, v) => set(k as keyof IComponentDefinition, v)} />
-                  <div className="iface-aspect-row">
-                    {(['aspectWidthType', 'aspectHeightType', 'aspectXType', 'aspectYType'] as const).map((key) => (
-                      <label key={key} className="item-field">
-                        <span className="item-field-label">{key}</span>
-                        <NumberInput value={selected[key]} onChange={(v) => set(key, v)} min={0} max={5} />
-                      </label>
-                    ))}
-                  </div>
-                  <ToggleGrid
-                    fields={[['hidden', 'Hidden'], ['preventClickThrough', 'Prevent Click-Through']]}
-                    values={selected}
-                    onChange={(k, v) => set(k as keyof IComponentDefinition, v)}
-                  />
-                </section>
-              )}
-
-              {active === 'type' && selected.type === 'SPRITE' && (
-                <section className="item-section">
-                  <h3>Sprite</h3>
+              {selected.type === 'SPRITE' && (
+                <Group title="Sprite">
                   <NumGrid
                     fields={[['spriteId', 'Sprite Id'], ...SPRITE_FIELDS]}
                     values={selected}
@@ -416,12 +514,11 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                     <span className="item-field-label">Color</span>
                     <input type="color" value={rgbInputHex(selected.color)} onChange={(e) => set('color', parseInt(e.target.value.slice(1), 16))} />
                   </label>
-                </section>
+                </Group>
               )}
 
-              {active === 'type' && selected.type === 'MODEL' && (
-                <section className="item-section">
-                  <h3>Model</h3>
+              {selected.type === 'MODEL' && (
+                <Group title="Model">
                   <label className="item-field">
                     <span className="item-field-label">Model Type</span>
                     <select value={selected.modelType} onChange={(e) => set('modelType', e.target.value as ModelType)}>
@@ -455,12 +552,11 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                       )}
                     </div>
                   )}
-                </section>
+                </Group>
               )}
 
-              {active === 'type' && selected.type === 'TEXT' && (
-                <section className="item-section">
-                  <h3>Text</h3>
+              {selected.type === 'TEXT' && (
+                <Group title="Text">
                   <label className="item-field iface-text-field">
                     <span className="item-field-label">Text</span>
                     <textarea
@@ -483,12 +579,11 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                     <span className="item-field-label">Color</span>
                     <input type="color" value={rgbInputHex(selected.color)} onChange={(e) => set('color', parseInt(e.target.value.slice(1), 16))} />
                   </label>
-                </section>
+                </Group>
               )}
 
-              {active === 'type' && (selected.type === 'FIGURE' || selected.type === 'LINE') && (
-                <section className="item-section">
-                  <h3>{selected.type === 'FIGURE' ? 'Figure' : 'Line'}</h3>
+              {(selected.type === 'FIGURE' || selected.type === 'LINE') && (
+                <Group title={selected.type === 'FIGURE' ? 'Figure' : 'Line'}>
                   <NumGrid
                     fields={selected.type === 'LINE' ? [['lineWidth', 'Line Width']] : [['transparency', 'Transparency']]}
                     values={selected}
@@ -503,73 +598,75 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                     <span className="item-field-label">Color</span>
                     <input type="color" value={rgbInputHex(selected.color)} onChange={(e) => set('color', parseInt(e.target.value.slice(1), 16))} />
                   </label>
-                </section>
+                </Group>
               )}
 
-              {active === 'ops' && (
-                <section className="item-section">
-                  <h3>Options &amp; Cursors</h3>
-                  <label className="item-field">
-                    <span className="item-field-label">Op Base</span>
-                    <input className="cell-input" value={selected.opBase} onChange={(e) => set('opBase', e.target.value)} />
+              <Group title="Layout">
+                <NumGrid fields={LAYOUT_FIELDS} values={selected} onChange={(k, v) => set(k as keyof IComponentDefinition, v)} />
+                <ModeSelect label="X mode" value={selected.aspectXType} modes={X_MODES} onChange={(v) => set('aspectXType', v)} />
+                <ModeSelect label="Y mode" value={selected.aspectYType} modes={Y_MODES} onChange={(v) => set('aspectYType', v)} />
+                <ModeSelect label="Width mode" value={selected.aspectWidthType} modes={SIZE_MODES} onChange={(v) => set('aspectWidthType', v)} />
+                <ModeSelect label="Height mode" value={selected.aspectHeightType} modes={SIZE_MODES} onChange={(v) => set('aspectHeightType', v)} />
+                {selected.type === 'CONTAINER' && (
+                  <NumGrid
+                    fields={[['scrollWidth', 'Scroll Width'], ['scrollHeight', 'Scroll Height']]}
+                    values={selected}
+                    onChange={(k, v) => set(k as keyof IComponentDefinition, v)}
+                  />
+                )}
+                <ToggleGrid
+                  fields={[['hidden', 'Hidden'], ['preventClickThrough', 'Prevent Click-Through']]}
+                  values={selected}
+                  onChange={(k, v) => set(k as keyof IComponentDefinition, v)}
+                />
+              </Group>
+
+              <Group title="Options & Cursors" badge={hasOps ? undefined : 'none'} defaultOpen={hasOps}>
+                <label className="item-field">
+                  <span className="item-field-label">Op Base</span>
+                  <input className="cell-input" value={selected.opBase} onChange={(e) => set('opBase', e.target.value)} />
+                </label>
+                <label className="item-field">
+                  <span className="item-field-label">Target Verb</span>
+                  <input className="cell-input" value={selected.targetVerb} onChange={(e) => set('targetVerb', e.target.value)} />
+                </label>
+                {(selected.options ?? []).map((opt, i) => (
+                  <label key={i} className="item-field">
+                    <span className="item-field-label">Option {i + 1}</span>
+                    <input
+                      className="cell-input"
+                      value={opt ?? ''}
+                      onChange={(e) => {
+                        const next = [...(selected.options ?? [])]
+                        next[i] = e.target.value
+                        set('options', next)
+                      }}
+                    />
                   </label>
-                  <label className="item-field">
-                    <span className="item-field-label">Target Verb</span>
-                    <input className="cell-input" value={selected.targetVerb} onChange={(e) => set('targetVerb', e.target.value)} />
+                ))}
+                <NumGrid fields={CURSOR_FIELDS} values={selected} onChange={(k, v) => set(k as keyof IComponentDefinition, v)} />
+              </Group>
+
+              <Group
+                title="CS2 Scripts"
+                badge={attachedScripts.length > 0 ? `${attachedScripts.length}` : 'none'}
+                defaultOpen={attachedScripts.length > 0}
+              >
+                {attachedScripts.length === 0 && (
+                  <div className="iface-no-scripts">No scripts attached to this component.</div>
+                )}
+                {attachedScripts.map(([key, label]) => (
+                  <label key={key} className="item-field iface-text-field">
+                    <span className="item-field-label">{label}</span>
+                    <ScriptInput
+                      script={selected[key] as CS2Script | null}
+                      onCommit={(s) => set(key, s)}
+                    />
                   </label>
-                  {(selected.options ?? []).map((opt, i) => (
-                    <label key={i} className="item-field">
-                      <span className="item-field-label">Option {i + 1}</span>
-                      <input
-                        className="cell-input"
-                        value={opt ?? ''}
-                        onChange={(e) => {
-                          const next = [...(selected.options ?? [])]
-                          next[i] = e.target.value
-                          set('options', next)
-                        }}
-                      />
-                    </label>
-                  ))}
-                  <NumGrid fields={CURSOR_FIELDS} values={selected} onChange={(k, v) => set(k as keyof IComponentDefinition, v)} />
-                </section>
-              )}
-
-              {active === 'scripts' && (
-                <section className="item-section">
-                  <h3>CS2 Scripts</h3>
-                  {attachedScripts === 0 && (
-                    <div className="iface-no-scripts">No scripts attached to this component.</div>
-                  )}
-                  {SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null).map(([key, label]) => (
-                    <label key={key} className="item-field iface-text-field">
-                      <span className="item-field-label">{label}</span>
-                      <ScriptInput
-                        script={selected[key] as CS2Script | null}
-                        onCommit={(s) => set(key, s)}
-                      />
-                    </label>
-                  ))}
-                </section>
-              )}
-            </div>
+                ))}
+              </Group>
+            </>
           )}
-        </div>
-
-        <div className="iface-side">
-          {!selected && (
-            <div className="iface-side-hint">Click a component in the preview or the tree to inspect it.</div>
-          )}
-          {sections.map(({ key, label }) => (
-            <button
-              key={key}
-              type="button"
-              className={`iface-section-btn${active === key ? ' selected' : ''}`}
-              onClick={() => setActiveSection(key)}
-            >
-              {label}
-            </button>
-          ))}
         </div>
       </div>
 

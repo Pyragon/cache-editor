@@ -26,18 +26,20 @@
   color: var(--text-dim, #8a90a0);
 }
 
+
 .iface-presets {
   display: flex;
   gap: 4px;
 }
 
 .iface-presets button {
-  padding: 3px 8px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #3d4457;
   background: var(--bg-elevated, #1c1f26);
   color: var(--text-dim, #8a90a0);
   font-size: 11px;
+  line-height: 1.5;
   cursor: pointer;
 }
 
@@ -146,26 +148,22 @@
   height: auto;
 }
 
-/* Active section's fields, below the preview */
-.iface-fields {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--grey-light) transparent;
-}
-
-/* Section list to the right: just the headers; clicking shows that section
-   under the preview */
-.iface-side {
-  width: 170px;
+/* Inspector: a fixed right column. EVERYTHING about the selected component is
+   on screen at once — the type-specific group first (a MODEL component leads
+   with its model fields), then layout, ops, scripts. Groups collapse for
+   reading comfort; nothing is behind an exclusive tab. */
+.iface-inspector {
+  width: 340px;
   flex-shrink: 0;
   min-height: 0;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-self: flex-start;
+  align-self: stretch;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated, #1c1f26);
+  padding: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--grey-light) transparent;
 }
 
 .iface-side-hint {
@@ -175,26 +173,101 @@
   padding: 8px 4px;
 }
 
-.iface-section-btn {
+.iface-group {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.iface-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
   text-align: left;
   padding: 7px 10px;
-  border-radius: 6px;
+  border: none;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.iface-group-head:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.iface-group-arrow {
+  display: inline-block;
+  transition: transform 0.12s ease;
+  color: var(--text-dim, #8a90a0);
+}
+
+.iface-group-arrow.open {
+  transform: rotate(90deg);
+}
+
+.iface-group-badge {
+  margin-left: auto;
+  color: var(--text-dim, #8a90a0);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.iface-group-body {
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.iface-group-body select {
+  background: var(--bg-elevated, #1c1f26);
+  color: var(--text);
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.02);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.iface-gameframe-btn {
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated, #1c1f26);
   color: var(--text-dim, #8a90a0);
   font-size: 12px;
   cursor: pointer;
-  transition: border-color 0.12s ease, color 0.12s ease;
 }
 
-.iface-section-btn:hover {
+.iface-gameframe-btn:hover {
   color: var(--text);
   border-color: var(--electric-blue-bright, #2f8fff);
 }
 
-.iface-section-btn.selected {
+.iface-gameframe-btn.selected {
   color: #fff;
   background: rgba(0, 102, 255, 0.18);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.iface-parent-link {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.iface-parent-link:hover {
+  color: var(--text);
   border-color: var(--electric-blue-bright, #2f8fff);
 }
 
@@ -212,13 +285,14 @@
 }
 
 .iface-zoom button {
-  min-width: 22px;
-  height: 22px;
-  padding: 0 6px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
   border-radius: 4px;
-  border: 1px solid var(--border);
+  border: 1px solid #3d4457;
   background: var(--bg-elevated, #1c1f26);
   color: var(--text);
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -265,3 +339,26 @@
   font-size: 12px;
 }
 
+
+/* Tree collapse arrows: parents toggle their subtree; leaves keep a spacer so
+   ids stay column-aligned. */
+.iface-tree-arrow {
+  background: none;
+  border: none;
+  color: var(--text-dim, #8a90a0);
+  padding: 0;
+  width: 12px;
+  flex-shrink: 0;
+  font-size: 10px;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.iface-tree-arrow.open {
+  transform: rotate(90deg);
+}
+
+.iface-tree-arrow-spacer {
+  width: 12px;
+  flex-shrink: 0;
+}

@@ -1,0 +1,543 @@
+// The builtin ops the interface preview implements, bound to a
+// Cs2InterfaceScene. Signatures follow the emitted call shapes (verified
+// against the dump's own call sites; the RuneScript convention holds:
+// if_* setters take their VALUE args first and the component hash LAST,
+// cc_* ops act on the active component a cc_create/cc_find/cc_setchild
+// selected — with @1-suffixed variants using the second active bank).
+//
+// Anything not implemented warns ONCE per op into scene.warnings, which the
+// preview surfaces and interfaces.md tracks — that list is the honest
+// boundary of the simulation.
+
+import type { IComponentDefinition } from '../loaders/interfaces'
+import { resolveAbsoluteLayout } from '../components/interfacePreview'
+import type { LayoutRect } from '../components/interfacePreview'
+import { loadCacheFont, measureCacheText } from '../components/interfacePreview'
+import type { Cs2Env, Cs2Value } from './interpreter'
+import { asInt, asStr } from './interpreter'
+import { Cs2InterfaceScene } from './runtime'
+import { Cs2Cache } from './cache'
+import type { EnumDef } from './cache'
+
+export type Cs2Context = {
+  scene: Cs2InterfaceScene
+  /** windowed_getmode: 1 = fixed, 2 = resizable (the client's window modes) */
+  mode: 'fixed' | 'resizable'
+  rootHandle: FileSystemDirectoryHandle
+  /** layout basis per interface (the slot rect it is attached into), set by
+   *  the compositor before hooks run — the root pane gets the viewport */
+  basis: Map<number, { w: number; h: number }>
+  /** loads an interface's components for if_opensubclient (client-side
+   *  IF_OPENSUBCLIENT); absent = the op records a warning instead */
+  loadInterface?: (id: number) => Promise<(IComponentDefinition | null)[] | null>
+  /** session-persistent data caches (parsed scripts, enums, params) */
+  cache: Cs2Cache
+}
+
+const b = (v: Cs2Value) => asInt(v) !== 0
+
+export function makeCs2Env(ctx: Cs2Context): Cs2Env {
+  const { scene } = ctx
+
+  // ---- vars: store-backed with zero defaults, so a script that writes then
+  // re-reads its own state stays coherent within a preview run ----
+  const varps = new Map<number, number>()
+  const paramCache = ctx.cache.params
+  const varbits = new Map<number, number>()
+  const varcs = new Map<number, number>()
+  const varcStrings = new Map<number, string>()
+
+  // ---- lazily-computed layout per interface (for the get* ops) ----
+  let layouts: Map<number, Map<number, LayoutRect>> | null = null
+  const layoutFor = (ifaceId: number): Map<number, LayoutRect> | null => {
+    if (!layouts) layouts = new Map()
+    let l = layouts.get(ifaceId)
+    if (!l) {
+      const iface = scene.interfaces.get(ifaceId)
+      if (!iface) return null
+      const basis = ctx.basis.get(ifaceId) ?? { w: 765, h: 503 }
+      l = resolveAbsoluteLayout(iface.components, basis.w, basis.h)
+      layouts.set(ifaceId, l)
+    }
+    return l
+  }
+  const invalidateLayout = () => { layouts = null }
+  const rectOf = (hash: number): LayoutRect | null => {
+    const comp = scene.get(hash)
+    if (!comp) return null
+    return layoutFor(comp.interfaceId)?.get(comp.componentId) ?? null
+  }
+  const relPos = (hash: number): { x: number; y: number } => {
+    const comp = scene.get(hash)
+    const rect = rectOf(hash)
+    if (!comp || !rect) return { x: 0, y: 0 }
+    if (comp.parent === -1) return { x: rect.x, y: rect.y }
+    const parentRect = rectOf((comp.interfaceId << 16) | (comp.parent & 0xffff))
+    return parentRect ? { x: rect.x - parentRect.x, y: rect.y - parentRect.y } : { x: rect.x, y: rect.y }
+  }
+
+  // ---- enum lookups: the REAL enum table is the top-level enums/ dump
+  // (defaultIntValue / defaultStringValue / values); config/enums is a
+  // different, sparse sub-archive kept as a fallback ----
+  const enumCache = ctx.cache.enums
+  const loadEnum = (id: number) => {
+    let p = enumCache.get(id)
+    if (!p) {
+      p = (async () => {
+        for (const path of [['enums'], ['config', 'enums']]) {
+          try {
+            let dir = ctx.rootHandle
+            for (const seg of path) dir = await dir.getDirectoryHandle(seg)
+            const file = await (await dir.getFileHandle(`${id}.json`)).getFile()
+            return JSON.parse(await file.text()) as EnumDef
+          } catch { /* try the next location */ }
+        }
+        return null
+      })()
+      enumCache.set(id, p)
+    }
+    return p
+  }
+
+  // ---- fonts for text measurement ----
+  const measureLines = async (text: string, width: number, fontId: number): Promise<number> => {
+    const font = await loadCacheFont(ctx.rootHandle, fontId)
+    let lines = 0
+    for (const para of String(text).split('<br>')) {
+      if (para === '') { lines++; continue }
+      if (!font) { lines += Math.max(1, Math.ceil(para.length * 6 / Math.max(1, width))); continue }
+      // greedy word wrap against the real glyph metrics
+      let line = ''
+      let count = 1
+      for (const word of para.split(' ')) {
+        const candidate = line === '' ? word : `${line} ${word}`
+        if (measureCacheText(font, candidate) > width && line !== '') {
+          count++
+          line = word
+        } else {
+          line = candidate
+        }
+      }
+      lines += count
+    }
+    return Math.max(1, lines)
+  }
+
+  // ---- the active-component helpers ----
+  const bankOf = (name: string): [base: string, bank: number] => {
+    const atIdx = name.indexOf('@')
+    if (atIdx === -1) return [name, 0]
+    return [name.slice(0, atIdx), Number(name.slice(atIdx + 1)) || 0]
+  }
+  const activeOf = (bank: number): IComponentDefinition | null => scene.active[bank] ?? null
+
+  const mutate = (comp: IComponentDefinition | null, patch: Partial<IComponentDefinition>) => {
+    if (!comp) return
+    Object.assign(comp, patch)
+    invalidateLayout()
+  }
+
+  // Setter bodies shared by cc_* (active comp) and if_* (hash-addressed, hash
+  // as the LAST argument). Each returns nothing.
+  const setters: Record<string, (c: IComponentDefinition | null, a: Cs2Value[]) => void> = {
+    setposition: (c, a) => mutate(c, {
+      basePositionX: asInt(a[0]), basePositionY: asInt(a[1]),
+      aspectXType: clampMode(asInt(a[2]), 5), aspectYType: clampMode(asInt(a[3]), 5),
+    }),
+    setsize: (c, a) => mutate(c, {
+      baseWidth: asInt(a[0]), baseHeight: asInt(a[1]),
+      aspectWidthType: clampMode(asInt(a[2]), 4), aspectHeightType: clampMode(asInt(a[3]), 4),
+      aspectWidth: 0, aspectHeight: 0,
+    }),
+    sethide: (c, a) => mutate(c, { hidden: b(a[0]) }),
+    setgraphic: (c, a) => mutate(c, { spriteId: asInt(a[0]) }),
+    settext: (c, a) => mutate(c, { text: asStr(a[0]) }),
+    setcolor: (c, a) => mutate(c, { color: asInt(a[0]) & 0xffffff }),
+    settrans: (c, a) => mutate(c, { transparency: asInt(a[0]) & 0xff }),
+    setfill: (c, a) => mutate(c, { filled: b(a[0]) }),
+    setoutline: (c, a) => mutate(c, { borderThickness: asInt(a[0]) }),
+    settextfont: (c, a) => mutate(c, { fontId: asInt(a[0]) }),
+    settextalign: (c, a) => mutate(c, {
+      textHorizontalAli: asInt(a[0]), textVerticalAli: asInt(a[1]), lineSpacing: asInt(a[2]),
+    }),
+    settextshadow: (c, a) => mutate(c, { shadow: b(a[0]) }),
+    settiling: (c, a) => mutate(c, { tiling: b(a[0]) }),
+    sethflip: (c, a) => mutate(c, { flipHorizontal: b(a[0]) }),
+    setvflip: (c, a) => mutate(c, { flipVertical: b(a[0]) }),
+    setmodel: (c, a) => mutate(c, { modelType: 'RAW_MODEL', modelId: asInt(a[0]) }),
+    setmodelanim: (c, a) => mutate(c, { animation: asInt(a[0]) }),
+    setmodelzoom: (c, a) => mutate(c, { spriteScale: asInt(a[0]) }),
+    setscrollsize: (c, a) => mutate(c, { scrollWidth: asInt(a[0]), scrollHeight: asInt(a[1]) }),
+    setitem: (c, a) => {
+      // an ITEM component: modelType ITEM with the item id — the painter
+      // draws a placeholder for now (item sprites are on the roadmap)
+      mutate(c, { modelType: 'ITEM', modelId: asInt(a[0]) })
+    },
+    setopbase: (c, a) => mutate(c, { opBase: asStr(a[0]) }),
+    setopname: (c, a) => mutate(c, { opBase: asStr(a[0]) }),
+    setoptionname: (c, a) => mutate(c, { opBase: asStr(a[0]) }),
+    setlinewid: (c, a) => mutate(c, { lineWidth: asInt(a[0]) }),
+    setlinewidth: (c, a) => mutate(c, { lineWidth: asInt(a[0]) }),
+    setlinedirection: (c, a) => mutate(c, { lineDirection: b(a[0]) }),
+    setborderthickness: (c, a) => mutate(c, { borderThickness: asInt(a[0]) }),
+    setspritescale: (c, a) => mutate(c, { spriteScale: asInt(a[0]) }),
+    setspriteshadow: (c, a) => mutate(c, { spriteShadow: asInt(a[0]) }),
+    setgraphicshadow: (c, a) => mutate(c, { spriteShadow: asInt(a[0]) }),
+    set2dangle: (c, a) => mutate(c, { angle2d: asInt(a[0]) }),
+    setmaxlines: (c, a) => mutate(c, { maxTextLines: asInt(a[0]) }),
+    setmaxtextlines: (c, a) => mutate(c, { maxTextLines: asInt(a[0]) }),
+    setalpha: (c, a) => mutate(c, { alpha: b(a[0]) }),
+    setmodelorthog: (c, a) => mutate(c, { usesOrthogonal: b(a[0]) }),
+    setclickmask: (c, a) => mutate(c, { clickMask: b(a[0]) }),
+    setnoclickthrough: (c, a) => mutate(c, { preventClickThrough: b(a[0]) }),
+    set_item_no_num: (c, a) => mutate(c, { modelType: 'ITEM', modelId: asInt(a[0]) }),
+    set_item_always_num: (c, a) => mutate(c, { modelType: 'ITEM', modelId: asInt(a[0]) }),
+    setitem_nonum: (c, a) => mutate(c, { modelType: 'ITEM', modelId: asInt(a[0]) }),
+    setitem_alwaysnum: (c, a) => mutate(c, { modelType: 'ITEM', modelId: asInt(a[0]) }),
+    setnpchead: (c, a) => mutate(c, { modelType: 'NPC_HEAD', modelId: asInt(a[0]) }),
+    setuseop: (c, a) => mutate(c, { targetVerb: asStr(a[0]) }),
+    setuseoptionstring: (c, a) => mutate(c, { targetVerb: asStr(a[0]) }),
+    setscrollpos: () => { /* scroll offsets aren't modelled in the preview */ },
+    setop: (c, a) => {
+      if (!c) return
+      const idx = asInt(a[0]) - 1
+      const options = [...(c.options ?? [])]
+      while (options.length <= idx) options.push('')
+      options[idx] = asStr(a[1])
+      mutate(c, { options, hasInteraction: true })
+    },
+  }
+
+  // getters shared by cc_/if_ variants
+  const getters: Record<string, (c: IComponentDefinition | null) => Cs2Value> = {
+    getx: (c) => c ? relPos((c.interfaceId << 16) | c.componentId).x : 0,
+    gety: (c) => c ? relPos((c.interfaceId << 16) | c.componentId).y : 0,
+    getwidth: (c) => c ? rectOf((c.interfaceId << 16) | c.componentId)?.width ?? 0 : 0,
+    getheight: (c) => c ? rectOf((c.interfaceId << 16) | c.componentId)?.height ?? 0 : 0,
+    gethide: (c) => c?.hidden ? 1 : 0,
+    ishidden: (c) => c?.hidden ? 1 : 0,
+    gettext: (c) => c?.text ?? '',
+    getgraphic: (c) => c?.spriteId ?? -1,
+    getspriteid: (c) => c?.spriteId ?? -1,
+    getcolour: (c) => c?.color ?? 0,
+    getcolor: (c) => c?.color ?? 0,
+    gettrans: (c) => c?.transparency ?? 0,
+    gettransparency: (c) => c?.transparency ?? 0,
+    getscrollx: () => 0,
+    getscrolly: () => 0,
+    getscrollwidth: (c) => c?.scrollWidth ?? 0,
+    getscrollheight: (c) => c?.scrollHeight ?? 0,
+    getlayer: (c) => c && c.parent !== -1 ? ((c.interfaceId << 16) | (c.parent & 0xffff)) >>> 0 : -1,
+    getparentlayer: (c) => c && c.parent !== -1 ? ((c.interfaceId << 16) | (c.parent & 0xffff)) >>> 0 : -1,
+    getcontaineritemid: (c) => c?.modelType === 'ITEM' ? c.modelId : -1,
+    get2dangle: (c) => c?.angle2d ?? 0,
+  }
+
+  /** hook installers: recorded as intentional no-ops (we don't run event
+   *  hooks in a static preview), NOT warned as unknown */
+  const HOOK_INSTALLERS = new Set([
+    'setonmouseover', 'setonmouseleave', 'setonmouserepeat', 'setonclick',
+    'setonop', 'setondrag', 'setondragcomplete', 'setonhold', 'setonrelease',
+    'setontimer', 'setonvartransmit', 'setonstattransmit', 'setoninvtransmit',
+    'setonkey', 'setonscrollwheel', 'setonclanchat', 'setonchat', 'setonuse',
+    'setonmiscactivity', 'setondialogabort', 'setonsubchange', 'setonresize',
+  ])
+
+  const envStub = (name: string, result: Cs2Value = 0) => {
+    scene.warn(name, 'environment op stubbed')
+    return result
+  }
+
+  return {
+    async loadScriptSource(id: number): Promise<string | null> {
+      try {
+        const dir = await ctx.rootHandle.getDirectoryHandle('cs2')
+        const file = await (await dir.getFileHandle(`${id}.cs2`)).getFile()
+        return await file.text()
+      } catch { return null }
+    },
+
+    warn(message: string) {
+      scene.warn('interpreter', message)
+    },
+
+    callBuiltin(rawName: string, args: Cs2Value[]) {
+      const [name, bank] = bankOf(rawName)
+
+      // ---- component addressing ----
+      if (name === 'get_comp') return ((asInt(args[0]) << 16) | (asInt(args[1]) & 0xffff)) >>> 0
+      if (name === 'cc_create') return scene.create(bank, asInt(args[0]), asInt(args[1]), asInt(args[2])) ? 1 : 0
+      if (name === 'cc_find') return scene.find(bank, asInt(args[0]), asInt(args[1])) ? 1 : 0
+      if (name === 'cc_setchild') {
+        scene.active[bank] = scene.get(asInt(args[0]))
+        return scene.active[bank] ? 1 : 0
+      }
+      if (name === 'cc_deleteall') { scene.deleteAll(asInt(args[0])); invalidateLayout(); return }
+      if (name === 'cc_delete') {
+        // deletes the ACTIVE dynamic component
+        const c = activeOf(bank)
+        if (c) {
+          const iface = scene.interfaces.get(c.interfaceId)
+          if (iface) iface.components[c.componentId] = null
+          scene.active[bank] = null
+          invalidateLayout()
+        }
+        return
+      }
+      if (name === 'if_getnextsubid') {
+        const parentHash = asInt(args[0])
+        const iface = scene.interfaces.get(parentHash >>> 16)
+        if (!iface) return 0
+        const parentKeyBase = (parentHash & 0xffff) << 16
+        let next = 0
+        for (const key of iface.dynamicByKey.keys()) {
+          if ((key & 0xffff0000) === parentKeyBase) next = Math.max(next, (key & 0xffff) + 1)
+        }
+        return next
+      }
+      if (name === 'if_isopen') return scene.subs.has(asInt(args[0]) >>> 0) ? 1 : 0
+      if (name === 'if_isopenwithid' || name === 'if_isopenwithid2') {
+        return scene.subs.get(asInt(args[0]) >>> 0) === asInt(args[1]) ? 1 : 0
+      }
+      if (name === 'if_opensubclient') {
+        const target = asInt(args[0]) >>> 0
+        const ifaceId = asInt(args[1])
+        if (!ctx.loadInterface) { scene.warn(rawName, 'no interface loader'); return }
+        return (async () => {
+          const comps = await ctx.loadInterface!(ifaceId)
+          if (!comps) { scene.warn(rawName, `interface ${ifaceId} missing`); return undefined }
+          scene.addInterface(ifaceId, comps)
+          scene.subs.set(target, ifaceId)
+          invalidateLayout()
+          return undefined
+        })()
+      }
+      if (name === 'if_closesubclient') {
+        scene.subs.delete(asInt(args[0]) >>> 0)
+        return
+      }
+
+      // ---- cc_* setters/getters on the active component ----
+      if (name.startsWith('cc_')) {
+        const op = name.slice(3)
+        if (setters[op]) { setters[op](activeOf(bank), args); return }
+        if (getters[op]) return getters[op](activeOf(bank))
+        if (HOOK_INSTALLERS.has(op)) return
+        scene.warn(rawName, `unimplemented cc op (${args.length} args)`)
+        return 0
+      }
+
+      // ---- if_* setters/getters addressed by hash (LAST arg) ----
+      if (name.startsWith('if_')) {
+        const op = name.slice(3)
+        if (setters[op]) {
+          const hash = asInt(args[args.length - 1])
+          setters[op](scene.get(hash), args.slice(0, -1))
+          return
+        }
+        if (getters[op]) return getters[op](scene.get(asInt(args[0])))
+        if (HOOK_INSTALLERS.has(op)) return
+        scene.warn(rawName, `unimplemented if op (${args.length} args)`)
+        return 0
+      }
+
+      // ---- vars ----
+      if (name === '__get_varp') return varps.get(asInt(args[0])) ?? 0
+      if (name === '__get_varbit' || name === '__get_varpbit') return varbits.get(asInt(args[0])) ?? 0
+      if (name.startsWith('__get_clan')) return 0
+      if (name === '__set_varp') { varps.set(asInt(args[0]), asInt(args[1])); return }
+      if (name === '__set_varbit' || name === '__set_varpbit') { varbits.set(asInt(args[0]), asInt(args[1])); return }
+      if (name === '__set_varc') { varcs.set(asInt(args[0]), asInt(args[1])); return }
+      if (name === '__set_varc_string') { varcStrings.set(asInt(args[0]), asStr(args[1])); return }
+      if (name.startsWith('__set_clan')) return
+      if (name === '__get_varc' || name === '__get_clientvarp') return varcs.get(asInt(args[0])) ?? 0
+      if (name === '__get_varc_string' || name === '__get_varcstring') return varcStrings.get(asInt(args[0])) ?? ''
+      if (name === 'setvarc_int' || name === 'setvarcint') { varcs.set(asInt(args[0]), asInt(args[1])); return }
+      if (name === 'setvarc_string') { varcStrings.set(asInt(args[0]), asStr(args[1])); return }
+      if (name === 'setvarp' || name === 'setvar') { varps.set(asInt(args[0]), asInt(args[1])); return }
+      if (name === 'setvarbit') { varbits.set(asInt(args[0]), asInt(args[1])); return }
+      if (name === 'getvarc_int') return varcs.get(asInt(args[0])) ?? 0
+      if (name === 'getvarc_string') return varcStrings.get(asInt(args[0])) ?? ''
+      if (name === 'getvarbit') return varbits.get(asInt(args[0])) ?? 0
+      if (name === 'getvarp') return varps.get(asInt(args[0])) ?? 0
+
+      // ---- environment queries ----
+      if (name === 'windowed_getmode') return ctx.mode === 'fixed' ? 1 : 2
+      if (name === 'world_language') return 0
+      if (name === 'clientclock') return 0
+      if (name === 'map_members' || name === 'world_members' || name === 'playermember') return 1
+      if (name === 'stat' || name === 'stat_base') return 1 // a fresh level-1 account
+      if (name === 'stat_visible_xp') return 0
+      if (name === 'runenergy_visible') return 100
+      if (name === 'runweight_visible') return 0
+      if (name === 'inv_size') return 28
+      if (name.startsWith('chat_getfilter')) return 0
+      if (name.startsWith('userdetail')) return 0
+      if (name === 'playermod' || name === 'playermodlevel' || name === 'staffmodlevel') return 0
+      if (name === 'gender') return 0
+      if (name === 'get_displayname' || name === 'chat_playername') return 'Player'
+      if (name === 'comlevel_active') return 3
+      if (name === 'new_array') {
+        const size = asInt(args[1])
+        return [new Array(Math.max(0, Math.min(size, 65536))).fill(0) as Cs2Value[]] as Cs2Value[]
+      }
+      if (name === 'struct_param' || name === 'item_param' || name === 'npc_param' || name === 'object_param' || name === 'quest_param') {
+        const folder = { struct_param: ['config', 'structs'], item_param: ['items'], npc_param: ['npcs'], object_param: ['objects'], quest_param: ['config', 'quests'] }[name]!
+        const key = `${name}:${asInt(args[0])}`
+        let p = paramCache.get(key)
+        if (!p) {
+          p = (async () => {
+            try {
+              let dir = ctx.rootHandle
+              for (const seg of folder) dir = await dir.getDirectoryHandle(seg)
+              const file = await (await dir.getFileHandle(`${asInt(args[0])}.json`)).getFile()
+              const def = JSON.parse(await file.text()) as { parameters?: Record<string, unknown>; params?: Record<string, unknown>; values?: Record<string, unknown> }
+              return def.parameters ?? def.params ?? def.values ?? {}
+            } catch { return {} }
+          })()
+          paramCache.set(key, p)
+        }
+        return p.then((table) => {
+          const v = table[String(asInt(args[1]))]
+          return typeof v === 'string' ? v : typeof v === 'number' ? v : 0
+        })
+      }
+      if (name === 'instr6213') {
+        // if_setop(opIndex, text, comp) under its unnamed id
+        setters.setop!(scene.get(asInt(args[2])), [args[0], args[1]])
+        return
+      }
+
+      // ---- arithmetic / string library ----
+      if (name === 'scale') {
+        const [v, range, max] = [asInt(args[0]), asInt(args[1]), asInt(args[2])]
+        return range === 0 ? 0 : ((v * max / range) | 0)
+      }
+      if (name === 'min') return Math.min(asInt(args[0]), asInt(args[1]))
+      if (name === 'max') return Math.max(asInt(args[0]), asInt(args[1]))
+      if (name === 'abs') return Math.abs(asInt(args[0]))
+      if (name === 'random') return 0 // deterministic previews
+      if (name === 'randominc') return 0
+      if (name === 'interpolate') {
+        // interpolate(y0, y1, x0, x1, x)
+        const [y0, y1, x0, x1, x] = args.map(asInt)
+        if (x1 === x0) return y0
+        return (y0 + ((y1 - y0) * (x - x0) / (x1 - x0))) | 0
+      }
+      if (name === 'to_string' || name === 'tostring') return asStr(args[0])
+      if (name === 'to_int' || name === 'toint') {
+        const n = parseInt(asStr(args[0]), 10)
+        return Number.isFinite(n) ? n : 0
+      }
+      if (name === 'fromRGB' || name === 'fromrgb') return ((asInt(args[0]) & 0xff) << 16) | ((asInt(args[1]) & 0xff) << 8) | (asInt(args[2]) & 0xff)
+      if (name === 'string_length') return asStr(args[0]).length
+      if (name === 'substring') return asStr(args[0]).slice(asInt(args[1]), asInt(args[2]))
+      if (name === 'string_indexof_string') return asStr(args[0]).indexOf(asStr(args[1]), asInt(args[2]))
+      if (name === 'string_indexof_char') return asStr(args[0]).indexOf(String.fromCharCode(asInt(args[1])), asInt(args[2]))
+      if (name === 'uppercase') return asStr(args[0]).toUpperCase()
+      if (name === 'lowercase' || name === 'lower_string') return asStr(args[0]).toLowerCase()
+      if (name === 'tostring_localised' || name === 'tostring_localized' || name === 'formatnumber') return asStr(args[0])
+      if (name === 'append') return asStr(args[0]) + asStr(args[1])
+      if (name === 'append_num' || name === 'append_signnum') return asStr(args[0]) + asStr(args[1])
+      if (name === 'append_char') return asStr(args[0]) + String.fromCharCode(asInt(args[1]))
+      if (name === 'removetags') return asStr(args[0]).replace(/<[^>]*>/g, '')
+      if (name === 'escape') return asStr(args[0])
+      if (name === 'compare') {
+        const [x, y] = [asStr(args[0]), asStr(args[1])]
+        return x < y ? -1 : x > y ? 1 : 0
+      }
+      if (name === 'get_col_tag') return '<col=' + (asInt(args[0]) & 0xffffff).toString(16).padStart(6, '0') + '>'
+      if (name === 'pow') return Math.pow(asInt(args[0]), asInt(args[1])) | 0
+      if (name === 'client_clock') return 0
+
+      // ---- text measurement (real glyph metrics) ----
+      if (name === 'paramheight') return measureLines(asStr(args[0]), asInt(args[1]), asInt(args[2]))
+      if (name === 'stringwidth') {
+        return (async () => {
+          const font = await loadCacheFont(ctx.rootHandle, asInt(args[1]))
+          return font ? measureCacheText(font, asStr(args[0])) : asStr(args[0]).length * 6
+        })()
+      }
+      if (name === 'parawidth' || name === 'paramwidth') {
+        return (async () => {
+          const font = await loadCacheFont(ctx.rootHandle, asInt(args[2]))
+          if (!font) return String(args[0]).length * 6
+          let widest = 0
+          for (const line of asStr(args[0]).split('<br>')) widest = Math.max(widest, measureCacheText(font, line))
+          return widest
+        })()
+      }
+
+      // ---- enums (real dump data; typed by the value-type char exactly as
+      // the client op is: 's' returns a string, everything else an int) ----
+      if (name === 'enum') {
+        return (async () => {
+          const [, valueChar, enumId, key] = args
+          const wantString = asStr(valueChar) === 's'
+          const def = await loadEnum(asInt(enumId))
+          if (!def) return wantString ? '' : -1
+          const v = def.values?.[String(asInt(key))]
+          if (wantString) {
+            if (typeof v === 'string') return v
+            const dflt = def.defaultStringValue ?? ''
+            return dflt === 'null' ? '' : dflt
+          }
+          if (typeof v === 'number') return v | 0
+          return (def.defaultIntValue ?? -1) | 0
+        })()
+      }
+      if (name === 'enum_string') {
+        return (async () => {
+          const def = await loadEnum(asInt(args[0]))
+          const v = def?.values?.[String(asInt(args[1]))]
+          if (typeof v === 'string') return v
+          const dflt = def?.defaultStringValue ?? ''
+          return dflt === 'null' ? '' : dflt
+        })()
+      }
+      if (name === 'enum_getoutputcount') {
+        return (async () => {
+          const def = await loadEnum(asInt(args[0]))
+          return def?.values ? Object.keys(def.values).length : 0
+        })()
+      }
+      if (name === 'enum_hasoutput') {
+        return (async () => {
+          const def = await loadEnum(asInt(args[2] ?? args[0]))
+          return def?.values ? 1 : 0
+        })()
+      }
+
+      // ---- sound / misc environment: silent stubs ----
+      if (name.startsWith('sound_') || name.startsWith('detailget') || name.startsWith('jingle')) {
+        return envStub(rawName)
+      }
+      if (name.startsWith('hook_')) return // hook installers by another name
+      if (name.startsWith('instr')) {
+        const n = Number(name.slice(5))
+        if (HOOK_INSTRS.has(n)) return // component-hook installers: no-op
+        // hook installers are recognisable by SHAPE: a script_N reference plus
+        // a signature string among the args (cc-flavoured ones carry no
+        // component); treat those as intentional no-ops, not unknowns
+        if (args.some((a) => typeof a === 'string' && /^script_-?\d+$/.test(a))) return
+        scene.warn(rawName, `unnamed instruction (${args.length} args)`)
+        return 0
+      }
+
+      scene.warn(rawName, `unknown builtin (${args.length} args)`)
+      return 0
+    },
+  }
+}
+
+function clampMode(v: number, max: number): number {
+  return v < 0 ? 0 : v > max ? max : v
+}
+
+/** COMPONENT_HOOK instr ids (hook installers whose ops are unnamed in the
+ *  table) — intentional no-ops in a static preview, not unknowns. */
+const HOOK_INSTRS = new Set([
+  6231, 6232, 6235, 6237, 6239, 6240, 6246, 6247, 6248, 6249, 6250, 6251,
+  6252, 6253, 6254, 6255, 6256, 6257, 6260, 6342, 6376, 6393, 6507, 6527,
+  6708, 6898,
+])
