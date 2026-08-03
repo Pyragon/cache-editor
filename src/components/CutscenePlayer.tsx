@@ -282,6 +282,8 @@ type EntityRt = AnimHolder & {
    *  `tile * 512 + getSize() * 256` (EntityUpdating). Cutscene 15's carriages
    *  are 2×2 and its smoke clouds 5×5. */
   size: number
+  /** entities tween the loop wrap (client bool_5 path) — see nextFrameIndex */
+  basTween?: boolean
   standAnimId: number
   walkAnimId: number
   /** BAS runningSequence / teleportSequence — the client picks between these
@@ -835,11 +837,27 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     return frameSetSync.current.get(setId)?.frames.get(frameFileId(def, index)) ?? null
   }
 
-  /** the tween target's index, or -1 when the frame holds (one-shot end) */
-  const nextFrameIndex = (anim: AnimState) => {
+  /** The tween target's index, or -1 when the frame holds — the client's
+   *  Animation.setupLoop frame2Index rules at the wrap:
+   *  - a sequence that will FINISH here (one-shot, or loopDelay −1 on a
+   *    non-entity) has NO tween target: it holds. Tweening toward frame 0
+   *    instead played cutscene 10's arrow volley (object 67866, seq 16059,
+   *    18 frames loopDelay 3) in REVERSE for the last frame's duration —
+   *    arrows rising off the trolls and flying backwards, visible only in
+   *    smooth playback because stepping snaps to keyframes.
+   *  - a looping sequence tweens toward its REWIND target,
+   *    count − loopDelay (the tail window), not frame 0.
+   *  - entities (the client's bool_5 path) with loopDelay −1 tween back to
+   *    frame 0, smoothing the stand restart the BAS re-arm is about to do. */
+  const nextFrameIndex = (anim: AnimState, basTween?: boolean) => {
     const count = anim.def.frameDurations?.length ?? 0
     if (!anim.def.tweened || count <= 1) return -1
-    return anim.frame + 1 >= count ? (anim.oneShot ? -1 : 0) : anim.frame + 1
+    if (anim.frame + 1 < count) return anim.frame + 1
+    const loopDelay = anim.def.loopDelay ?? -1
+    if (loopDelay < 0) return basTween && !anim.oneShot ? 0 : -1
+    if (anim.oneShot) return -1
+    const rewound = count - loopDelay
+    return rewound >= 0 && rewound < count ? rewound : -1
   }
 
   type PoseTarget = {
@@ -851,6 +869,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     onPosed?: (posed: PosedVertices) => void
     /** this instance's pose buffers, allocated on first use */
     scratch?: PoseScratch
+    /** entity holders tween the wrap like the client's bool_5=true path
+     *  (see nextFrameIndex); objects and gfx hold instead */
+    basTween?: boolean
   }
 
   /** Pose from the resolved mirrors. False = something still loading. */
@@ -863,7 +884,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     if (!frameSetSync.current.has(setId)) return false
     const frame = frameSync(anim.def, anim.frame)
     if (!frame || frame.rawFallbackBytes) return true
-    const ni = nextFrameIndex(anim)
+    const ni = nextFrameIndex(anim, e.basTween)
     let next: typeof frame | null = null
     if (ni >= 0) {
       const nextSetId = anim.def.frameSetIds?.[ni]
@@ -900,7 +921,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       try {
         await loadFrameSet(anim.def.frameSetIds?.[anim.frame] ?? -1)
         const frame = frameSync(anim.def, anim.frame)
-        const ni = nextFrameIndex(anim)
+        const ni = nextFrameIndex(anim, e.basTween)
         if (ni >= 0) await loadFrameSet(anim.def.frameSetIds?.[ni] ?? -1)
         if (frame && !frame.rawFallbackBytes) await loadFrameBase(frame.frameBaseId)
         if (rt.current.disposed || e.anim !== anim) return
@@ -2048,7 +2069,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         }
         for (const entity of def.entities) {
           const ert: EntityRt = {
-            em: null, group: new THREE.Group(), placed: false,
+            em: null, group: new THREE.Group(), placed: false, basTween: true,
             fineX: 0, fineY: 0, plane: 0, yaw: 0, route: null, anim: null, size: 1,
             animPending: 0, animCommitted: 0,
             standAnimId: -1, walkAnimId: -1, runAnimId: -1, halfWalkAnimId: -1, moveAnimId: -1,
