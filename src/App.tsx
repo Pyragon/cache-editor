@@ -1053,7 +1053,15 @@ function App() {
   const pendingPathRef = useRef(parseAppPath(window.location.pathname))
 
   useEffect(() => {
-    if (!cacheHandle || historyRestoringRef.current) return
+    if (!cacheHandle) return
+    // While an entry's list streams, the location isn't settled: the entry is
+    // selected but its item is still null, and loadEntryItems picks one when
+    // the stream ends. Recording that half-state used to push a phantom
+    // {entry, null} entry — one you had to press back through twice, and
+    // which on RESTORE resolved to a real item and pushed again, truncating
+    // everything forward of it (forward to /textures ate /textures/6).
+    if (isLoading) return
+    const restoring = historyRestoringRef.current
     const next = { entryId: selectedEntryId, itemId: selectedItemId }
     // with a selection, the URL follows it; with none, leave the address
     // alone — the initial-path navigation may still be about to consume it
@@ -1067,8 +1075,23 @@ function App() {
     // nothing selected but a real state recorded = a fresh load whose
     // history survived the refresh — don't bury it under a null entry
     if (next.entryId == null) return
+    // Same entry, different item, and this isn't a fresh user selection: the
+    // recorded location just RESOLVED (an entry-level state landing on its
+    // default item, or a restore whose item id no longer exists in the list).
+    // Refine it in place — a push here would drop the forward stack.
+    if (state.entryId === next.entryId && (state.itemId == null || restoring)) {
+      window.history.replaceState(next, '', url)
+      return
+    }
+    if (restoring) return
+    // an unrecorded location (first selection after opening a cache) replaces
+    // the placeholder rather than stacking on top of it
+    if (state.entryId == null && state.itemId == null) {
+      window.history.replaceState(next, '', url)
+      return
+    }
     window.history.pushState(next, '', url)
-  }, [cacheHandle, selectedEntryId, selectedItemId, selectedEntry])
+  }, [cacheHandle, isLoading, selectedEntryId, selectedItemId, selectedEntry])
 
   // Navigate to the load-time path once the cache (and its entry list) is
   // open. Unknown or unavailable entry names just stay on the picker view.
