@@ -9,6 +9,7 @@ import { NumberInput, NumGrid, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { InterfaceAssets, childrenByParent, hitTestComponent, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
 import GameframePreview from './GameframePreview'
+import Cs2ScriptModal from './Cs2ScriptModal'
 import './InterfaceViewer.css'
 
 // CS2 script hooks a component may carry — shown as a flat list of the ones
@@ -184,6 +185,8 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   const [zoom, setZoom] = useState<number | null>(null)
   /** flat single-interface canvas vs the composed in-game gameframe */
   const [gamePreview, setGamePreview] = useState(false)
+  /** CS2 script open in the read-only viewer (null = closed) */
+  const [viewScript, setViewScript] = useState<number | null>(null)
   /** collapsed tree parents (componentIds) */
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
   const [modelPreview, setModelPreview] = useState<{ modelId: number; loading: boolean; data: ModelData | null } | null>(null)
@@ -661,20 +664,49 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                 {attachedScripts.length === 0 && (
                   <div className="iface-no-scripts">No scripts attached to this component.</div>
                 )}
-                {attachedScripts.map(([key, label]) => (
-                  <label key={key} className="item-field iface-text-field">
-                    <span className="item-field-label">{label}</span>
-                    <ScriptInput
-                      script={selected[key] as CS2Script | null}
-                      onCommit={(s) => set(key, s)}
-                    />
-                  </label>
-                ))}
+                {attachedScripts.map(([key, label]) => {
+                  // a hook is [scriptId, ...args] — the id is only viewable
+                  // when it's actually a number (some hooks carry a string tag)
+                  const hook = selected[key] as CS2Script | null
+                  const id = typeof hook?.[0] === 'number' ? (hook[0] as number) : null
+                  return (
+                    <label key={key} className="item-field iface-text-field">
+                      {/* same top-right cell button as the id fields that jump
+                          to another entry, so every cell's action sits in the
+                          same place regardless of label length */}
+                      <span className="item-field-label field-link-label">
+                        <span>{label}</span>
+                        {id != null && id >= 0 && (
+                          <button
+                            type="button"
+                            className="field-link-btn"
+                            title={`Read script ${id} without leaving this component`}
+                            onClick={(e) => { e.preventDefault(); setViewScript(id) }}
+                          >
+                            View
+                          </button>
+                        )}
+                      </span>
+                      <ScriptInput
+                        script={hook}
+                        onCommit={(s) => set(key, s)}
+                      />
+                    </label>
+                  )
+                })}
               </Group>
             </>
           )}
         </div>
       </div>
+
+      {viewScript != null && (
+        <Cs2ScriptModal
+          rootHandle={data.rootHandle ?? null}
+          scriptId={viewScript}
+          onClose={() => setViewScript(null)}
+        />
+      )}
 
       {isDirty && (
         <div className="save-bar">

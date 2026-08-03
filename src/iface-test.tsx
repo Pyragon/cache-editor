@@ -1,15 +1,27 @@
 import { createRoot } from 'react-dom/client'
 import { useEffect, useState } from 'react'
 import GameframePreview from './components/GameframePreview'
+import Cs2ScriptModal from './components/Cs2ScriptModal'
 import { InterfaceAssets } from './components/interfacePreview'
 import { loadInterfaceById } from './loaders/interfaces'
 import type { InterfaceData } from './loaders/interfaces'
 import './index.css'
+// The app bundles every component stylesheet into one global sheet, so rules
+// from viewers this page never renders still apply in the real app. Pull the
+// shared ones in or the harness tests a DIFFERENT cascade than production —
+// which is how `.anim-preview-body`'s hard 960px width passed a rig check and
+// still broke the script modal on screen.
+import './components/AnimationViewer.css'
+import './components/ItemViewer.css'
+import './components/QuestViewer.css'
+import './components/InterfaceViewer.css'
 
 // Render-rig harness for the gameframe preview (see scripts/render-rig):
 // mounts GameframePreview against the dump-server's fake directory handle.
 // `?iface=<id>` picks the interface plugged into the central slot (default
 // 190, the quest tab — a small, sprite-and-text interface).
+// `?script=<id>` instead mounts the read-only CS2 script modal, for checking
+// that it sizes itself to the script it's showing.
 
 const params = new URLSearchParams(location.search)
 const BASE = `http://127.0.0.1:${params.get('dump') ?? '8787'}`
@@ -39,6 +51,12 @@ function fetchDir(path: string, name = ''): unknown {
   }
 }
 
+function ScriptHarness({ id }: { id: number }) {
+  const root = fetchDir('') as FileSystemDirectoryHandle
+  useEffect(() => { (window as unknown as Record<string, unknown>).__ifaceReady = true }, [])
+  return <Cs2ScriptModal rootHandle={root} scriptId={id} onClose={() => {}} />
+}
+
 function Harness() {
   const [data, setData] = useState<InterfaceData | null>(null)
   const [assets, setAssets] = useState<InterfaceAssets | null>(null)
@@ -59,4 +77,7 @@ function Harness() {
   return <GameframePreview data={data} assets={assets} opts={{ showHidden: false, showContainerOutlines: false }} />
 }
 
-createRoot(document.getElementById('root')!).render(<Harness />)
+const scriptParam = params.get('script')
+createRoot(document.getElementById('root')!).render(
+  scriptParam ? <ScriptHarness id={Number(scriptParam)} /> : <Harness />,
+)

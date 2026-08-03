@@ -1,0 +1,155 @@
+/* Read-only CS2 source view. The width is MEASURED from the source itself
+   (see Cs2ScriptModal.tsx) — a monospace block has an exactly knowable width,
+   so the dialog is as wide as its longest line and no wider. These are the
+   floor and ceiling for that. */
+.cs2-dialog {
+  width: min(1100px, 94vw);
+  min-width: min(420px, 94vw);
+  max-width: 94vw;
+}
+
+/* .anim-preview-body — the shared dialog body — hard-codes
+   `width: min(92vw, 960px)`, which fought the measured dialog width: the body
+   stayed 960px inside a 420px dialog (a horizontal scrollbar, and content laid
+   out off-screen) and refused to grow past 960 for a wide script. Two classes
+   deep so this wins regardless of stylesheet order in the bundle. */
+.cs2-dialog .cs2-body {
+  width: 100%;
+}
+
+.cs2-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 80vh;
+  /* containing block for the off-screen measuring row; nothing in this dialog
+     ever scrolls sideways — the source wraps and the measurer is clipped */
+  position: relative;
+  overflow-x: hidden;
+}
+
+.cs2-source {
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #14161c;
+  padding: 8px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--grey-light) transparent;
+}
+
+.cs2-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 0 10px;
+  line-height: 1.55;
+}
+
+.cs2-line:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.cs2-lineno {
+  flex: none;
+  width: 3.5ch;
+  text-align: right;
+  color: #5b6478;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  user-select: none;
+}
+
+.cs2-code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  color: #cfd6e4;
+  /* Wrap instead of scrolling sideways. A decompiled call with a dozen args
+     is longer than any sane dialog width, and reading code by dragging a
+     horizontal scrollbar is miserable — a wrapped line stays on screen, and
+     the line-number column makes clear where each real line starts. The tab
+     size matters as much: the dump indents with tabs, and at the browser's
+     default 8 the deeper blocks alone overflow. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Calls to other scripts read as links — following a chain is how these are
+   read, and the alternative is losing the component you were editing. */
+.cs2-ref {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: #5ab0ff;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.cs2-ref:hover {
+  color: #8ecbff;
+  text-decoration: underline;
+}
+
+.cs2-back {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim, #8a90a0);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 7px;
+  margin-right: 8px;
+  cursor: pointer;
+}
+
+.cs2-back:hover {
+  color: var(--text);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.cs2-trail {
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  margin-right: 10px;
+}
+
+.cs2-loading,
+.cs2-error {
+  color: var(--text-dim, #8a90a0);
+  font-size: 12px;
+  font-style: italic;
+  padding: 14px 4px;
+}
+
+
+/* The measuring twin: same row markup as a real line so its width is exactly
+   what one costs, but out of flow, unpainted, and never wrapped — wrapping
+   would make it report the container width instead of the content's.
+   It lives inside a 0x0 CLIPPING box: an absolutely positioned max-content
+   row still contributes scrollable overflow to its ancestors, which is what
+   put a horizontal scrollbar across the dialog even when the code fit. */
+.cs2-measure-box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.cs2-measure {
+  width: max-content;
+}
+
+.cs2-measure .cs2-code {
+  white-space: pre;
+  overflow-wrap: normal;
+  flex: none;
+}
