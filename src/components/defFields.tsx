@@ -29,7 +29,7 @@ export function ItemIcon({ id }: { id: number }) {
 // unstyled spinner arrows (hidden via .num-input in ItemViewer.css).
 // `className` picks the surrounding field style (item-field-input in grids,
 // cell-input in tables) so it drops into either context.
-export function NumberInput({ value, onChange, className = 'item-field-input', step = 1, min, max, title, placeholder, onStep, inputRef }: {
+export function NumberInput({ value, onChange, className = 'item-field-input', step = 1, min, max, title, placeholder, digits, onStep, inputRef }: {
   value: number
   onChange: (value: number) => void
   className?: string
@@ -38,6 +38,12 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
   max?: number
   title?: string
   placeholder?: string
+  /** How many digits this field can hold (callers know: a viewport is 3-4, a
+   *  colour channel 3...). Sizes the field to the content instead of filling
+   *  its container, and gives it a visible bordered box — standalone fields
+   *  are otherwise background-on-background. Omit inside tables/grids, where
+   *  the cell provides the sizing and chrome. */
+  digits?: number
   /** Takes over the steppers and Arrow keys so a field can walk a set of valid
    *  values instead of every integer (e.g. only the items that fit an
    *  equipment slot). The owner calls `onChange` itself, which lets the search
@@ -67,7 +73,12 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
   }
 
   return (
-    <span className="num-input" title={title}>
+    <span
+      className={`num-input${digits ? ' num-input-sized' : ''}`}
+      title={title}
+      // digits·ch content + 6px left pad + 41px stepper reserve + 2px borders
+      style={digits ? { width: `calc(${digits + 1}ch + 49px)` } : undefined}
+    >
       <input
         ref={inputRef}
         className={`${className} num-input-field`}
