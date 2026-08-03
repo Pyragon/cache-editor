@@ -51,6 +51,8 @@ const ONE_V3 = new THREE.Vector3(1, 1, 1)
 const CULL_RADIUS = 1536
 const frustum = new THREE.Frustum()
 const frustumMatrix = new THREE.Matrix4()
+/** scratch for the tall-loc footprint cull — corner outcodes of one loc */
+const tallOutcodes: number[] = []
 const cullSphere = new THREE.Sphere()
 const yawEuler = new THREE.Euler()
 const yawQuat = new THREE.Quaternion()
@@ -101,14 +103,38 @@ function sunOf(env: RegionEnvironment | null): SunConfig {
   }
 }
 
-/** Draw distance the fog fades out over, in tiles. The client uses the
- *  player's draw-distance preference; 40 (the map view's default) put the fog
- *  START at 14.6 tiles in cutscene 1 (fogColour black, fogDepth 3000 — a
- *  23-tile fade band), swallowing Saradomin's 26-unit eye sprites from
- *  mid-distance while his big lit silhouette stayed readable. 64 matches a
- *  high draw-distance client and keeps the fade band's far edge past the
- *  2×2-region area a cutscene can even copy. */
-const FOG_TILES = 64
+/** The cutscene map is ALWAYS a 104-tile map: `MapRegion.method4498` (the
+ *  cutscene map builder) calls `setMapSizes(MapSize.SIZE_104)` unconditionally
+ *  — NOT the areas' extent (cutscene 14's areas span 64 tiles) and NOT the
+ *  player's build-area preference. Fixed, not a knob. */
+const CUTSCENE_MAP_TILES = 104
+
+/** The client's draw distance, MapRegion.method4447 verbatim:
+ *  `zFar = ((int)(34.46 * sizeX) << 2) + 512 + 3072` (the +512 is the
+ *  hardware-renderer branch, method8454). Fog ENDS here — the renderer's
+ *  fogEnd = zFar − 0 (Class239.method4075 passes offset 0) — and starts
+ *  (fogDepth+256)*4 units nearer, clamped to the near plane. 104 tiles →
+ *  17916 units ≈ 35 tiles. The old hand-tuned 64-tile fog left the QBD
+ *  lair's pillar ring (cutscene 14, fogDepth 1200 → fog over ~23.6-35
+ *  tiles in the client) fully crisp against the fogged backdrop. */
+const DRAW_DISTANCE = (Math.trunc(34.46 * CUTSCENE_MAP_TILES) << 2) + 512 + 3072
+
+/** The client's per-tile visibility column (SceneObjectManager.method3447):
+ *  every frame, each tile corner is frustum-tested as a VERTICAL SEGMENT from
+ *  `1000 << 2` = 4000 units above the top plane's ground down to 512 + 4000
+ *  below plane 0's, a tile is visible while its four corner segments aren't
+ *  all outside one frustum plane (outcode AND), and a loc draws only while
+ *  one of its footprint tiles is visible (GraphNode_Sub1_Sub1.method13029).
+ *  A loc TALLER than the column can fill the screen while every footprint
+ *  tile is out of frame — the client then culls it wholesale. That quirk is
+ *  load-bearing: cutscene 14 parks the camera INSIDE the QBD lair's 15-tile
+ *  pillar (loc 71802) at cycle 1053, and this cull is what blanks the pillar
+ *  instead of smearing its lip across the shot. Locs taller than the column
+ *  leave the merged mesh (buildLocsMesh `tallLocUnits`) and take the client's
+ *  per-frame footprint test; for column-height locs the merged mesh is a fair
+ *  approximation, tracked in TODO.md's per-loc-mesh item. */
+const TALL_LOC_UNITS = 1000 << 2
+const TALL_COLUMN_DOWN = 512 + (1000 << 2)
 
 const VOLUME_KEY = 'cache-editor:cutscene-volume'
 
@@ -461,6 +487,18 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
        *  (a fire's spark faces stay collapsed except when pouring) */
       emitterPoses?: { pose(posed: PosedVertices): void }[]
     }[]
+    /** locs taller than the client's tile visibility column (TALL_LOC_UNITS),
+     *  split out of the merged mesh: their footprint corner columns are baked
+     *  at build (heights never change) and the RAF loop runs the client's
+     *  outcode test to toggle mesh.visible per frame. cw/ch = corner grid
+     *  dims (tileW+1 × tileH+1), corners indexed [i * ch + j]. */
+    tallLocs: {
+      mesh: THREE.Mesh
+      cornersTop: THREE.Vector3[]
+      cornersBottom: THREE.Vector3[]
+      cw: number
+      ch: number
+    }[]
     scene: THREE.Scene
     camera: THREE.PerspectiveCamera
     heightsByCell: Map<string, Int32Array[]>
@@ -501,7 +539,16 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       // 480·512/640 = 384 is a height/width ratio of 0.75, i.e. 4:3). The
       // client's projection focal length works out to tan(halfFovV) = 334/(4·
       // fovScale) with fovScale clamped to 334 → vertical FOV = 2·atan(0.25).
-      camera: new THREE.PerspectiveCamera(2 * Math.atan(0.25) * 180 / Math.PI, 4 / 3, 50, 60000),
+      // near = 200: the client's scene projection near plane, MapRegion's
+      // anInt3177 = 200 (method4447, read back via method4544 into the
+      // Class383 projection — the renderer's 50.0F is only its pre-game
+      // default). It's load-bearing for cutscene 14 (cycle ~1053): the camera
+      // passes INSIDE a pillar, and the client clips the pillar's own lip away
+      // (everything nearer than ~0.4 tiles) where near=50 left a grey band of
+      // it across the screen. Far stays extended past the client's zFar — fog
+      // (DRAW_DISTANCE) already hides world geometry at the client's draw
+      // distance, and clipping there would eat oversized skybox domes.
+      camera: new THREE.PerspectiveCamera(2 * Math.atan(0.25) * 180 / Math.PI, 4 / 3, 200, 60000),
       heightsByCell: new Map(),
       terrainByCell: new Map(),
       replacedLocs: new Map(),
@@ -525,6 +572,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       particles: null,
       billboards: null,
       animLocs: [],
+      tallLocs: [],
     }
   }
 
@@ -1701,7 +1749,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
           for (let plane = 0; plane < 4; plane++) {
             if (cell.def.objects.length === 0) continue
             setStatus(`Building region ${cell.rx},${cell.ry} objects (plane ${plane})…`)
-            locBuilds[plane] = await buildLocsMesh(cell.terrain, cell.def.objects, plane, heights, assets, undefined, lightGrid)
+            locBuilds[plane] = await buildLocsMesh(cell.terrain, cell.def.objects, plane, heights, assets, undefined, lightGrid, TALL_LOC_UNITS)
             if (cancelled) return
           }
 
@@ -1756,6 +1804,38 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
                   model: al.model, matrix: placedMatrix, upscale: modelUpscale(al.model), plane,
                 }) ?? undefined,
               })
+            }
+            // Locs taller than the client's tile visibility column: same
+            // per-loc build as the animated ones (static — no animator), plus
+            // the footprint corner columns the client frustum-tests
+            // (method3447): each corner is a vertical segment from 4000 units
+            // above the TOP plane's ground down to 4512 below plane 0's.
+            // Heights never change, so the segments bake here and the RAF
+            // pass only computes outcodes.
+            for (const tl of built.tall) {
+              const anim = await buildAnimatedLocMesh(tl.model, tl.matrix, assets, undefined, tl.owner, tl.points, tl.ambient, tl.contrast)
+              if (cancelled) return
+              if (!anim) continue
+              const placedMatrix = new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(tl.matrix)
+              anim.mesh.matrixAutoUpdate = false
+              anim.mesh.matrix.copy(placedMatrix)
+              anim.mesh.renderOrder = ORDER_OPAQUE_LOC
+              r.scene.add(anim.mesh)
+              const cw = tl.tileW + 1
+              const ch = tl.tileH + 1
+              const cornersTop: THREE.Vector3[] = []
+              const cornersBottom: THREE.Vector3[] = []
+              const topGrid = heights[heights.length - 1]
+              const baseGrid = heights[0]
+              for (let i = 0; i < cw; i++) {
+                for (let j = 0; j < ch; j++) {
+                  const sx = (tl.owner.x + i) << 9
+                  const sy = (tl.owner.y + j) << 9
+                  cornersTop.push(new THREE.Vector3(offsetX + sx, -averageHeight(topGrid, sx, sy) + TALL_LOC_UNITS, offsetZ - sy))
+                  cornersBottom.push(new THREE.Vector3(offsetX + sx, -averageHeight(baseGrid, sx, sy) - TALL_COLUMN_DOWN, offsetZ - sy))
+                }
+              }
+              r.tallLocs.push({ mesh: anim.mesh, cornersTop, cornersBottom, cw, ch })
             }
           }
 
@@ -2106,8 +2186,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         // black. Defaults are the client's (Class239.anInt2932 = 0xC8C0A8).
         {
           const fogColour = env?.environment?.fogColour ?? 0xc8c0a8
-          const end = FOG_TILES * 512
-          const start = Math.max(1, end - ((env?.environment?.fogDepth ?? 0) + 256) * 4)
+          const end = DRAW_DISTANCE
+          // clamped to the near plane like DirectXRenderer (fogStart < zNear → zNear)
+          const start = Math.max(200, end - ((env?.environment?.fogDepth ?? 0) + 256) * 4)
           r.scene.fog = new THREE.Fog(fogColour, start, end)
           r.scene.background = new THREE.Color(fogColour)
           // fixed-function fog covers particles/billboards in the client too
@@ -2315,6 +2396,36 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             r.camera.matrixWorldInverse.copy(r.camera.matrixWorld).invert(),
           )
           frustum.setFromProjectionMatrix(frustumMatrix)
+          // The client's footprint-column cull for tall locs (TALL_LOC_UNITS):
+          // per corner, the outcode is the set of frustum planes its whole
+          // vertical segment is outside of (both endpoints negative — the
+          // half-space is convex, so that IS the segment test); a tile is
+          // visible while its four corners' outcodes AND to zero
+          // (method3447), and the loc draws while any footprint tile is
+          // visible (method13029). Parked inside the QBD pillar, every
+          // footprint column is behind/below the view → the pillar blanks,
+          // exactly as the client does it.
+          for (const rec of r.tallLocs) {
+            const { cornersTop, cornersBottom, cw, ch } = rec
+            for (let k = 0; k < cornersTop.length; k++) {
+              let code = 0
+              for (let p = 0; p < 6; p++) {
+                const pl = frustum.planes[p]
+                if (pl.distanceToPoint(cornersTop[k]) < 0 && pl.distanceToPoint(cornersBottom[k]) < 0) code |= 1 << p
+              }
+              tallOutcodes[k] = code
+            }
+            let visible = false
+            outer: for (let i = 0; i < cw - 1; i++) {
+              for (let j = 0; j < ch - 1; j++) {
+                if ((tallOutcodes[i * ch + j] & tallOutcodes[(i + 1) * ch + j] & tallOutcodes[i * ch + j + 1] & tallOutcodes[(i + 1) * ch + j + 1]) === 0) {
+                  visible = true
+                  break outer
+                }
+              }
+            }
+            rec.mesh.visible = visible
+          }
           // Plane visibility for loc attachments follows the camera's FOCUS:
           // the client buckets particles per plane band and draws them under
           // the viewpoint's plane visibility. Without this, upper-plane
@@ -2467,6 +2578,7 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       rr.billboards?.dispose()
       rr.billboards = null
       rr.animLocs = []
+      rr.tallLocs = []
       rr.gfx = []
       rr.objects = []
       rr.entities = []

@@ -2971,6 +2971,17 @@ export type AnimatedLoc = {
   contrast: number
 }
 
+/** A static loc routed out of the merged mesh because its model tops out
+ *  above the client's per-tile visibility column (buildLocsMesh
+ *  `tallLocUnits`): the same per-loc record as an animated loc, plus its
+ *  rotated footprint so the scene can run the client's footprint-column
+ *  frustum cull per frame (see CutscenePlayer's TALL_LOC_UNITS). */
+export type TallLoc = AnimatedLoc & {
+  /** rotated footprint size in tiles */
+  tileW: number
+  tileH: number
+}
+
 /** A built animatable loc: its three.js mesh (geometry in model-local space —
  *  the caller sets `mesh.matrix` to the placement transform) plus an `update`
  *  that rewrites the position buffer from a posed animation frame. */
@@ -3948,7 +3959,16 @@ export async function buildLocsMesh(
   assets: LocAssets,
   onProgress?: (done: number, total: number) => void,
   lightGrid?: LightGrid,
-): Promise<{ mesh: THREE.Mesh | null; transparentLocs: THREE.Mesh[]; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[]; emitters: LocEmitter[] }> {
+  /** When set, a non-animated loc whose model tops out more than this many
+   *  units above its tile is returned in `tall` (a per-loc record like
+   *  `animated`) instead of joining the merged mesh, so the caller can apply
+   *  the client's per-frame footprint-column cull — the client's tile
+   *  visibility columns only reach 4000 units up, so taller locs (the QBD
+   *  lair's 15-tile pillars) vanish wholesale when their footprint leaves the
+   *  frustum, which a merged mesh can never reproduce. Omitted = old
+   *  behaviour, `tall` comes back empty (the map viewer's path). */
+  tallLocUnits?: number,
+): Promise<{ mesh: THREE.Mesh | null; transparentLocs: THREE.Mesh[]; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[]; tall: TallLoc[]; emitters: LocEmitter[] }> {
   // the Brightness preference scales the scene ambient — bake it into the sun
   // handed to every placement rather than special-casing computeModelLitRgb
   const bakeSun: ModelSun | undefined = assets.brightness === 1 ? undefined : {
@@ -3961,6 +3981,9 @@ export async function buildLocsMesh(
   // locs with an idle sequence (waving flags etc.) — collected out of the merged
   // static mesh so the scene can pose them per frame.
   const animated: AnimatedLoc[] = []
+  // locs taller than the caller's tallLocUnits — per-loc records for the
+  // client's footprint-column cull (empty unless the caller opts in).
+  const tall: TallLoc[] = []
   // Particle emitters AND billboards bound to loc faces (fires, torches,
   // waterfalls; a fire's glow + smoke sprites). Collected for static and
   // animated locs alike: the face is an anchor, not geometry, so it belongs to
@@ -4201,6 +4224,31 @@ export async function buildLocsMesh(
         if (m.emitters?.length || m.billboards?.length) {
           emitters.push({ model: m, matrix: matrix.clone(), upscale: modelUpscale(m), plane: renderPlane, animated: isAnimated })
         }
+        // Taller than the client's tile visibility column? The client would
+        // cull this loc wholesale whenever its whole footprint leaves the
+        // frustum (tiles are tested as ~4000-unit ground columns), which a
+        // merged mesh can't do — so the caller gets it as a per-loc record.
+        // Measured in placed units: vertexY is model-local (negative = up)
+        // and modelUpscale is the pending world scale.
+        let isTall = false
+        if (!isAnimated && tallLocUnits !== undefined) {
+          let top = 0
+          for (let v = 0; v < m.vertexCount; v++) if (m.vertexY[v] < top) top = m.vertexY[v]
+          isTall = -top * modelUpscale(m) > tallLocUnits
+          if (isTall) {
+            tall.push({
+              model: upscaleModel(m),
+              matrix: matrix.clone(),
+              animationId: -1,
+              owner: { objectId, shape, rotation, x, y, plane: decodedPlane },
+              points,
+              ambient: 64 + (def.ambient ?? 0),
+              contrast: 850 + (def.contrast ?? 0) * 5,
+              tileW: sizeX,
+              tileH: sizeY,
+            })
+          }
+        }
         if (isAnimated) {
           // keep out of the merged static mesh; the scene poses it per frame.
           // `getModel` has already baked the pre-13 <<2 in, which is what makes
@@ -4215,7 +4263,7 @@ export async function buildLocsMesh(
             ambient: 64 + (def.ambient ?? 0),
             contrast: 850 + (def.contrast ?? 0) * 5,
           })
-        } else {
+        } else if (!isTall) {
           // resolve this model's texture blendTypes so addModel can split
           // opaque vs transparent faces synchronously
           await assets.primeBlendTypes(m)
@@ -4280,5 +4328,5 @@ export async function buildLocsMesh(
       transparentLocs.push(sm)
     }
   }
-  return { mesh, transparentLocs, markers, shadows, animated, emitters }
+  return { mesh, transparentLocs, markers, shadows, animated, tall, emitters }
 }

@@ -134,11 +134,30 @@ its own group so the player can hide it on the right cycle. Live edits in the
 map viewer have the same shape of problem — changing one placement rebuilds the
 whole plane.
 
+A third cost surfaced 2026-08-02: the client culls each loc by its FOOTPRINT,
+not its geometry — `SceneObjectManager.method3447` frustum-tests every tile
+corner as a vertical column reaching only `1000 << 2` = 4000 units above the
+ground (and 4512 below plane 0), and `GraphNode_Sub1_Sub1.method13029` skips a
+loc whose footprint tiles all fail. A loc TALLER than that column vanishes
+wholesale the moment its base leaves the frustum even while its upper half
+fills the screen — and Jagex leans on the quirk: cutscene 14 parks the camera
+INSIDE the QBD lair's 15-tile pillar (loc 71802) and the footprint cull is
+what blanks it. A merged mesh can never reproduce per-loc culling, so the
+cutscene player now splits locs taller than the column out of the merge
+(`buildLocsMesh` `tallLocUnits` → `tall`) and runs the client's outcode test
+on their baked corner columns each frame (`TALL_LOC_UNITS` in
+CutscenePlayer). That is an approximation by height threshold, not the
+client's rule: the client applies the footprint test to EVERY loc, every
+frame, one mesh per loc.
+
 Worth trying: one mesh per loc (or per material batch keyed by loc) with the
 placement on the node rather than baked into vertices, and measure. If the draw
 call count is too high on a dense region, a middle ground is batching only
-static locs and keeping anything a cutscene or an edit can touch separate. Until
-then, every feature that needs to address a single loc pays for the merge.
+static locs and keeping anything a cutscene or an edit can touch separate —
+plus the client's footprint-column visibility for whatever is per-loc (the
+tall-loc path above already implements the test; generalizing it is the easy
+half, the mesh split staying fast is the hard half). Until then, every feature
+that needs to address a single loc pays for the merge.
 
 ### TEST: the region environment tab (2026-07-28)
 
