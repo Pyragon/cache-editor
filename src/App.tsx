@@ -972,6 +972,19 @@ function App() {
     if (!entry || !entry.available) return false
     if (entry.id !== selectedEntryId && !(await confirmLeaveItem())) return false
     await discardPendingNew()
+    // A grouped entry's sidebar row lives inside its group dropdown — make
+    // sure it's open so the selection is visible. Matters for the paths that
+    // DON'T click through the sidebar: a /config/* URL load, back/forward,
+    // and cross-entry id links.
+    if (entry.group) {
+      const group = entry.group
+      setOpenGroups((prev) => {
+        if (prev.has(group)) return prev
+        const next = new Set(prev)
+        next.add(group)
+        return next
+      })
+    }
 
     const version = ++loadVersion.current
     setModelDisplay(null)
@@ -1005,23 +1018,68 @@ function App() {
   // through the normal handlers so the unsaved-changes guard still applies —
   // a refused prompt re-pushes the on-screen location so the stack stays
   // consistent with what's shown.
+  //
+  // The URL mirrors the selection as /<entry-name>/<item-id> (entry NAMES,
+  // not ids — names are stable across dumps and readable in a shared link),
+  // and the path the page loaded on is navigated to once a cache is open, so
+  // a refresh on /cutscenes/14 lands straight back in cutscene 14 whether the
+  // folder restored silently or through the “Reopen” button.
+  /** /cutscenes/14 → { entry, itemId } — null for / and for file-looking
+   *  paths (the render-rig harness pages: /cutscene-test.html etc.). The
+   *  config group's `config_*` registry names read as /config/* in the URL
+   *  (/config/quests/29 ↔ entry `config_quests`). */
+  function parseAppPath(pathname: string): { entry: string; itemId: number | null } | null {
+    const segs = pathname.split('/').filter(Boolean).map(decodeURIComponent)
+    if (segs[0] === 'config' && segs.length >= 2) segs.splice(0, 2, `config_${segs[1]}`)
+    if (segs.length === 0 || segs.length > 2 || segs[0].includes('.')) return null
+    return {
+      entry: segs[0],
+      itemId: segs.length === 2 && /^\d+$/.test(segs[1]) ? Number(segs[1]) : null,
+    }
+  }
+  function appPath(entryName: string, itemId: number | null): string {
+    const head = entryName.startsWith('config_')
+      ? `config/${encodeURIComponent(entryName.slice('config_'.length))}`
+      : encodeURIComponent(entryName)
+    return `/${head}${itemId != null ? `/${itemId}` : ''}`
+  }
   const historyRestoringRef = useRef(false)
   const handleSelectEntryRef = useRef<(id: number, selectId?: number) => Promise<boolean>>(async () => false)
   handleSelectEntryRef.current = handleSelectEntry
-  const selectionRef = useRef<{ entryId: number | null; itemId: number | null }>({ entryId: null, itemId: null })
-  selectionRef.current = { entryId: selectedEntryId, itemId: selectedItemId }
+  const selectionRef = useRef<{ entryId: number | null; itemId: number | null; entryName: string | null }>({ entryId: null, itemId: null, entryName: null })
+  selectionRef.current = { entryId: selectedEntryId, itemId: selectedItemId, entryName: selectedEntry?.name ?? null }
+  /** the path the page LOADED on, consumed by the effect below on the first
+   *  cache open — kept in a ref so later selections can't re-trigger it */
+  const pendingPathRef = useRef(parseAppPath(window.location.pathname))
 
   useEffect(() => {
     if (!cacheHandle || historyRestoringRef.current) return
     const next = { entryId: selectedEntryId, itemId: selectedItemId }
+    // with a selection, the URL follows it; with none, leave the address
+    // alone — the initial-path navigation may still be about to consume it
+    const url = selectedEntry ? appPath(selectedEntry.name, selectedItemId) : undefined
     const state = window.history.state as typeof next | null
     if (state == null) {
-      window.history.replaceState(next, '')
+      window.history.replaceState(next, '', url)
       return
     }
     if (state.entryId === next.entryId && state.itemId === next.itemId) return
-    window.history.pushState(next, '')
-  }, [cacheHandle, selectedEntryId, selectedItemId])
+    // nothing selected but a real state recorded = a fresh load whose
+    // history survived the refresh — don't bury it under a null entry
+    if (next.entryId == null) return
+    window.history.pushState(next, '', url)
+  }, [cacheHandle, selectedEntryId, selectedItemId, selectedEntry])
+
+  // Navigate to the load-time path once the cache (and its entry list) is
+  // open. Unknown or unavailable entry names just stay on the picker view.
+  useEffect(() => {
+    const pending = pendingPathRef.current
+    if (!cacheHandle || entries.length === 0 || !pending) return
+    pendingPathRef.current = null
+    const entry = entries.find((e) => e.name === pending.entry)
+    if (!entry?.available) return
+    void handleSelectEntryRef.current(entry.id, pending.itemId ?? undefined)
+  }, [cacheHandle, entries])
 
   useEffect(() => {
     function onPop(e: PopStateEvent) {
@@ -1042,7 +1100,9 @@ function App() {
           setTimeout(() => { historyRestoringRef.current = false }, 0)
         }
         if (!ok) {
-          window.history.pushState({ ...selectionRef.current }, '')
+          const cur = selectionRef.current
+          window.history.pushState({ entryId: cur.entryId, itemId: cur.itemId }, '',
+            cur.entryName ? appPath(cur.entryName, cur.itemId) : undefined)
         }
       })()
     }
@@ -1098,6 +1158,9 @@ function App() {
     if (!ok) return
 
     await forgetCacheRoot()
+    // back to the picker — the address shouldn't keep naming an item that is
+    // no longer on screen (and mustn't re-navigate on the next open)
+    window.history.replaceState(null, '', '/')
     loadVersion.current++
     setRestorable(null)
     setCacheHandle(null)
