@@ -534,11 +534,13 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     rt.current = {
       renderer: null,
       scene: new THREE.Scene(),
-      // The cutscene viewport is 640×480 LANDSCAPE (the dump's viewportHeight/
-      // viewportWidth names are swapped — darkan's aspectFovMax clamp of
-      // 480·512/640 = 384 is a height/width ratio of 0.75, i.e. 4:3). The
-      // client's projection focal length works out to tan(halfFovV) = 334/(4·
-      // fovScale) with fovScale clamped to 334 → vertical FOV = 2·atan(0.25).
+      // The cutscene viewport aspect is PER-CUTSCENE (the dump's
+      // viewportHeight/viewportWidth names are swapped — aspect = vh/vw:
+      // 640/480 → 4:3 for cutscenes 0-8, 16/9 for 9-15) and is applied to the
+      // canvas at build; the 4/3 here is only the pre-build placeholder that
+      // fitCanvas overwrites. The client's projection focal length works out
+      // to tan(halfFovV) = 334/(4·fovScale) with fovScale clamped to 334 →
+      // vertical FOV = 2·atan(0.25), independent of the aspect.
       // near = 200: the client's scene projection near plane, MapRegion's
       // anInt3177 = 200 (method4447, read back via method4544 into the
       // Class383 projection — the renderer's 50.0F is only its pre-game
@@ -2221,6 +2223,17 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         }
 
         const canvas = canvasRef.current!
+        // The client letterboxes each cutscene to its OWN viewport aspect
+        // (ParticleTriangle.method3953 forces the def's ratio, Class492 draws
+        // the black bars). The dumped pair reads aspect = viewportHeight /
+        // viewportWidth (names swapped, see the camera comment): 640/480 → 4:3
+        // for cutscenes 0-8, 16/9 for 9-15. Rendering 14 at the CSS default
+        // 4:3 cropped ~11° of horizontal FOV — the arena's plane-1 Dragonkin
+        // artefacts sit in exactly that margin of the authored framing. The
+        // canvas letterboxes itself inside the stage via aspect-ratio, and
+        // fitCanvas reads the box it settles at, so the camera follows.
+        const vw = Number(def.viewportWidth), vh = Number(def.viewportHeight)
+        canvas.style.aspectRatio = String(vw > 0 && vh > 0 ? vh / vw : 4 / 3)
         r.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
         // three resets renderer.info at the top of every render(), and the
         // composer runs several per frame — so reading the counters afterwards

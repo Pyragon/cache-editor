@@ -116,8 +116,10 @@ export function actionTypeId(type: string): number {
 export function newCutsceneDef(id: number, regionX = 3200, regionY = 3200): CutsceneDef {
   return {
     id,
-    viewportHeight: 480,
-    viewportWidth: 640,
+    // the dumped names are swapped — aspect = viewportHeight/viewportWidth,
+    // and every shipped 4:3 cutscene stores 640/480 exactly like this
+    viewportHeight: 640,
+    viewportWidth: 480,
     areas: [0, 1, 2, 3].map((plane) => ({
       plane,
       regionX,
