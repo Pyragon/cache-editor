@@ -316,8 +316,35 @@ emits from the rest triangle forever — which is exactly what the pre-fix
 "constant spew" was. Hosts that pose from birth (spawned objects with an idle,
 gfx) pass `awaitFirstPose` so the sims hold until the first posed frame — the
 rest pose's open faces otherwise leak an opening puff in the tick before the
-sequence collapses them. `maxLoops` matters here too: 14813 is maxLoops 1, and
-looping it replayed the burst.
+sequence collapses them.
+
+**`maxLoops` (seq opcode 8) — the dump's default was WRONG (FOUND 2026-08-02,
+re-dumped + verified same day).** The client defaults it to **99**
+(`AnimationDefinitions:22`) and opcode 8 overrides; cryogen defaulted to 1, so
+all ~16955 animations without the opcode dumped as "play once" — which froze
+every idle loop in the cutscene player after one pass (cutscene 15's carriage
+wheels 16885, unicorns 16895, Varrock citizens 16925). Fixed in cryogen
+(default + the `!= default` encode guard, whose old form would also have
+DROPPED a genuine opcode 8 = 1 on re-pack). A pristine-vs-live dump comparison
+came back byte-equivalent across all 17186 ids, so no pack ever corrupted the
+data. True distribution: 16609 default-99, **346 genuine play-once (1)**, ~230
+other values. Two consumers to keep straight: ENTITY idles are endless in the
+client regardless of maxLoops (the per-tick BAS fallback re-arms the
+stand/walk whenever no sequence is active — ported in the cutscene player's
+entity step), while LOC/object animations stop at maxLoops and hold.
+**`loopDelay` is the real loop switch (Animation.setupLoop, traced with the
+true data):** `-1` = no rewind — the animation finishes at its last frame and
+HOLDS (this is how "endless" fire works: the flame sequences 16851/2 play once
+and hold with their emitter faces open, and the particle sim pours off the
+held frame — no looping involved). `>= 0` = rewind INTO THE LAST loopDelay
+frames (`frame -= loopDelay` from the end — an intro-then-loop-the-tail
+pattern), with 0 degenerating to "finish". The rockfall anchor 14813
+(loopDelay 1, maxLoops 99) loops only its FINAL frame — rewinding to frame 0
+is what replayed the burst. maxLoops caps loops only in the client's mode 0
+(entity-armed); explicitly-animated and ctor-armed OBJECT animations are mode
+1 (`anInt5461 != 0` skips the loop counter) and loop endlessly. All ported in
+the cutscene player's stepAnim. Editable nowhere yet; an animations page would
+need opcode 8 (maxLoops, 99 = default) and loopDelay side by side.
 
 **`adjustsLightIntensity` (TRACED 2026-07-29, DirectX path).** An earlier note
 here guessed it made the emitter light its surroundings — wrong. `Class54` is

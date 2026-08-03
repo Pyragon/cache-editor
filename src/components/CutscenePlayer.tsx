@@ -1287,13 +1287,11 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         // froze the QBD's breath in cutscene 14: the flame objects (72567/8,
         // model 69779 — five emitter faces and nothing else) are spawned and
         // immediately ANIMATE_OBJECT(−1)'d, and killing the idle collapses
-        // the carrier faces that gate all emission. A real sequence id plays
-        // as a one-shot that falls back to the idle when it ends.
+        // the carrier faces that gate all emission. There is NO one-shot mode
+        // for objects — the sequence's own loopDelay decides in stepAnim
+        // (−1 finishes and holds, ≥0 loops its tail window endlessly).
         const o = r.objects[f.objectIndex]
-        if (o) {
-          if (f.sequenceId < 0) void startAnim(o, o.idleAnimId, false)
-          else void startAnim(o, f.sequenceId, true)
-        }
+        if (o) void startAnim(o, f.sequenceId < 0 ? o.idleAnimId : f.sequenceId, false)
         break
       }
       case 'ENTITY_GFX': {
@@ -1390,8 +1388,23 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       placeEntity(e)
     }
     // animation frames for entities, spawned objects and in-flight gfx
-    // (durations are client cycles). Returns true when a one-shot finished.
-    const stepAnim = (holder: AnimHolder): boolean => {
+    // (durations are client cycles). Returns true when the animation finished.
+    //
+    // End-of-frames behaviour is the client's Animation.setupLoop, traced
+    // 2026-08-02 against the TRUE dump (the old maxLoops-1 default had this
+    // whole block reasoned wrong):
+    // - `loopDelay == -1` → NO rewind: the animation finishes and HOLDS its
+    //   last frame. This is how "endless" fire works — the flame sequences
+    //   (16851/2) play once and hold with their emitter faces OPEN, and the
+    //   particle sim pours off the held frame forever. No looping involved.
+    // - `loopDelay >= 0` → rewind INTO THE LAST loopDelay FRAMES
+    //   (frames.length − loopDelay), not to frame 0. The rockfall anchor
+    //   14813 (loopDelay 1) loops only its final frame — rewinding to 0
+    //   replayed the whole collapse and re-fired the burst.
+    // - the loop counter runs toward maxLoops only in the client's mode 0
+    //   (entities); explicit/ctor-armed OBJECT animations are mode 1 and
+    //   loop endlessly (`anInt5461 != 0` skips the ++).
+    const stepAnim = (holder: AnimHolder, counted: boolean): boolean => {
       if (!holder.anim) return false
       const durations = holder.anim.def.frameDurations ?? []
       if (durations.length === 0) return false
@@ -1399,21 +1412,26 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       if (holder.anim.acc >= (durations[holder.anim.frame] || 1)) {
         holder.anim.acc = 0
         if (holder.anim.frame + 1 >= durations.length) {
-          if (holder.anim.oneShot) {
+          const loopDelay = holder.anim.def.loopDelay ?? -1
+          if (holder.anim.oneShot || loopDelay < 0) {
             holder.anim = null
             return true
           }
-          // maxLoops caps replays even for "looping" idles (Animation.java
-          // counts wraps and finishes at defs.maxLoops, default 99). The
-          // rockfall dust anchors' 14813 is maxLoops 1 — looping it re-opened
-          // the emitter faces and fired the explosion burst a second time.
-          // Finished = hold the last frame, same as a one-shot.
-          holder.anim.loops++
-          if (holder.anim.loops >= (holder.anim.def.maxLoops ?? 99)) {
+          if (counted) {
+            holder.anim.loops++
+            if (holder.anim.loops >= (holder.anim.def.maxLoops ?? 99)) {
+              holder.anim = null
+              return true
+            }
+          }
+          // loopDelay 0 rewinds by nothing — the index stays past the end and
+          // the client finishes (same subtraction, `frame1Index -= loopDelay`)
+          const rewound = durations.length - loopDelay
+          if (rewound >= durations.length) {
             holder.anim = null
             return true
           }
-          holder.anim.frame = 0
+          holder.anim.frame = Math.max(0, rewound)
         } else {
           holder.anim.frame++
         }
@@ -1433,12 +1451,29 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
     // at 176, one tick before the kneel-loop action at 177. Same for spawned
     // objects — a death one-shot stays down rather than popping back to its
     // combat idle.
-    for (const e of r.entities) stepAnim(e)
-    for (const o of r.objects) if (o) stepAnim(o)
+    //
+    // A retired LOOPING animation is different: the client's entities fall
+    // back to their BAS stand/walk every tick whenever no sequence is active,
+    // so an idle is endless no matter what maxLoops says — the carriage's
+    // 2-frame wheel loop (16885) would exhaust even the correct maxLoops of
+    // 99 in ~8 seconds and freeze half of cutscene 15's Varrock square. It
+    // also covers the loopDelay −1 stands (unicorns 16895, citizens 16925)
+    // that finish every single play and live off this re-arm alone.
+    // One-shots stay held (Saradomin above).
+    for (const e of r.entities) {
+      const wasLooping = e.anim != null && !e.anim.oneShot
+      if (stepAnim(e, true) && wasLooping && animSettled(e)) {
+        const idle = e.route && e.moveAnimId >= 0 ? e.moveAnimId : e.standAnimId
+        if (idle >= 0) void startAnim(e, idle, false)
+      }
+    }
+    // objects are the client's mode 1: their loops never count toward
+    // maxLoops, so a loopable object animation runs as long as the object
+    for (const o of r.objects) if (o) stepAnim(o, false)
     // gfx play once and vanish; one whose sequence failed lives a single cycle
     for (let i = r.gfx.length - 1; i >= 0; i--) {
       const g = r.gfx[i]
-      if (stepAnim(g) || (g.settled && !g.anim)) {
+      if (stepAnim(g, false) || (g.settled && !g.anim)) {
         removeGfx(g)
         r.gfx.splice(i, 1)
       }
