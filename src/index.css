@@ -36,3 +36,14 @@ body {
     linear-gradient(135deg, var(--black) 0%, var(--charcoal) 30%, var(--grey) 55%, #003a99 80%, var(--electric-blue) 100%);
   background-attachment: fixed;
 }
+
+/* Page zoom below 100% means fewer device pixels than CSS pixels, so canvases
+   must be squeezed for display no matter how they were drawn. Nearest-
+   neighbour (`image-rendering: pixelated`, which the pixel-art previews want
+   at 100%+) DELETES whole columns when it shrinks — enough to erase the 1px
+   strokes and 1px shadows cache fonts are built from. While zoomed out, let
+   the browser filter instead: blurry, but every stroke still shows.
+   The marker class is maintained by watchPixelScale() in src/pixelScale.ts. */
+.zoomed-out canvas {
+  image-rendering: auto;
+}
