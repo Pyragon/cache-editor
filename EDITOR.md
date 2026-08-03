@@ -1468,3 +1468,58 @@ first, then future features.
   - Save with a name, persist across refreshes, delete/clone.
   - Point is placing pre-made structures — a bank, a hut, a whole building —
     into an area you're building. Prefabs, basically.
+
+## Interface contentType 1338/1339 — minimap & compass mask sprites (traced 2026-08-03)
+
+**Fields:** `contentType` (opcode 3 in the IComponent decode) plus the
+component's own `spriteId`. On interface 548 (fixed gameframe): comp 153 is
+ct 1338 + sprite 1185, comp 154 is ct 1339 + sprite 8729. Resizable 746 has
+the same pair floating over the world.
+
+**What the client does** (darkan `IComponentDefinitions.render` :983-1033,
+`ComponentMinimap.drawCompass`): these SPRITE components' own sprites are
+**pure black discs — masks, not artwork**. 1338 composites the live minimap
+render through its disc; 1339 draws the compass rose rotated by the camera
+yaw onto its disc (`StaticMedia.compassSprite.drawRotatedSprite(cx, cy,
+angle, maskSurface)`).
+
+**The rose is looked up by NAME, not id:** `getArchiveId("compass")` against
+the sprites js5 index — the reference table stores Java
+`name.toLowerCase().hashCode()` per archive (cryogen `Index.getArchiveId` /
+`CacheUtil.getNameHash`). In this cache: compass=169, mapdots=300,
+hint_mapedge=14, name_icons=1455, floorshadows=1243. The scratchpad script
+`findname.mjs` (session 2026-08-03) parses `packed/main_file_cache.idx255`
+directly to resolve names — reusable for any named-archive lookup.
+
+**Editor state:** contentType is visible in InterfaceViewer's inspector but
+the special render semantics aren't editable (nothing to edit — behaviour
+is hardcoded per value). If a sprite-picker page ever lets someone swap
+sprite 8729/1185, know that they'll be editing a *mask shape*, not the
+visible art. A name→id sprite table page would need the idx255 parse (the
+unpacked dump has no names).
+
+## Sprite transparency — the two client rules our dump hides (traced 2026-08-03)
+
+**Fields:** the sprites dump's per-frame `usesAlpha` / `alpha` arrays and
+`palette`.
+
+**Client decode** (`SpriteDefinitions.decode` + `getPixels`):
+1. After reading a frame's alpha plane it tracks `usesAlpha |= alpha != -1`
+   and **discards the channel entirely when every byte is 255**. Cryogen
+   dumps the plane as stored, so `usesAlpha: true` + all-255 `alpha` is
+   common and means "no alpha" to the client.
+2. The no-alpha draw path is transparent **by colour, not index**: any
+   palette entry equal to `0x000000` draws as a hole. Pure black is
+   unpaintable in no-alpha sprites (Jagex art uses 0x010101 etc. for
+   near-black).
+
+Sprite 2730 (fixed-gameframe XP button, 548:35) is the type specimen: black
+corners at palette-colour 0 under an all-255 alpha plane — opaque black
+square if you honour the dump, transparent in the client.
+
+**Editor state:** mirrored in `spriteRender.ts` (`clientAlphaChannel` +
+colour-0 tests), which SpriteViewer, the interface previews, and
+`averageSpriteColor` all share. Anyone building sprite-editing UI: warn
+when a user paints #000000 into a frame whose alpha channel is absent or
+all-255 — it will render as transparency in-game, and an edit that adds a
+sub-255 alpha byte anywhere flips rule 1 for the whole frame.

@@ -15,6 +15,25 @@ export async function loadSpriteMeta(
   }
 }
 
+/** The frame's alpha channel EXACTLY as the client would keep it, or null.
+ *
+ *  Client decode rule (SpriteDefinitions.decode): after reading the alpha
+ *  plane it tracks `usesAlpha |= alpha != -1` and DISCARDS the whole channel
+ *  when every byte is 255. That matters because the no-alpha draw path
+ *  (getPixels) makes any pure-black palette colour fully transparent —
+ *  e.g. sprite 2730 (the XP button) ships an all-255 alpha plane over black
+ *  corners; honouring the dumped channel draws an opaque black square the
+ *  client never shows. */
+function clientAlphaChannel(meta: SpriteMeta, frameIndex: number): number[] | null {
+  if (!meta.usesAlpha[frameIndex]) return null
+  const frameAlpha = meta.alpha?.[frameIndex]
+  if (!frameAlpha) return null
+  for (let i = 0; i < frameAlpha.length; i++) {
+    if ((frameAlpha[i] & 0xff) !== 255) return frameAlpha
+  }
+  return null
+}
+
 // Render one of a sprite's frames onto a fresh canvas, or null if empty.
 export function renderFrameToCanvas(meta: SpriteMeta, frameIndex = 0): HTMLCanvasElement | null {
   if (meta.width <= 0 || meta.height <= 0) return null
@@ -32,8 +51,8 @@ export function averageSpriteColor(meta: SpriteMeta, frameIndex = 0): string | n
   if (!px) return null
   const sw = meta.subWidths[frameIndex] ?? 0
   const sh = meta.subHeights[frameIndex] ?? 0
-  const frameAlpha = meta.alpha?.[frameIndex]
-  const hasAlpha = meta.usesAlpha[frameIndex] && frameAlpha != null
+  const frameAlpha = clientAlphaChannel(meta, frameIndex)
+  const hasAlpha = frameAlpha != null
 
   let r = 0, g = 0, b = 0, n = 0
   for (let x = 0; x < sw; x++) {
@@ -41,12 +60,12 @@ export function averageSpriteColor(meta: SpriteMeta, frameIndex = 0): string | n
     if (!col) continue
     for (let y = 0; y < sh; y++) {
       const idx = col[y] & 0xff
+      const rgb = meta.palette[idx] ?? 0
       if (hasAlpha) {
         if ((frameAlpha[y * sw + x] & 0xff) === 0) continue
-      } else if (idx === 0) {
+      } else if ((rgb & 0xffffff) === 0) {
         continue
       }
-      const rgb = meta.palette[idx] ?? 0
       r += (rgb >> 16) & 0xff
       g += (rgb >> 8) & 0xff
       b += rgb & 0xff
@@ -198,8 +217,8 @@ export function renderSubFrame(canvas: HTMLCanvasElement, meta: SpriteMeta, fram
   const subWidth = meta.subWidths[frameIndex] ?? 0
   const subHeight = meta.subHeights[frameIndex] ?? 0
   const framePixels = meta.pixelIndices[frameIndex]
-  const frameAlpha = meta.alpha?.[frameIndex]
-  const hasAlpha = meta.usesAlpha[frameIndex] && frameAlpha != null
+  const frameAlpha = clientAlphaChannel(meta, frameIndex)
+  const hasAlpha = frameAlpha != null
   canvas.width = Math.max(1, subWidth)
   canvas.height = Math.max(1, subHeight)
   const ctx = canvas.getContext('2d')!
@@ -222,8 +241,8 @@ export function renderSubFrame(canvas: HTMLCanvasElement, meta: SpriteMeta, fram
         px[pos + 2] = rgb & 0xff
         px[pos + 3] = a
       } else {
-        if (paletteIdx === 0) continue
         const rgb = meta.palette[paletteIdx] ?? 0
+        if ((rgb & 0xffffff) === 0) continue
         px[pos] = (rgb >> 16) & 0xff
         px[pos + 1] = (rgb >> 8) & 0xff
         px[pos + 2] = rgb & 0xff
@@ -244,14 +263,14 @@ export function spriteFramePngBlob(meta: SpriteMeta, frameIndex: number): Promis
 }
 
 export function renderFrame(canvas: HTMLCanvasElement, meta: SpriteMeta, frameIndex: number) {
-  const { width, height, palette, pixelIndices, alpha, usesAlpha } = meta
+  const { width, height, palette, pixelIndices } = meta
   const subWidth  = meta.subWidths[frameIndex]  ?? 0
   const subHeight = meta.subHeights[frameIndex] ?? 0
   const offsetX   = meta.offsetsX[frameIndex]   ?? 0
   const offsetY   = meta.offsetsY[frameIndex]   ?? 0
   const framePixels = pixelIndices[frameIndex]
-  const frameAlpha  = alpha?.[frameIndex]
-  const hasAlpha    = usesAlpha[frameIndex] && frameAlpha != null
+  const frameAlpha  = clientAlphaChannel(meta, frameIndex)
+  const hasAlpha    = frameAlpha != null
 
   canvas.width  = width
   canvas.height = height
@@ -280,8 +299,10 @@ export function renderFrame(canvas: HTMLCanvasElement, meta: SpriteMeta, frameIn
         px[pos + 2] =  rgb        & 0xFF
         px[pos + 3] = a
       } else {
-        if (paletteIdx === 0) continue
+        // client getPixels: transparency is by COLOUR (palette entry == 0),
+        // not by index — any pure-black entry draws as a hole
         const rgb = palette[paletteIdx] ?? 0
+        if ((rgb & 0xffffff) === 0) continue
         px[pos]     = (rgb >> 16) & 0xFF
         px[pos + 1] = (rgb >> 8)  & 0xFF
         px[pos + 2] =  rgb        & 0xFF
