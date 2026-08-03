@@ -33,3 +33,59 @@
   position: static;
   margin-top: 14px;
 }
+
+/* Player state that isn't a varp/varbit but the scripts still ask for.
+   The fields are boxes of the same height (.text-input-sized matches
+   .num-input-sized), so the row baselines line up. */
+.var-player-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 0 0 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Name column: what the row DOES, so a bare id isn't the only clue. */
+.var-name-cell {
+  max-width: 42ch;
+}
+
+.var-what {
+  display: block;
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.var-unnamed {
+  color: var(--text-dim, #8a90a0);
+}
+
+.var-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.var-known-picker {
+  max-width: 46ch;
+}
+
+/* a display name is ~12 chars of content, not a full-width field */
+.var-name-input {
+  width: 20ch;
+}
+
+/* the label stacks above its field; without this the checkbox sitting beside
+   them rides high against the taller labelled columns */
+.var-player-row .item-field {
+  gap: 4px;
+}
+
+.var-player-row .iface-toggle {
+  min-height: 24px;
+  align-items: center;
+}

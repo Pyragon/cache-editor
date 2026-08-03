@@ -10,6 +10,8 @@ import type { GameframeMode, GameframeScene } from './gameframe'
 import type { Cs2Warning } from '../cs2/runtime'
 import { Cs2Cache } from '../cs2/cache'
 import { preparePixelCanvas } from '../pixelScale'
+import { onVarOverridesChanged } from '../loaders/varOverrides'
+import VarOverridesModal from './VarOverridesModal'
 import './GameframePreview.css'
 
 /**
@@ -45,6 +47,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   const [cs2Enabled, setCs2Enabled] = useState(true)
   const [cs2Warnings, setCs2Warnings] = useState<Cs2Warning[]>([])
   const [showWarnings, setShowWarnings] = useState(false)
+  const [showPlayer, setShowPlayer] = useState(false)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<GameframeScene | null>(null)
   const paintGen = useRef(0)
@@ -71,6 +74,11 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     return () => media.removeEventListener('change', onChange)
   }, [pageZoom])
   const zoomedOut = pageZoom < 1
+
+  // The HUD's CS2 hooks read the simulated player (levels, points, run
+  // energy, name), so saving the Variables modal has to re-run them.
+  const repaintRef = useRef<() => void>(() => {})
+  useEffect(() => onVarOverridesChanged(() => repaintRef.current()), [])
 
   // Scene assembly depends on mode/slot/draft identity; keyed on the
   // components ARRAY so a field edit (new array from the viewer) reloads.
@@ -197,6 +205,8 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     if (id != null) onSelect(id)
   }
 
+  repaintRef.current = repaint
+
   return (
     <div className="gfp">
       <div className="gfp-toolbar">
@@ -249,6 +259,14 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
             {cs2Warnings.reduce((n, w) => n + w.count, 0)} stubbed CS2 calls ({cs2Warnings.length} ops)
           </button>
         )}
+        <button
+          type="button"
+          className="gfp-player-btn"
+          title="The simulated player the HUD scripts read — levels, life/prayer points, run energy, display name"
+          onClick={() => setShowPlayer(true)}
+        >
+          Player…
+        </button>
         {zoomedOut && (
           <span className="gfp-zoom-warning" title="The browser has fewer device pixels than the frame needs, so 1px strokes (cache font glyphs, borders) get resampled. The client always draws 1:1 — reset zoom to compare accurately.">
             page zoom {Math.round(pageZoom * 100)}% — not pixel-accurate
@@ -282,6 +300,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
           {status && <div className="gfp-status">{status}</div>}
         </div>
       </div>
+      {showPlayer && <VarOverridesModal onClose={() => setShowPlayer(false)} />}
     </div>
   )
 }

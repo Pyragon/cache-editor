@@ -664,6 +664,28 @@ input[type="number"]::-webkit-inner-spin-button {
   border-color: var(--electric-blue-bright, #2f8fff);
 }
 
+/* The TEXT counterpart of .num-input-sized: same box, so a name field and a
+   number field sitting side by side line up. Defined here, next to the number
+   version, because the two only stay matched if they're read together. Left
+   aligned — text isn't a numeral — and no stepper reservation to make room
+   for. Size it with a width where it's used. */
+.text-input-sized {
+  border: 1px solid #3d4457;
+  border-radius: 4px;
+  background: var(--bg-elevated, #1c1f26);
+  color: var(--text);
+  box-sizing: border-box;
+  min-height: 24px;
+  padding: 2px 6px;
+  font-size: 13px;
+  font-weight: 500;
+  outline: none;
+}
+
+.text-input-sized:focus {
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
 .num-input-field {
   width: 100%;
   min-width: 0;

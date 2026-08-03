@@ -17,6 +17,10 @@ import type { Cs2Env, Cs2Value } from './interpreter'
 import { asInt, asStr } from './interpreter'
 import { Cs2InterfaceScene } from './runtime'
 import { Cs2Cache } from './cache'
+import {
+  VARBIT_LIFE_POINTS, VARBIT_PRAYER_POINTS, VARP_DISEASE, VARP_POISON,
+  loadPlayerState, playerVar, skillLevel,
+} from '../loaders/varOverrides'
 import type { EnumDef } from './cache'
 
 export type Cs2Context = {
@@ -41,9 +45,19 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
 
   // ---- vars: store-backed with zero defaults, so a script that writes then
   // re-reads its own state stays coherent within a preview run ----
-  const varps = new Map<number, number>()
+  // The simulated player (Variables modal → src/loaders/varOverrides.ts).
+  // Seeded BEFORE any hook runs: scripts read these as ordinary vars, and a
+  // script that writes one then wins for the rest of the run, like the client.
+  const player = loadPlayerState()
+  const varps = new Map<number, number>([
+    [VARP_POISON, playerVar('varp', VARP_POISON)],
+    [VARP_DISEASE, playerVar('varp', VARP_DISEASE)],
+  ])
   const paramCache = ctx.cache.params
-  const varbits = new Map<number, number>()
+  const varbits = new Map<number, number>([
+    [VARBIT_LIFE_POINTS, playerVar('varbit', VARBIT_LIFE_POINTS)],
+    [VARBIT_PRAYER_POINTS, playerVar('varbit', VARBIT_PRAYER_POINTS)],
+  ])
   const varcs = new Map<number, number>()
   const varcStrings = new Map<number, string>()
 
@@ -342,8 +356,8 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
       }
 
       // ---- vars ----
-      if (name === '__get_varp') return varps.get(asInt(args[0])) ?? 0
-      if (name === '__get_varbit' || name === '__get_varpbit') return varbits.get(asInt(args[0])) ?? 0
+      if (name === '__get_varp') return varps.get(asInt(args[0])) ?? playerVar('varp', asInt(args[0]))
+      if (name === '__get_varbit' || name === '__get_varpbit') return varbits.get(asInt(args[0])) ?? playerVar('varbit', asInt(args[0]))
       if (name.startsWith('__get_clan')) return 0
       if (name === '__set_varp') { varps.set(asInt(args[0]), asInt(args[1])); return }
       if (name === '__set_varbit' || name === '__set_varpbit') { varbits.set(asInt(args[0]), asInt(args[1])); return }
@@ -365,17 +379,17 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
       if (name === 'windowed_getmode') return ctx.mode === 'fixed' ? 1 : 2
       if (name === 'world_language') return 0
       if (name === 'clientclock') return 0
-      if (name === 'map_members' || name === 'world_members' || name === 'playermember') return 1
-      if (name === 'stat' || name === 'stat_base') return 1 // a fresh level-1 account
+      if (name === 'map_members' || name === 'world_members' || name === 'playermember') return player.members ? 1 : 0
+      if (name === 'stat' || name === 'stat_base') return skillLevel(asInt(args[0]))
       if (name === 'stat_visible_xp') return 0
-      if (name === 'runenergy_visible') return 100
+      if (name === 'runenergy_visible') return player.runEnergy
       if (name === 'runweight_visible') return 0
       if (name === 'inv_size') return 28
       if (name.startsWith('chat_getfilter')) return 0
       if (name.startsWith('userdetail')) return 0
       if (name === 'playermod' || name === 'playermodlevel' || name === 'staffmodlevel') return 0
       if (name === 'gender') return 0
-      if (name === 'get_displayname' || name === 'chat_playername') return 'Player'
+      if (name === 'get_displayname' || name === 'chat_playername') return player.displayName
       if (name === 'comlevel_active') return 3
       if (name === 'new_array') {
         const size = asInt(args[1])

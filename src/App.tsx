@@ -1471,7 +1471,7 @@ function App() {
                 },
                 {
                   label: 'Variables…',
-                  hint: 'Set varbits and varps to pick which version of an object shows',
+                  hint: 'The stand-in player: skill levels, orb points, run energy, and which version of an object shows',
                   onSelect: () => setShowVarOverrides(true),
                 },
                 {

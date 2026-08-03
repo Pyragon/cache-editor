@@ -219,11 +219,11 @@ export async function runGameframeCs2(
     }
   }
 
-  const env = makeCs2Env({
+  const cs2Env = makeCs2Env({
     scene: cs2, mode, rootHandle, basis, cache,
     loadInterface: async (id) => (await loadInterfaceById(rootHandle, id))?.components ?? null,
   })
-  const interp = new Cs2Interpreter(env, cache.scripts)
+  const interp = new Cs2Interpreter(cs2Env, cache.scripts)
 
   // run order: root, then attachments in BFS order (matches open order)
   const order = [scene.rootId, ...[...basis.keys()].filter((id) => id !== scene.rootId)]
