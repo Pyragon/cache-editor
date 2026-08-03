@@ -255,6 +255,36 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     return rows
   }, [components, list, collapsed, byId])
 
+  // Selecting a component anywhere — a click on either canvas, a parent link
+  // in the inspector — has to make it findable in the tree: expand whatever
+  // collapsed ancestors are hiding its row, then scroll it into view.
+  const selectedRowRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (selectedId == null) return
+    const ancestors: number[] = []
+    let cur = byId.get(selectedId)
+    const seen = new Set<number>()
+    while (cur && cur.parent !== -1) {
+      const pid = cur.parent & 0xffff
+      if (seen.has(pid)) break
+      seen.add(pid)
+      ancestors.push(pid)
+      cur = byId.get(pid)
+    }
+    setCollapsed((prev) => {
+      if (!ancestors.some((id) => prev.has(id))) return prev
+      const next = new Set(prev)
+      for (const id of ancestors) next.delete(id)
+      return next
+    })
+  }, [selectedId, byId])
+
+  // after the row exists (post-expand render), bring it into view; 'nearest'
+  // leaves an already-visible row alone, so clicking rows doesn't jump
+  useEffect(() => {
+    selectedRowRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selectedId, treeRows])
+
   const toggleCollapsed = (id: number) => {
     setCollapsed((prev) => {
       const next = new Set(prev)
@@ -414,6 +444,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
           {treeRows.map(({ c, depth, hasChildren }) => (
             <div
               key={c.componentId}
+              ref={c.componentId === selectedId ? selectedRowRef : undefined}
               className={`iface-tree-row${c.componentId === selectedId ? ' selected' : ''}${c.hidden ? ' hidden-row' : ''}`}
               style={{ paddingLeft: `${8 + depth * 12}px` }}
               onClick={() => setSelectedId(c.componentId)}
