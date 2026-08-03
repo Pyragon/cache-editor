@@ -1279,10 +1279,19 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
         break
       }
       case 'ANIMATE_OBJECT': {
-        // client: Class9.animateObject(...) — play the sequence on the spawned
-        // loc, then fall back to its idle (the one-shot handling below)
+        // client: Class9.animateObject(...) → Class123.animate → method2124,
+        // which on sequence −1 SUBSTITUTES the object def's own animation
+        // (method7977) — "play your idle", not "stop". Treating −1 as a stop
+        // froze the QBD's breath in cutscene 14: the flame objects (72567/8,
+        // model 69779 — five emitter faces and nothing else) are spawned and
+        // immediately ANIMATE_OBJECT(−1)'d, and killing the idle collapses
+        // the carrier faces that gate all emission. A real sequence id plays
+        // as a one-shot that falls back to the idle when it ends.
         const o = r.objects[f.objectIndex]
-        if (o) void startAnim(o, f.sequenceId, true)
+        if (o) {
+          if (f.sequenceId < 0) void startAnim(o, o.idleAnimId, false)
+          else void startAnim(o, f.sequenceId, true)
+        }
         break
       }
       case 'ENTITY_GFX': {
