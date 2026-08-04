@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { NumberInput } from './defFields'
+import { CellDropdown, NumberInput } from './defFields'
 import type { QuestServerData } from '../loaders/types'
 import './QuestViewer.css'
 
@@ -106,54 +106,6 @@ function BadgeDropdown({ value, options, className, style, onChange }: BadgeDrop
               type="button"
               className={`badge-dropdown-item ${opt.value === value ? 'active' : ''}`}
               style={opt.color ? { color: opt.color } : undefined}
-              onClick={() => { onChange(opt.value); setOpen(false) }}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-type CellDropdownProps = {
-  value: number
-  options: { value: number; label: string }[]
-  onChange: (value: number) => void
-}
-
-function CellDropdown({ value, options, onChange }: CellDropdownProps) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  const current = options.find((o) => o.value === value)
-
-  useEffect(() => {
-    if (!open) return
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
-
-  return (
-    <div ref={ref} className="cell-dropdown-wrap">
-      <button
-        type="button"
-        className={`cell-dropdown-trigger${open ? ' open' : ''}`}
-        onClick={() => setOpen((o) => !o)}
-      >
-        {current?.label ?? value}
-        <span className="badge-dropdown-caret">▾</span>
-      </button>
-      {open && (
-        <div className="cell-dropdown-menu">
-          {options.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              className={`cell-dropdown-item${opt.value === value ? ' active' : ''}`}
               onClick={() => { onChange(opt.value); setOpen(false) }}
             >
               {opt.label}

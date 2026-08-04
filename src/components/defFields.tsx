@@ -1,7 +1,7 @@
 // Shared building blocks for definition editors (items, objects, ...).
 // Styling comes from ItemViewer.css / QuestViewer.css / SpriteViewer.css —
 // component CSS is global in this app by convention.
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode, Ref } from 'react'
 import type { ParamRow } from './defParams'
 
@@ -186,6 +186,60 @@ export function HelpToggle({ open, onToggle }: { open: boolean; onToggle: () => 
     >
       ?
     </button>
+  )
+}
+
+/** The app's table-cell dropdown: a styled trigger + menu rather than a native
+ *  `<select>`, which the OS paints in its own chrome and refuses to theme. Any
+ *  in-table picker should be this — `.cell-select` is the unstyled fallback and
+ *  looks foreign next to it. Values may be numbers or strings so enum-ish
+ *  columns (a var's kind, a quest's difficulty) use the same control. */
+export function CellDropdown<T extends string | number>({ value, options, onChange, title }: {
+  value: T
+  options: { value: T; label: string; hint?: string }[]
+  onChange: (value: T) => void
+  title?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const current = options.find((o) => o.value === value)
+
+  useEffect(() => {
+    if (!open) return
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  return (
+    <div ref={ref} className="cell-dropdown-wrap">
+      <button
+        type="button"
+        className={`cell-dropdown-trigger${open ? ' open' : ''}`}
+        title={title}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {current?.label ?? value}
+        <span className="badge-dropdown-caret">▾</span>
+      </button>
+      {open && (
+        <div className="cell-dropdown-menu">
+          {options.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              className={`cell-dropdown-item${opt.value === value ? ' active' : ''}`}
+              title={opt.hint}
+              onClick={() => { onChange(opt.value); setOpen(false) }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
