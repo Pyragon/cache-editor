@@ -1,8 +1,12 @@
 /* Variables modal. Everything inside is shared furniture (.quest-table,
-   .cell-input, .cell-select, .add-row-btn, .row-remove-btn, .save-bar) — this
-   file only sizes the dialog and the couple of bits that are its own. */
+   .cell-input, .cell-dropdown-*, .add-row-btn, .row-remove-btn, .save-bar) —
+   this file only sizes the dialog and the couple of bits that are its own.
+
+   The dialog is sized by the TABLE, which (via .quest-table-wrap) sizes to its
+   own content: every field below therefore states a real width, because a bare
+   text input has no intrinsic one and collapses the column it sits in. */
 .var-overrides {
-  width: 460px;
+  width: 660px;
   max-width: 92vw;
 }
 
@@ -10,15 +14,53 @@
   max-width: 60ch;
 }
 
-/* The table is three narrow columns and a remove button; left to itself the id
-   and value fields stretch to fill the dialog. */
-.var-overrides .quest-table {
-  width: 100%;
+/* Id and Value. Size the WRAPPER, never the inner `.cell-input`:
+   `.num-input-steps` is absolutely positioned over the right edge of the
+   field, so a width on the input itself is partly eaten by the steppers —
+   that is what clipped a 4-digit varbit id down to 3. 11ch clears 5 digits
+   with the steppers showing. */
+.var-overrides .quest-table .num-input {
+  width: 11ch;
 }
 
-.var-overrides .quest-table .cell-input,
-.var-overrides .quest-table .cell-select {
+.var-overrides .quest-table .cell-dropdown-trigger {
   min-width: 88px;
+}
+
+/* Name. It's an INPUT — the cache names nothing, so whatever is here was
+   either traced by us or typed by whoever is working — and it's the only cell
+   holding free text, so it's the one that has to be wide enough to read.
+   `.what` sits under it as static text: that's our description of a traced
+   var, and it stays true even after the user renames the thing it describes.
+
+   The width has to beat `.var-overrides .quest-table .cell-input` if that ever
+   comes back, so it carries the same specificity deliberately. */
+.var-overrides .quest-table .var-name-field {
+  width: 26ch;
+}
+
+/* The traced description is quiet — the row's editable values are what the eye
+   should land on. Capped to the name field's own width so a long description
+   wraps under it instead of widening the column past its input. */
+.var-what {
+  display: block;
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 0 6px;
+  max-width: 26ch;
+}
+
+.var-name-field::placeholder {
+  color: var(--text-dim, #8a90a0);
+  font-style: italic;
+  opacity: 0.7;
+}
+
+/* The menu is absolutely positioned against its wrap, so the row it drops out
+   of must not clip it — a table cell's default overflow would cut it off. */
+.var-overrides .quest-table td {
+  overflow: visible;
 }
 
 .var-overrides-empty {
@@ -45,22 +87,6 @@
   padding: 0 0 12px;
   margin-bottom: 12px;
   border-bottom: 1px solid var(--border);
-}
-
-/* Name column: what the row DOES, so a bare id isn't the only clue. */
-.var-name-cell {
-  max-width: 42ch;
-}
-
-.var-what {
-  display: block;
-  color: var(--text-dim, #8a90a0);
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.var-unnamed {
-  color: var(--text-dim, #8a90a0);
 }
 
 .var-add-row {

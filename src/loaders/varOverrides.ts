@@ -153,6 +153,15 @@ export const DEFAULT_PLAYER_STATE: PlayerState = {
 /** Every skill's level unless a 'stat' override names it. */
 export const DEFAULT_SKILL_LEVEL = 1
 
+/** Skill ids in cache order (darkan-game-server Skills.SKILL_NAME) — the index
+ *  `stat()` / `stat_base()` take, and what a 'stat' row's id means. */
+export const SKILL_NAMES = [
+  'Attack', 'Defence', 'Strength', 'Constitution', 'Ranged', 'Prayer', 'Magic',
+  'Cooking', 'Woodcutting', 'Fletching', 'Fishing', 'Firemaking', 'Crafting',
+  'Smithing', 'Mining', 'Herblore', 'Agility', 'Thieving', 'Slayer', 'Farming',
+  'Runecrafting', 'Hunter', 'Construction', 'Summoning', 'Dungeoneering',
+]
+
 export const SKILL_CONSTITUTION = 3
 export const SKILL_PRAYER = 5
 export const SKILL_SUMMONING = 23
@@ -186,6 +195,107 @@ export const KNOWN_VARS: KnownVar[] = [
 
 export function knownVar(kind: VarKind, id: number): KnownVar | null {
   return KNOWN_VARS.find((k) => k.kind === kind && k.id === id) ?? null
+}
+
+// ---------------------------------------------------------------------------
+// Names the user gives a var
+// ---------------------------------------------------------------------------
+//
+// KNOWN_VARS above is what WE traced out of the gameframe hooks, and it will
+// always be a short list — the cache names nothing, so every entry costs
+// someone reading a script. Anyone working on an interface knows what the vars
+// they're poking mean long before that knowledge reaches this file, so the
+// table lets them write it down. Names live next to the overrides in
+// localStorage, and a named var joins the "add a named one" picker so it can
+// be recalled after the row is deleted.
+
+export type CustomVarName = { kind: VarKind; id: number; name: string }
+
+export const VAR_NAMES_KEY = 'cache-editor:var-names-v1'
+
+let customNames: CustomVarName[] | null = null
+
+function sanitizeNames(raw: unknown): CustomVarName[] {
+  if (!Array.isArray(raw)) return []
+  const out: CustomVarName[] = []
+  for (const entry of raw) {
+    const e = entry as Partial<CustomVarName>
+    const id = Number(e?.id)
+    const name = typeof e?.name === 'string' ? e.name.trim() : ''
+    if (!Number.isFinite(id) || id < 0 || name === '') continue
+    const kind: VarKind = e?.kind === 'varp' ? 'varp' : e?.kind === 'stat' ? 'stat' : 'varbit'
+    out.push({ kind, id: Math.trunc(id), name })
+  }
+  return out
+}
+
+export function loadVarNames(): CustomVarName[] {
+  if (!customNames) {
+    try {
+      const stored = localStorage.getItem(VAR_NAMES_KEY)
+      customNames = stored ? sanitizeNames(JSON.parse(stored)) : []
+    } catch {
+      customNames = []
+    }
+  }
+  return customNames.map((n) => ({ ...n }))
+}
+
+export function saveVarNames(next: CustomVarName[]): void {
+  customNames = sanitizeNames(next)
+  try {
+    localStorage.setItem(VAR_NAMES_KEY, JSON.stringify(customNames))
+  } catch {
+    // storage disabled/full — the names still apply for this session
+  }
+  for (const listener of listeners) listener()
+}
+
+/**
+ * What WE know a var to be, ignoring any name the user gave it: a traced
+ * KNOWN_VARS entry, or a skill name (the one kind of id the cache does define,
+ * so it needs no tracing). This is the description that stays true when
+ * someone renames the row — "Life points" becoming "HP" doesn't stop varbit
+ * 7198 filling the hitpoints orb.
+ */
+export function tracedVar(kind: VarKind, id: number): KnownVar | null {
+  const known = knownVar(kind, id)
+  if (known) return known
+  if (kind === 'stat' && SKILL_NAMES[id]) {
+    return { kind, id, name: `${SKILL_NAMES[id]} level`, what: 'Read by stat() / stat_base()' }
+  }
+  return null
+}
+
+/**
+ * The traced names with a set of custom ones layered over them. A user name
+ * for a var we already know REPLACES the name but keeps that entry's `what`
+ * and `derive` — the description is still true, and the default-value rule
+ * still has to fire, so renaming "Life points" must not quietly stop the orb
+ * defaulting to full.
+ *
+ * Takes the custom list as an argument rather than reading storage so the
+ * Variables modal can pass its unsaved DRAFT: the picker has to offer a name
+ * the moment it's typed, and stop offering one the moment it's cleared.
+ */
+export function mergeVarNames(custom: CustomVarName[]): KnownVar[] {
+  const merged: KnownVar[] = KNOWN_VARS.map((k) => ({ ...k }))
+  for (const entry of custom) {
+    const existing = merged.find((k) => k.kind === entry.kind && k.id === entry.id)
+    if (existing) existing.name = entry.name
+    else merged.push({ kind: entry.kind, id: entry.id, name: entry.name, what: '' })
+  }
+  return merged
+}
+
+/** Every named var as SAVED — for anything outside the modal. */
+export function namedVars(): KnownVar[] {
+  return mergeVarNames(loadVarNames())
+}
+
+/** A saved var name, falling back to what we traced. */
+export function namedVar(kind: VarKind, id: number): KnownVar | null {
+  return namedVars().find((k) => k.kind === kind && k.id === id) ?? tracedVar(kind, id)
 }
 
 let player: PlayerState | null = null
