@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CustomVarName, VarKind, VarOverride, PlayerState } from '../loaders/varOverrides'
 import {
-  DEFAULT_SKILL_LEVEL, loadPlayerState, loadVarNames, loadVarOverrides, mergeVarNames,
+  DEFAULT_SKILL_LEVEL, isStringKind, loadPlayerState, loadVarNames, loadVarOverrides, mergeVarNames,
   savePlayerState, saveVarNames, saveVarOverrides, tracedVar,
 } from '../loaders/varOverrides'
 import { CellDropdown, NumberInput } from './defFields'
@@ -24,6 +24,8 @@ const KIND_OPTIONS: { value: VarKind; label: string; hint: string }[] = [
   { value: 'varbit', label: 'Varbit', hint: 'A packed bit range inside a varp — what most morphs and HUD counters read' },
   { value: 'varp', label: 'Varp', hint: 'A whole player variable' },
   { value: 'stat', label: 'Skill', hint: 'A skill level, read by stat() / stat_base()' },
+  { value: 'varc', label: 'Varc', hint: 'A CLIENT variable — the server never sends it, so no transmit hook fires when it changes. Scripts use these as their own state.' },
+  { value: 'varcstring', label: 'Varc string', hint: 'A client variable holding TEXT, read by getvarc_string' },
 ]
 
 /** `${kind}:${id}` — names key off the VAR, not the row, so retyping a row's
@@ -99,8 +101,14 @@ export default function VarOverridesModal({ onClose }: Props) {
   const addKnown = (index: number) => {
     const k = pickable[index]
     if (!k) return
-    const level = (skill: number) => rows.find((r) => r.kind === 'stat' && r.id === skill)?.value ?? DEFAULT_SKILL_LEVEL
-    const value = k.kind === 'stat' ? DEFAULT_SKILL_LEVEL : k.derive?.(level) ?? 0
+    // stat rows are always numeric, but the row type now allows text
+    const level = (skill: number) => {
+      const set = rows.find((r) => r.kind === 'stat' && r.id === skill)?.value
+      return typeof set === 'number' ? set : DEFAULT_SKILL_LEVEL
+    }
+    const value = isStringKind(k.kind) ? ''
+      : k.kind === 'stat' ? DEFAULT_SKILL_LEVEL
+        : k.derive?.(level) ?? 0
     setRows((prev) => (prev.some((r) => r.kind === k.kind && r.id === k.id)
       ? prev
       : [...prev, { key: nextKey++, kind: k.kind, id: k.id, value }]))
@@ -219,7 +227,12 @@ export default function VarOverridesModal({ onClose }: Props) {
                       <CellDropdown<VarKind>
                         value={row.kind}
                         options={KIND_OPTIONS}
-                        onChange={(kind) => edit(row.key, { kind })}
+                        // switching to or from the text kind carries a value
+                        // of the wrong type, so reset it rather than storing
+                        // a string in a varp
+                        onChange={(kind) => edit(row.key, isStringKind(kind) === isStringKind(row.kind)
+                          ? { kind }
+                          : { kind, value: isStringKind(kind) ? '' : 0 })}
                       />
                     </td>
                     <td><NumberInput className="cell-input" value={row.id} min={0} onChange={(v) => edit(row.key, { id: v })} /></td>
@@ -234,7 +247,22 @@ export default function VarOverridesModal({ onClose }: Props) {
                       />
                       {known?.what && <span className="var-what">{known.what}</span>}
                     </td>
-                    <td><NumberInput className="cell-input" value={row.value} onChange={(v) => edit(row.key, { value: v })} /></td>
+                    <td>
+                      {isStringKind(row.kind) ? (
+                        <input
+                          className="cell-input var-value-text"
+                          value={typeof row.value === 'string' ? row.value : ''}
+                          placeholder="text…"
+                          onChange={(e) => edit(row.key, { value: e.target.value })}
+                        />
+                      ) : (
+                        <NumberInput
+                          className="cell-input"
+                          value={typeof row.value === 'number' ? row.value : 0}
+                          onChange={(v) => edit(row.key, { value: v })}
+                        />
+                      )}
+                    </td>
                     <td>
                       <button type="button" className="row-remove-btn" title="Remove" onClick={() => removeRow(row.key)}>×</button>
                     </td>

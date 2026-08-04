@@ -24,7 +24,13 @@
 }
 
 .var-overrides .quest-table .cell-dropdown-trigger {
-  min-width: 88px;
+  min-width: 100px;
+}
+
+/* A varcstring's value is text, so the Value cell holds an input rather than
+   a stepper box. Sized rather than left to the browser's ~170px default. */
+.var-overrides .quest-table .var-value-text {
+  width: 20ch;
 }
 
 /* Name. It's an INPUT — the cache names nothing, so whatever is here was

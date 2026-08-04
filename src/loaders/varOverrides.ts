@@ -13,15 +13,28 @@
 // variable, so a scene authored around a mid-quest world can't be reproduced
 // from the cache alone. These overrides are that missing world state.
 
-export type VarKind = 'varbit' | 'varp' | 'stat'
+/**
+ * `varc` and `varcstring` are CLIENT variables — the client owns them, the
+ * server never transmits them, and scripts use them as their own scratch
+ * state (the tooltip's "already built" flag is varc 2). Nothing fires a
+ * transmit hook when they change, so unlike a varp they only matter to
+ * whatever reads them directly.
+ */
+export type VarKind = 'varbit' | 'varp' | 'stat' | 'varc' | 'varcstring'
+
+/** The one kind whose value is text. */
+export const isStringKind = (kind: VarKind) => kind === 'varcstring'
 
 export type VarOverride = {
   kind: VarKind
   id: number
-  value: number
+  /** a string only when `isStringKind(kind)`; numeric otherwise */
+  value: number | string
 }
 
 export const VAR_OVERRIDES_KEY = 'cache-editor:var-overrides-v1'
+
+const KINDS: VarKind[] = ['varbit', 'varp', 'stat', 'varc', 'varcstring']
 
 let overrides: VarOverride[] = []
 let loaded = false
@@ -32,9 +45,14 @@ function sanitize(raw: unknown): VarOverride[] {
   for (const entry of raw) {
     const e = entry as Partial<VarOverride>
     const id = Number(e?.id)
+    if (!Number.isFinite(id) || id < 0) continue
+    const kind: VarKind = KINDS.includes(e?.kind as VarKind) ? (e!.kind as VarKind) : 'varbit'
+    if (isStringKind(kind)) {
+      out.push({ kind, id: Math.trunc(id), value: typeof e?.value === 'string' ? e.value : '' })
+      continue
+    }
     const value = Number(e?.value)
-    if (!Number.isFinite(id) || id < 0 || !Number.isFinite(value)) continue
-    const kind: VarKind = e?.kind === 'varp' ? 'varp' : e?.kind === 'stat' ? 'stat' : 'varbit'
+    if (!Number.isFinite(value)) continue
     out.push({ kind, id: Math.trunc(id), value: Math.trunc(value) })
   }
   return out
@@ -74,12 +92,27 @@ export function saveVarOverrides(next: VarOverride[]): void {
   for (const listener of listeners) listener()
 }
 
-/** The value set for a var, or −1 for "not set" — the same sentinel
+/** The value set for a numeric var, or −1 for "not set" — the same sentinel
  *  `getMultiLoc` starts its index at when a def names neither var. */
 export function varValue(kind: VarKind, id: number): number {
   if (!loaded) loadVarOverrides()
   const match = overrides.find((o) => o.kind === kind && o.id === id)
-  return match ? match.value : -1
+  return match && typeof match.value === 'number' ? match.value : -1
+}
+
+/** The text set for a varcstring, or null for "not set". */
+export function varStringValue(id: number): string | null {
+  if (!loaded) loadVarOverrides()
+  const match = overrides.find((o) => o.kind === 'varcstring' && o.id === id)
+  return typeof match?.value === 'string' ? match.value : null
+}
+
+/** Like `varValue` but distinguishes "set to −1" from "not set" — `varValue`'s
+ *  −1 is a morph-index sentinel, which is meaningless for a plain varc. */
+export function varNumberValue(kind: VarKind, id: number): number | null {
+  if (!loaded) loadVarOverrides()
+  const match = overrides.find((o) => o.kind === kind && o.id === id)
+  return typeof match?.value === 'number' ? match.value : null
 }
 
 /** A def's morph target list and the vars that select from it. Kept structural
