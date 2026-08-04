@@ -299,11 +299,40 @@ real cache, in rough risk order:
 
 ## Interfaces
 
+### NEXT SESSION — nothing below has been looked at in the running app yet
+
+Everything in the 2026-08-04 batch (component add/remove/clone, tree
+drag-to-reparent and reorder, the tree context menu, the selection-overlay
+perf fix, varc/varcstring variables) was built and type-checks, but **Cody has
+not refreshed and used it**. Verify before building on it:
+
+1. **Tree drag-and-drop.** Middle of a row = drop INSIDE (reparent, blue
+   ring); top/bottom quarter = drop BESIDE (reorder, amber line). Reorder
+   renumbers — check the amber "component ids changed" chip appears in the
+   save bar and that saving prompts.
+2. **Reorder correctness on real data.** It permutes the sibling group's
+   existing id set. Worth confirming on an interface where a component's hook
+   references a sibling by hash, that the hash followed.
+3. **Clone with/without children** — the "without" case deliberately leaves
+   the copy's hooks pointing at the ORIGINAL's children.
+4. **Selection lag.** Clicking through 746's 459 components should now be
+   instant; the outline moved to its own canvas. If editing a FIELD is still
+   slow that's a different fix (the base repaint is genuinely needed then).
+5. **The tree has no add/remove buttons any more** — they moved into the
+   right-click menu, with a `right-click for add · clone · remove` hint under
+   the tree. Say if the buttons should come back alongside.
+
+Also unverified from the session before: the 11:18 tooltip should now show its
+text (not `0`), size snugly to the wrapped text, and appear in ~0.5s rather
+than 3s.
+
 - **Interactive editing on the canvas** (drag/resize/reparent) — explicitly deferred by the user until the preview was right.
 - **CS2 scripts are edited as raw tagged-arg lists, not decompiled.** In particular the hook-arg **sentinels render as raw numbers** — `-2147483645` is "this component's hash", `-2147483647/-46` are mouse x/y, and so on (full table in `EDITOR.md` → "Component CS2 hooks"). They should render as named tokens; shown as bare negative numbers they look like corrupt data and invite someone to overwrite them with a literal hash, which breaks the hook for every other interface sharing the script.
-- **Click/drag/key/resize hooks don't fire in the preview.** Load, varp-transmit, stat-transmit, timer and HOVER hooks do — see `interfaces.md` → "Hook passes" / "Hover passes". `onClick` is blocked on a decision, not effort: canvas clicks are already bound to "select this component in the editor". onResize is the easy next one since the viewport already changes.
+- **Drag / key / scroll-wheel / onResize hooks don't fire in the preview.** Load, varp-transmit, stat-transmit, timer, hover and click hooks do — see `interfaces.md` → "Hook passes" / "Hover passes". `onClickRepeat` and `onHold` need a HELD button, which a single click never reaches. onResize is the easy next one since the viewport already changes.
+- **`clickMask` sprites are hovered by their bounding box, not their opaque pixels.** The client tests a masked sprite's per-row opaque span (`anIntArray1457`/`1455` in `client.java`), so transparent parts of a shaped icon are NOT hoverable; we use the plain rect. Shows up as hover triggering slightly outside a shaped icon.
 - **`mouseLeaveScript` / `mouseLeaveArrayParams` are misnamed** — decode slot 7 is an INVENTORY transmit hook, not a mouse hook (traced in `client.java`; full evidence in `EDITOR.md`). cryogen, darkan-bot-refactor and the client's own deobfuscated source all share the wrong name, so this is not a cryogen-vs-darkan rename — it needs Cody's call plus a re-dump. `mouseLeaveArrayParams` is also the one transmit filter list still not surfaced in the editor.
-- **No add/remove component support** — the tree only edits existing components.
+- **Reordering renumbers, and the rewrite is interface-LOCAL** (accepted trade-off, warned on save). Sibling draw order is componentId order — `Interface.getDefinitionsFromComponents()` builds the client's draw list with a straight `System.arraycopy` of the id-indexed array, and the only reorder the client does (bring-to-front, from CS2) mutates that copy at runtime and never reaches the cache. Dragging beside a row permutes the sibling group's existing id SET, so no id outside the group moves, and `parent` hashes / hook args / targetParams inside the interface are rewritten. **Not rewritten:** hooks on other interfaces, hashes baked into CS2 scripts, server code. A cache-wide reference sweep would fix that and is the real solution if this bites.
+- **A new component starts at 0×0 at the origin**, so it draws nothing until you give it a size — easy to read as "add is broken". Defaulting to something visible, or auto-selecting the size field, would help.
 - **Model textures / item & entity model types** in the preview: RAW_MODEL renders vertex-coloured only; ITEM/NPC_HEAD/PLAYER_* need item-def/identikit composition (the pieces exist in `playerAppearance.ts`).
 - **`<img=n>` mod-icon text tags are stripped** rather than drawn.
 - **Two font renderers exist** — `fontRender.ts` (GameTips, single-line, `fonts/glyphs/` PNGs) and the fuller `interfacePreview.ts` implementation (sprite-frame glyphs); should consolidate on the latter.

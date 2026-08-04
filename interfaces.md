@@ -411,11 +411,18 @@ full gameframe run went 3,718 stubbed calls → **113 across 10 ops**.
   cc_setmodeltint, cc_setrecol, cc_setopkey, if_delete(all), if_dragpickup,
   if_setaspect and friends — any script using them already fails cryogen's
   decompiler, so they can't reach us anyway.
-- Load/transmit/timer and HOVER hooks run (see Hook passes / Hover passes).
-  Still don't: click, drag, release, hold, key, scroll wheel, onResize.
-  Click is the awkward one — canvas clicks are already bound to
-  "select this component in the editor", so firing `onClick` needs a decision
-  about that binding rather than just a pass.
+- Load/transmit/timer, HOVER and CLICK hooks run. Still don't: onClickRepeat,
+  onHold (both need a HELD button, which a single click never reaches), drag,
+  key, scroll wheel, onResize.
+- Clicking the canvas has two modes, chosen by a toolbar pill: **Click
+  selects** (pick a component to edit — the default, and scoped to the edited
+  interface) or **Click fires onClick**, which behaves like the client and
+  runs the clicked component's `onClick` then `onRelease` — a press and a
+  release being what one click is. Same set semantics as hover: every
+  component whose bounds contain the point, not just the topmost. Click hooks
+  are rare — one component in 425 on root pane 548, none at all on interface
+  11 — so most clicks log nothing, which is correct: a component with no click
+  script has nothing to report.
 - `onTimer` runs exactly once, so anything animated off it shows only its
   first tick. `client_clock()` DOES advance, but only while the hover ticker
   is running (`GameframePreview`, 20ms, bounded to `TICK_BUDGET` cycles per

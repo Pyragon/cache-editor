@@ -1888,3 +1888,39 @@ the wrapped text in its left portion and dead space to the right — it reads
 as a layout bug, not a measurement bug. Interface 11:18's tooltip ("Empty all
 the items you are wearing into your bank", max width 150) was the reported
 case. Both ops share `wrapPara` in `src/cs2/ops.ts` for exactly this reason.
+
+## `onMouseMove` (decode slot 19) looks like a wheel hook, not a move hook (2026-08-04)
+
+Interface 11:18 and 11:20 carry the field we dump as `onMouseMove`
+(`[1486]`, no args). The client's dispatch for the same slot
+(`anObjectArray1412`) is:
+
+```java
+if (bool_48 && anInt7191 != 0 && iCompDef.anObjectArray1412 != null) {
+    hookRequest.hasMousePosition = true;
+    hookRequest.mouseY = anInt7191;       // <- the accumulator, in the Y slot
+```
+
+`anInt7191` is zeroed every cycle and accumulates `record.getMeta()` for
+mouse records of **click type 6**. A one-dimensional per-cycle delta, handed
+over in the mouseY slot — that reads as wheel rotation, not pointer movement,
+which would need both axes.
+
+**Confidence: inferred, not proven.** Against it: slot 21 is already named
+`onScrollWheel` and has its own (transmit-shaped, filtered by
+`mouseWheelArray`) dispatch, so this would make two wheel-ish hooks. Nobody
+has decoded what click type 6 is. Treat the dumped name as unverified rather
+than assuming either reading.
+
+Not fired by the preview either way. Its script chain is worth reading as a
+sample of runtime hook installation: `script_1486` → `script_1487` sets the
+bank note-mode graphics and then calls
+
+```
+if_setonmouseover(get_comp(762, 19), script_38, "IIsii", [-2147483645, 49938553, string0, 25, 150], [])
+```
+
+— **the explicit `"IIsii"` type signature is independent confirmation that CS2
+arguments bind by type**: four `I`s and one `s`, matching `script_38`'s
+`(int0, int1, int2, int3, string0)` while the value array interleaves the
+string third. See "CS2 arguments bind by TYPE, not position".
