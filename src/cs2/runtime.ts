@@ -21,6 +21,44 @@ export type RuntimeInterface = {
 
 export type Cs2Warning = { op: string; count: number; example: string }
 
+/** Scene state carried from one run to the next — see `continueFrom`. */
+export type Cs2SceneSnapshot = Map<number, RuntimeInterface>
+
+/** One component field a hook's run changed, as the console shows it. */
+export type Cs2TraceChange = {
+  /** interfaceId:componentId of the component that changed */
+  target: string
+  field: string
+  from: string
+  to: string
+}
+
+/** One hook run, in the order it happened. The preview's console is a
+ *  rendering of this list — "what ran, why, and what it moved". */
+export type Cs2TraceEntry = {
+  seq: number
+  /** the component field the script hung off: onLoad, onVarpTransmit, … */
+  hook: string
+  /** the client's reason for firing it, in words ("varp 102 transmitted") */
+  trigger: string
+  script: number
+  /** interfaceId:componentId the hook is attached to */
+  source: string
+  changes: Cs2TraceChange[]
+  /** something the run couldn't do — script missing, threw, no-op */
+  note?: string
+}
+
+/** Short, readable rendering of a value for the console. */
+function brief(v: unknown): string {
+  if (v == null) return 'null'
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (typeof v === 'number') return String(v)
+  if (typeof v === 'string') return v.length > 40 ? `"${v.slice(0, 40)}…"` : `"${v}"`
+  if (Array.isArray(v)) return `[${v.length}]`
+  return String(v)
+}
+
 /** A blank component in the image of the client's cc_create defaults. */
 function blankComponent(interfaceId: number, componentId: number, parentHash: number, typeId: number): IComponentDefinition {
   const type = (['CONTAINER', 'TYPE_1', 'TYPE_2', 'FIGURE', 'TEXT', 'SPRITE', 'MODEL', 'TYPE_7', 'TYPE_8', 'LINE'] as const)[typeId] ?? 'CONTAINER'
@@ -160,6 +198,43 @@ export class Cs2InterfaceScene {
   /** client-side sub-interfaces (if_opensubclient): parent hash -> interface */
   subs = new Map<number, number>()
   warnings = new Map<string, Cs2Warning>()
+  /** every hook run this pass, oldest first (the preview's console) */
+  trace: Cs2TraceEntry[] = []
+  /** the entry mutations are attributed to; null outside a hook run */
+  private currentEntry: Cs2TraceEntry | null = null
+
+  /** Open a trace entry — every change until `endHook` is attributed to it. */
+  beginHook(hook: string, trigger: string, script: number, source: string): Cs2TraceEntry {
+    const entry: Cs2TraceEntry = { seq: this.trace.length + 1, hook, trigger, script, source, changes: [] }
+    this.trace.push(entry)
+    this.currentEntry = entry
+    return entry
+  }
+
+  endHook(note?: string): void {
+    if (this.currentEntry && note) this.currentEntry.note = note
+    this.currentEntry = null
+  }
+
+  /** Record a component field the running hook changed. Unchanged fields are
+   *  dropped: a script that re-sets a value to what it already was tells the
+   *  reader nothing, and the HUD scripts do a lot of that. */
+  recordChange(comp: IComponentDefinition, field: string, from: unknown, to: unknown): void {
+    const entry = this.currentEntry
+    if (!entry || Object.is(from, to)) return
+    entry.changes.push({
+      target: `${comp.interfaceId}:${comp.componentId}`,
+      field,
+      from: brief(from),
+      to: brief(to),
+    })
+  }
+
+  /** Record something structural a hook did that isn't a field edit —
+   *  creating/deleting a dynamic child, opening a client-side sub. */
+  recordEvent(target: string, what: string, detail: string): void {
+    this.currentEntry?.changes.push({ target, field: what, from: '', to: detail })
+  }
 
   addInterface(id: number, components: (IComponentDefinition | null)[]): void {
     if (this.interfaces.has(id)) return
@@ -170,6 +245,34 @@ export class Cs2InterfaceScene {
       nextDynamicId: Math.max(cloned.length, 1),
       dynamicByKey: new Map(),
     })
+  }
+
+  /**
+   * Seed from a previous scene's state, continuing its dynamic-child
+   * bookkeeping rather than starting fresh.
+   *
+   * `dynamicByKey` is what makes cc_create a keyed REPLACE and what
+   * cc_deleteall walks to find children to remove. Rebuilding a scene from
+   * components alone loses it, so a script re-running across scenes would
+   * allocate a brand-new component every time (a tooltip duplicating on every
+   * client cycle) and its own cleanup would then find nothing to delete. The
+   * gameframe preview rebuilds a scene per hover run, so it has to carry this
+   * across.
+   */
+  continueFrom(snapshot: Cs2SceneSnapshot): void {
+    for (const [id, prev] of snapshot) {
+      this.interfaces.set(id, {
+        id,
+        components: prev.components.map((c) => (c ? { ...c } : null)),
+        nextDynamicId: prev.nextDynamicId,
+        dynamicByKey: new Map(prev.dynamicByKey),
+      })
+    }
+  }
+
+  /** State to hand to a later scene's `continueFrom`. */
+  snapshot(): Cs2SceneSnapshot {
+    return new Map(this.interfaces)
   }
 
   /** Resolve a component hash to its (cloned) definition. */
@@ -205,6 +308,7 @@ export class Cs2InterfaceScene {
     const comp = blankComponent(ifaceId, compId, parentHash, typeId)
     iface.components[compId] = comp
     this.active[bank] = comp
+    this.recordEvent(`${ifaceId}:${compId}`, 'cc_create', `${comp.type} under ${ifaceId}:${parentHash & 0xffff}`)
     return true
   }
 
@@ -213,11 +317,16 @@ export class Cs2InterfaceScene {
     const iface = this.interfaces.get(parentHash >>> 16)
     if (!iface) return
     const parentKeyBase = (parentHash & 0xffff) << 16
+    let removed = 0
     for (const [key, compId] of [...iface.dynamicByKey]) {
       if ((key & 0xffff0000) === parentKeyBase) {
         iface.components[compId] = null
         iface.dynamicByKey.delete(key)
+        removed++
       }
+    }
+    if (removed > 0) {
+      this.recordEvent(`${iface.id}:${parentHash & 0xffff}`, 'cc_deleteall', `${removed} dynamic child${removed === 1 ? '' : 'ren'}`)
     }
   }
 

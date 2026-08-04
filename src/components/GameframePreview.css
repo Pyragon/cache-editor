@@ -133,47 +133,9 @@
   user-select: none;
 }
 
-.gfp-cs2-warnings {
-  background: transparent;
-  border: 1px solid #4a3f2a;
-  color: #d9b45c;
-  border-radius: 5px;
-  padding: 2px 8px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.gfp-warning-list {
-  max-height: 140px;
-  overflow-y: auto;
-  border: 1px solid #2a2e39;
-  border-radius: 6px;
-  background: #14161c;
-  padding: 6px 8px;
-  font-size: 11px;
-}
-
-.gfp-warning-row {
-  display: flex;
-  gap: 10px;
-  color: #8b96ab;
-  line-height: 1.6;
-}
-
-.gfp-warning-op {
-  color: #d9b45c;
-  min-width: 160px;
-}
-
-.gfp-warning-count {
-  min-width: 40px;
-}
-
-.gfp-warning-example {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* The stubbed-op list used to live here as its own toolbar popover; it is now
+   a tab of the console (Cs2Console.css) so there is one place to look when the
+   preview and the client disagree. */
 
 /* Placement pills: where the edited interface plugs in. Mirrors the client's
    packet-determined placement (sendTab / chatbox / screen / overlay). */
@@ -206,6 +168,15 @@
 .gfp-slot-pills button.selected {
   background: rgba(0, 102, 255, 0.22);
   color: #fff;
+}
+
+/* Which component the pointer is on. Monospace and fixed-width so the number
+   changing as you sweep the frame doesn't shuffle the toolbar around it. */
+.gfp-hover {
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #8b96ab;
+  min-width: 11ch;
 }
 
 /* Page-zoom notice: the preview can't be pixel-accurate below 100% zoom. */

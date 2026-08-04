@@ -300,7 +300,9 @@ real cache, in rough risk order:
 ## Interfaces
 
 - **Interactive editing on the canvas** (drag/resize/reparent) — explicitly deferred by the user until the preview was right.
-- **CS2 scripts are edited as raw tagged-arg lists, not decompiled.**
+- **CS2 scripts are edited as raw tagged-arg lists, not decompiled.** In particular the hook-arg **sentinels render as raw numbers** — `-2147483645` is "this component's hash", `-2147483647/-46` are mouse x/y, and so on (full table in `EDITOR.md` → "Component CS2 hooks"). They should render as named tokens; shown as bare negative numbers they look like corrupt data and invite someone to overwrite them with a literal hash, which breaks the hook for every other interface sharing the script.
+- **Click/drag/key/resize hooks don't fire in the preview.** Load, varp-transmit, stat-transmit, timer and HOVER hooks do — see `interfaces.md` → "Hook passes" / "Hover passes". `onClick` is blocked on a decision, not effort: canvas clicks are already bound to "select this component in the editor". onResize is the easy next one since the viewport already changes.
+- **`mouseLeaveScript` / `mouseLeaveArrayParams` are misnamed** — decode slot 7 is an INVENTORY transmit hook, not a mouse hook (traced in `client.java`; full evidence in `EDITOR.md`). cryogen, darkan-bot-refactor and the client's own deobfuscated source all share the wrong name, so this is not a cryogen-vs-darkan rename — it needs Cody's call plus a re-dump. `mouseLeaveArrayParams` is also the one transmit filter list still not surfaced in the editor.
 - **No add/remove component support** — the tree only edits existing components.
 - **Model textures / item & entity model types** in the preview: RAW_MODEL renders vertex-coloured only; ITEM/NPC_HEAD/PLAYER_* need item-def/identikit composition (the pieces exist in `playerAppearance.ts`).
 - **`<img=n>` mod-icon text tags are stripped** rather than drawn.

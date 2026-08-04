@@ -325,6 +325,40 @@
   font-style: italic;
 }
 
+/* The two transmit subscription lists, side by side above the hooks they
+   gate. Separated by a rule because they are NOT hooks — mistaking one for a
+   script id is the whole reason they sit here. */
+.iface-filter-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.iface-filter-row .item-field {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+/* Marks a hook field whose label follows its installer OPCODE rather than the
+   name it's dumped under — hover for which, and why. */
+.iface-label-note {
+  color: var(--electric-blue-bright, #2f8fff);
+  font-size: 10px;
+  vertical-align: super;
+  margin-left: 2px;
+  cursor: help;
+}
+
+/* names for the skill ids typed above, so "3, 5" reads back as itself */
+.iface-filter-hint {
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .iface-model-preview {
   margin-top: 10px;
   border: 1px solid var(--border);

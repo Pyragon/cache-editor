@@ -127,8 +127,9 @@ server generally: 150/695 (container options setup), 143 (flash), 108/109/110
        751 filter buttons); resizable renders the steel minimap ring,
        stacked orbs, the icon tab strip, and the slotted interface
        stretching with the window.
-6. [ ] CS2: not simulated (see gaps). onLoad hooks are the highest-value
-       target; the cryogen decompiler could feed a tiny interpreter.
+6. [ ] CS2: interpreter runs the load/transmit/timer hooks against the
+       simulated player, with a console showing what ran and what it changed.
+       Interaction hooks (mouse/key/resize) still don't fire — see gaps.
 7. [ ] Editing polish: hit-test/select INSIDE the gameframe preview,
        drag-to-move components on the canvas, add/delete components.
 
@@ -184,6 +185,12 @@ files, TS-flavoured). We interpret that source directly — no bytecode VM.
   annotations; plain `default:` cases; `>>`/`<<` only in bit-op sugar.
 - `interpreter.ts` — tree-walker, async builtins, 250k-step budget per hook
   (runaway wait-loops abort with a warning, e.g. quest tab's script 4497).
+  **Arguments bind by TYPE, not position** (`bindParams`): CS2 has separate
+  int and string stacks, so a call site's argument order only orders within
+  each type. `script_38(int0, int1, int2, int3, string0)` invoked with
+  `[comp, 720922, "…", 25, 150]` must put the string in `string0`, not
+  `int2`. Positional binding is right for the int-only majority and silently
+  wrong for every mixed-type script — see EDITOR.md.
 - `runtime.ts` — `Cs2InterfaceScene`: CLONED components per run (pristine
   defs never mutate), dynamic children with the client's (parentHash,
   childIndex) keyed-replace semantics, two active banks, client-side subs.
@@ -233,10 +240,159 @@ slot it attaches to (`GameframeScene.shown`). Verified headless: quest tab
 190 renders correctly inside the tab panel in both modes.
 
 **Gameframe pipeline**: `runGameframeCs2` clones the scene, computes each
-interface's slot basis, runs every onLoad hook (root pane first, then subs —
-the client's open order), and returns mutated components + CS2-opened subs +
-warnings. GameframePreview runs it per paint (toggle in the toolbar), shows
-"N stubbed CS2 calls" with an expandable per-op list.
+interface's slot basis, runs the hooks (below), and returns mutated components
++ CS2-opened subs + warnings + the run trace. GameframePreview runs it per
+paint (toggle in the toolbar).
+
+**Hook passes** (2026-08-03 — onLoad alone was not enough): four passes over
+the whole frame, one per hook field, in the order a freshly logged-in client
+fires them — `onLoadScript`, then `onVarpTransmit`, `onStatTransmit`,
+`onTimer` (`HOOK_PASSES` in `gameframe.ts`). The client fires a transmit hook
+per var arrival and a timer hook per cycle; a preview has one static world
+state, so one pass each is the faithful equivalent of "the server has just
+sent the player block, and one tick has passed". This is what makes the orbs
+respond to the Variables modal at all: the prayer and summoning fills
+(`script_801`) hang off `onStatTransmit`, the hitpoints low-HP flash
+(`script_808`) off `onTimer`, the poison/disease orb variants
+(`script_2923`) off `onVarpTransmit`.
+
+**Hover passes** (2026-08-03, traced in `client.java` around the per-component
+`aBool1440` "is hovered" flag): after the frame passes, the pointer's own
+hooks fire —
+
+| transition | slot | installer opcode | dumped as | fires |
+| --- | --- | --- | --- | --- |
+| `!hovered && over` | 2 | `HOOK_MOUSE_ENTER` (968) | `onMouseOver` | once, on entering |
+| `hovered && over` | 12 | `IF_SETONMOUSEOVER` (753) | `popupScript` | **every cycle** while inside |
+| `hovered && !over` | 3 | `HOOK_MOUSE_EXIT` (600) | `onMouseLeaveScript` | once, on leaving |
+
+**The dumped names for slots 2 and 12 are crossed**, which is why a hover can
+log as `popup`. The installer opcodes settle it — cryogen's `CS2Opcode` table
+and the client's `CS2Instruction` agree on all four values, and the client's
+`hookMouseEnter` → `method6289` writes slot 2 while `ifSetOnMouseOver` →
+`setOnMouseOver` writes slot 12. So `popupScript` is not a popup: it is the
+real continuous "while the mouse is over" hook. Interface 9's components 5 and
+6 are the type specimen — `popupScript: script_45(SELF, 16777215)` paired with
+`onMouseLeaveScript: script_45(SELF, 12875312)`, a highlight held while over
+and restored on exit. The console and `InterfaceViewer` both label by opcode
+and keep the dumped name in the tooltip.
+
+All three receive the mouse position **relative to the component**
+(`getMouseX() - x`), which is what the `-2147483647/-46` sentinels resolve to.
+The fixed gameframe carries 28 slot-2 and 31 slot-3 hooks — mostly tab-strip
+and banner buttons doing sprite swaps via `script_44(comp, sprite)`, so hover
+is visibly live.
+
+**Hover is a SET, not one component.** The client has no topmost-wins rule
+here: it walks every component of every open interface and sets that
+component's own `bool_48` from a plain bounds test
+(`mouseX >= leftBound && … && mouseY < upperBound`, plus a per-row opacity
+refinement for `clickMask` sprites). A pointer over an icon is therefore
+simultaneously over the icon, the container holding it, and that container's
+parent, and **all** of their hover hooks fire. `hoverTargets` returns every
+containing component; `hitTestComponent` — which picks the deepest/smallest —
+stays the right answer for click-to-select, where you want one specific thing.
+
+`GameframePreview` diffs that set each move into the client's three guards
+(`entered` / `over` / `exited`) and hands them to the next run. `entered` and
+`exited` are one-shot edges, cleared after the run that observed them; `over`
+persists, because its hook is per-cycle by design. The repaint is
+**conditional on an entered or exited component actually having a hover hook**
+(`hasHoverHook`) — components already in the set have had their effect
+applied, so nothing needs re-running for them.
+
+**The frame run is cached, and hover layers over it.** This is a latency fix,
+not a nicety: hovering originally re-ran all ~60 frame hooks through the async
+tree-walking interpreter, which took 1–2 seconds to produce a frame identical
+except for one sprite — the highlight landed long after the pointer had moved
+on. `runGameframeCs2` now returns a `GameframeRun` (the post-frame-pass
+components plus the var store, basis and caches), held by `GameframePreview`
+under a key of everything a pointer move does NOT affect —
+`sceneGen | mode | WxH | varsGen`. `applyGameframeHover` clones that base into
+a fresh `Cs2InterfaceScene` and runs at most three hooks on top.
+
+Two things fall out of the base never being mutated: leave is correct without
+the leave script having to undo anything (the base simply has no hover
+applied), and a hover-only repaint's trace contains **only** the hover hooks —
+the frame didn't re-run, and re-listing 60 cached entries would bury the two
+that are news. On a cache miss the two traces concatenate and are renumbered,
+since each is sequenced from its own scene.
+
+⚠ **`mouseLeaveScript` (decode slot 7) is not a mouse hook and must never be
+fired as one.** cryogen, darkan-bot-refactor and the client's own deobfuscated
+source all carry that name, but the client's dispatch for it is
+transmit-shaped: a global counter against a per-component cursor, scanning a
+32-entry ring buffer of recently-changed ids against `mouseLeaveArrayParams`.
+That's the same shape as the varp and stat transmit hooks it decodes between,
+and its filter list sits between `varps` and `statTransmitFilter` — the
+classic varp/**inv**/stat trio. It is an inventory transmit hook. See EDITOR.md.
+
+**Hook arg sentinels** (traced to darkan-game-client
+`CS2Executor.executeHookInner`): a hook's stored args contain placeholders the
+client swaps for live event state before the script starts —
+`-2147483647/-46` mouse x/y, **`-2147483645` = the hook's own component
+hash**, `-2147483644` op index, `-43` source slot, `-42/-41` the drag-target
+component + slot, `-40/-39` typed key code/char, and the string
+`"event_opbase"` for the hovered op name. Only `self` has an answer in a
+static preview; the rest resolve to the client's own absent value
+(`HOOK_ARG_SENTINELS`). **Passing these through raw was a silent killer**:
+`script_801`'s entire body is `if_*` calls on arg 0, so with arg 0 =
+−2147483645 every setter resolved to a component that isn't in the scene and
+did nothing, with no warning — 28 hooks across the gameframe carry the self
+sentinel, including both root panes, the chatbox, the logout button and the
+inventory. `if_*` setters now log an unresolvable target to the console.
+
+**Console** (`Cs2Console.tsx`): the run trace under the preview — every hook
+in fire order with the client's reason for firing it, and every component
+field it changed (`from → to`). A transmit hook's reason names the vars from
+its filter list **and the value each one holds**
+(`transmitted: Poisoned (varp 102) = 0, …`), read from the LIVE `Cs2VarStore`
+just before the hook runs rather than from the saved overrides — an earlier
+hook may have written the var, and the line has to report what the script is
+about to see. Component refs select in the editor when they
+belong to the interface being edited; script ids open `Cs2ScriptModal`, whose
+**Edit** button navigates to the `cs2` entry (script ids ARE that entry's item
+ids) to change the script — it edits whatever is on screen, so following a
+call chain and then hitting Edit lands on what you're reading. The
+stubbed-op ledger moved here as a second tab (it used to be a toolbar
+popover), so there's one place to look when the preview and client disagree.
+It **accumulates**: each repaint is a fresh CS2 run, appended newest-first
+under a run header, capped at 12 (Clear resets). A console that replaced its
+contents couldn't answer "what did my last edit change" — before and after
+were never on screen together. Repaints producing an identical run fold into a
+`×N` repeat count, so a resize drag doesn't bury the run you were reading.
+
+**Variable routing** (the per-run lines above the hooks): one line per set
+variable that a hook in this frame **actually fires on**. It exists because of
+a genuinely invisible indirection — **a varbit is a bit range inside a varp**
+(`baseVar` in the `varbits/` dump), and transmit filter lists only ever name
+the varp. Setting varbit 455 fires the hooks watching **varp 449**, and nothing
+else on screen connects those two numbers, so without this the log reads as
+though it's discussing a var you never touched.
+
+Variables nothing here watches are **not** reported. An earlier version warned
+about them, reasoning that "nothing watches this" answers "why did my edit do
+nothing" — but the Variables list is global and mostly describes world state
+for the map and cutscene previews, so on any given interface most of it is
+simply irrelevant. Warning once per variable per run buried the log in notices
+about a normal situation that no script present is even asking about.
+
+Two filters, both default-off so the log starts honest: "No-ops" hides rows
+that changed nothing (a hook that ran and moved nothing is usually correct,
+but it's also exactly what a broken hook looks like, so it's one click away
+rather than invisible), and "Only this interface" drops the rest of the gameframe — chatbox, orbs, tab
+strip — when you only care about the interface you're editing. That second one
+keeps a hook if it hangs off the edited interface **or if it changed one of its
+components**: a gameframe script reaching into your interface is the most
+interesting line in the log, and filtering purely by which interface owns the
+hook would hide exactly that.
+
+"Only this interface" also **stops runs that touched nothing of yours from
+being recorded**, rather than merely hiding their rows. Hover fires a hook per
+pointer transition, so sweeping across the frame produced a run per gameframe
+component — each leaving a bare header and, worse, evicting the runs you cared
+about from the capped history. Runs filtered down to nothing are dropped whole
+for the same reason.
 
 **Verified headless**: quest tab 190 renders its script-generated text
 ("Showing all 0 items"), orbs draw their icons + values, the top banner picks
@@ -255,9 +411,16 @@ full gameframe run went 3,718 stubbed calls → **113 across 10 ops**.
   cc_setmodeltint, cc_setrecol, cc_setopkey, if_delete(all), if_dragpickup,
   if_setaspect and friends — any script using them already fails cryogen's
   decompiler, so they can't reach us anyway.
-- Event hooks don't RUN (mouse-over, timers, onResize): the preview is a
-  load-time snapshot. Running onResize chains on viewport change is the
-  natural next step; the installers are already recorded.
+- Load/transmit/timer and HOVER hooks run (see Hook passes / Hover passes).
+  Still don't: click, drag, release, hold, key, scroll wheel, onResize.
+  Click is the awkward one — canvas clicks are already bound to
+  "select this component in the editor", so firing `onClick` needs a decision
+  about that binding rather than just a pass.
+- `onTimer` runs exactly once, so anything animated off it shows only its
+  first tick. `client_clock()` DOES advance, but only while the hover ticker
+  is running (`GameframePreview`, 20ms, bounded to `TICK_BUDGET` cycles per
+  hover change) — there is no free-running clock, so script_808's low-HP
+  flash (`client_clock() % 32`) still shows one frame.
 - Step-budget aborts: quest tab script 4497 spins waiting for state we don't
   simulate — aborted safely, warned.
 - `if_setscrollpos` accepted but scroll offsets aren't modelled in paint.

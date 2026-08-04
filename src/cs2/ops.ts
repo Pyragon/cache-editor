@@ -23,6 +23,42 @@ import {
 } from '../loaders/varOverrides'
 import type { EnumDef } from './cache'
 
+/**
+ * The var state one preview run reads and writes.
+ *
+ * Seeded from the Variables modal (`src/loaders/varOverrides.ts`) BEFORE any
+ * hook runs — scripts read these as ordinary vars — and a script that writes
+ * one wins for the rest of the run, exactly like the client. Unset vars read
+ * zero, or a known var's derived default.
+ *
+ * It lives outside `makeCs2Env` so the caller can hold it: the console needs
+ * the value a transmit hook is about to see, and that has to be the LIVE
+ * number (an earlier hook may have written it), not the saved override.
+ */
+export class Cs2VarStore {
+  readonly varps = new Map<number, number>([
+    [VARP_POISON, playerVar('varp', VARP_POISON)],
+    [VARP_DISEASE, playerVar('varp', VARP_DISEASE)],
+  ])
+
+  readonly varbits = new Map<number, number>([
+    [VARBIT_LIFE_POINTS, playerVar('varbit', VARBIT_LIFE_POINTS)],
+    [VARBIT_PRAYER_POINTS, playerVar('varbit', VARBIT_PRAYER_POINTS)],
+  ])
+
+  readonly varcs = new Map<number, number>()
+  readonly varcStrings = new Map<number, string>()
+
+  /** What a script reading this varp right now would get. */
+  varp(id: number): number {
+    return this.varps.get(id) ?? playerVar('varp', id)
+  }
+
+  varbit(id: number): number {
+    return this.varbits.get(id) ?? playerVar('varbit', id)
+  }
+}
+
 export type Cs2Context = {
   scene: Cs2InterfaceScene
   /** windowed_getmode: 1 = fixed, 2 = resizable (the client's window modes) */
@@ -36,6 +72,14 @@ export type Cs2Context = {
   loadInterface?: (id: number) => Promise<(IComponentDefinition | null)[] | null>
   /** session-persistent data caches (parsed scripts, enums, params) */
   cache: Cs2Cache
+  /** the run's var state; pass one in to read it back while hooks run */
+  vars?: Cs2VarStore
+  /** `client_clock()` — the client's 20ms cycle counter. Scripts time things
+   *  by comparing it against a varc they advance themselves (the tooltip
+   *  hover delay in script_4761 is the type specimen), so a clock frozen at 0
+   *  makes any such countdown depend purely on how many times the hook is
+   *  called rather than on elapsed time. */
+  cycle?: number
 }
 
 const b = (v: Cs2Value) => asInt(v) !== 0
@@ -43,23 +87,10 @@ const b = (v: Cs2Value) => asInt(v) !== 0
 export function makeCs2Env(ctx: Cs2Context): Cs2Env {
   const { scene } = ctx
 
-  // ---- vars: store-backed with zero defaults, so a script that writes then
-  // re-reads its own state stays coherent within a preview run ----
-  // The simulated player (Variables modal → src/loaders/varOverrides.ts).
-  // Seeded BEFORE any hook runs: scripts read these as ordinary vars, and a
-  // script that writes one then wins for the rest of the run, like the client.
   const player = loadPlayerState()
-  const varps = new Map<number, number>([
-    [VARP_POISON, playerVar('varp', VARP_POISON)],
-    [VARP_DISEASE, playerVar('varp', VARP_DISEASE)],
-  ])
+  const vars = ctx.vars ?? new Cs2VarStore()
+  const { varps, varbits, varcs, varcStrings } = vars
   const paramCache = ctx.cache.params
-  const varbits = new Map<number, number>([
-    [VARBIT_LIFE_POINTS, playerVar('varbit', VARBIT_LIFE_POINTS)],
-    [VARBIT_PRAYER_POINTS, playerVar('varbit', VARBIT_PRAYER_POINTS)],
-  ])
-  const varcs = new Map<number, number>()
-  const varcStrings = new Map<number, string>()
 
   // ---- lazily-computed layout per interface (for the get* ops) ----
   let layouts: Map<number, Map<number, LayoutRect>> | null = null
@@ -114,27 +145,36 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
   }
 
   // ---- fonts for text measurement ----
-  const measureLines = async (text: string, width: number, fontId: number): Promise<number> => {
+  /**
+   * Lay a paragraph out at `width` and return the lines, greedy-wrapped
+   * against the real glyph metrics.
+   *
+   * Shared by paramheight and parawidth ON PURPOSE. They are two questions
+   * about the SAME layout — how many lines, and how wide the widest is — and
+   * `parawidth` previously answered from the UNWRAPPED text, returning the
+   * full single-line width. Every tooltip then got a box as wide as its text
+   * would have been on one line, with the wrapped text sitting in the left
+   * portion and dead space to the right (interface 11:18's "Empty all the
+   * items you are wearing into your bank" was the reported case).
+   */
+  const wrapPara = async (text: string, width: number, fontId: number): Promise<string[]> => {
     const font = await loadCacheFont(ctx.rootHandle, fontId)
-    let lines = 0
+    const out: string[] = []
     for (const para of String(text).split('<br>')) {
-      if (para === '') { lines++; continue }
-      if (!font) { lines += Math.max(1, Math.ceil(para.length * 6 / Math.max(1, width))); continue }
-      // greedy word wrap against the real glyph metrics
+      if (para === '' || !font) { out.push(para); continue }
       let line = ''
-      let count = 1
       for (const word of para.split(' ')) {
         const candidate = line === '' ? word : `${line} ${word}`
         if (measureCacheText(font, candidate) > width && line !== '') {
-          count++
+          out.push(line)
           line = word
         } else {
           line = candidate
         }
       }
-      lines += count
+      out.push(line)
     }
-    return Math.max(1, lines)
+    return out.length > 0 ? out : ['']
   }
 
   // ---- the active-component helpers ----
@@ -147,6 +187,9 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
 
   const mutate = (comp: IComponentDefinition | null, patch: Partial<IComponentDefinition>) => {
     if (!comp) return
+    for (const [field, to] of Object.entries(patch)) {
+      scene.recordChange(comp, field, comp[field as keyof IComponentDefinition], to)
+    }
     Object.assign(comp, patch)
     invalidateLayout()
   }
@@ -294,6 +337,7 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
           const iface = scene.interfaces.get(c.interfaceId)
           if (iface) iface.components[c.componentId] = null
           scene.active[bank] = null
+          scene.recordEvent(`${c.interfaceId}:${c.componentId}`, 'cc_delete', 'removed')
           invalidateLayout()
         }
         return
@@ -322,6 +366,7 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
           if (!comps) { scene.warn(rawName, `interface ${ifaceId} missing`); return undefined }
           scene.addInterface(ifaceId, comps)
           scene.subs.set(target, ifaceId)
+          scene.recordEvent(`${target >>> 16}:${target & 0xffff}`, 'if_opensubclient', `opened interface ${ifaceId}`)
           invalidateLayout()
           return undefined
         })()
@@ -346,7 +391,15 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
         const op = name.slice(3)
         if (setters[op]) {
           const hash = asInt(args[args.length - 1])
-          setters[op](scene.get(hash), args.slice(0, -1))
+          const target = scene.get(hash)
+          // A setter aimed at a component that isn't in the scene does nothing
+          // AND says nothing — which is exactly how a script "runs fine" while
+          // changing nothing on screen. Log it; it's the first thing to check
+          // when a hook looks like a no-op.
+          if (!target) {
+            scene.recordEvent(hashLabel(hash), rawName, 'target not in scene — skipped')
+          }
+          setters[op](target, args.slice(0, -1))
           return
         }
         if (getters[op]) return getters[op](scene.get(asInt(args[0])))
@@ -356,8 +409,10 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
       }
 
       // ---- vars ----
-      if (name === '__get_varp') return varps.get(asInt(args[0])) ?? playerVar('varp', asInt(args[0]))
-      if (name === '__get_varbit' || name === '__get_varpbit') return varbits.get(asInt(args[0])) ?? playerVar('varbit', asInt(args[0]))
+      // through the store, so the console's "what value fired this hook" and
+      // the script's own read can never disagree
+      if (name === '__get_varp') return vars.varp(asInt(args[0]))
+      if (name === '__get_varbit' || name === '__get_varpbit') return vars.varbit(asInt(args[0]))
       if (name.startsWith('__get_clan')) return 0
       if (name === '__set_varp') { varps.set(asInt(args[0]), asInt(args[1])); return }
       if (name === '__set_varbit' || name === '__set_varpbit') { varbits.set(asInt(args[0]), asInt(args[1])); return }
@@ -378,7 +433,7 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
       // ---- environment queries ----
       if (name === 'windowed_getmode') return ctx.mode === 'fixed' ? 1 : 2
       if (name === 'world_language') return 0
-      if (name === 'clientclock') return 0
+      if (name === 'clientclock') return ctx.cycle ?? 0
       if (name === 'map_members' || name === 'world_members' || name === 'playermember') return player.members ? 1 : 0
       if (name === 'stat' || name === 'stat_base') return skillLevel(asInt(args[0]))
       if (name === 'stat_visible_xp') return 0
@@ -462,23 +517,27 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
       }
       if (name === 'get_col_tag') return '<col=' + (asInt(args[0]) & 0xffffff).toString(16).padStart(6, '0') + '>'
       if (name === 'pow') return Math.pow(asInt(args[0]), asInt(args[1])) | 0
-      if (name === 'client_clock') return 0
+      if (name === 'client_clock') return ctx.cycle ?? 0
 
       // ---- text measurement (real glyph metrics) ----
-      if (name === 'paramheight') return measureLines(asStr(args[0]), asInt(args[1]), asInt(args[2]))
-      if (name === 'stringwidth') {
-        return (async () => {
-          const font = await loadCacheFont(ctx.rootHandle, asInt(args[1]))
-          return font ? measureCacheText(font, asStr(args[0])) : asStr(args[0]).length * 6
-        })()
+      // paramheight / parawidth are the same layout asked two ways: lay the
+      // paragraph out at the given width, then count lines or measure the
+      // widest one.
+      if (name === 'paramheight') {
+        return (async () => (await wrapPara(asStr(args[0]), asInt(args[1]), asInt(args[2]))).length)()
       }
       if (name === 'parawidth' || name === 'paramwidth') {
         return (async () => {
           const font = await loadCacheFont(ctx.rootHandle, asInt(args[2]))
-          if (!font) return String(args[0]).length * 6
-          let widest = 0
-          for (const line of asStr(args[0]).split('<br>')) widest = Math.max(widest, measureCacheText(font, line))
-          return widest
+          const lines = await wrapPara(asStr(args[0]), asInt(args[1]), asInt(args[2]))
+          if (!font) return Math.max(...lines.map((l) => l.length * 6), 0)
+          return lines.reduce((widest, line) => Math.max(widest, measureCacheText(font, line)), 0)
+        })()
+      }
+      if (name === 'stringwidth') {
+        return (async () => {
+          const font = await loadCacheFont(ctx.rootHandle, asInt(args[1]))
+          return font ? measureCacheText(font, asStr(args[0])) : asStr(args[0]).length * 6
         })()
       }
 
@@ -546,6 +605,13 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
 
 function clampMode(v: number, max: number): number {
   return v < 0 ? 0 : v > max ? max : v
+}
+
+/** A component hash as "interface:component" — or the raw number when it
+ *  clearly isn't one (an unresolved hook sentinel, a -1). */
+function hashLabel(hash: number): string {
+  if (hash < 0 || (hash >>> 16) === 0) return String(hash)
+  return `${hash >>> 16}:${hash & 0xffff}`
 }
 
 /** COMPONENT_HOOK instr ids (hook installers whose ops are unnamed in the

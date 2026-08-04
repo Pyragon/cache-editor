@@ -5,8 +5,9 @@ import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getLoader } from '../loaders'
 import type { ModelData } from '../loaders/models'
 import ModelViewer from './ModelViewer'
-import { NumberInput, NumGrid, ToggleGrid } from './defFields'
+import { IntListInput, NumberInput, NumGrid, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
+import { SKILL_NAMES } from '../loaders/varOverrides'
 import { InterfaceAssets, childrenByParent, hitTestComponent, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
 import GameframePreview from './GameframePreview'
 import Cs2ScriptModal from './Cs2ScriptModal'
@@ -15,19 +16,25 @@ import './InterfaceViewer.css'
 // CS2 script hooks a component may carry — shown as a flat list of the ones
 // actually present (most components have none). Decompiling CS2 bytecode
 // into readable logic is out of scope; this exposes the raw tagged args.
-const SCRIPT_FIELDS: [key: keyof IComponentDefinition, label: string][] = [
+//
+// Labels follow the INSTALLER OPCODE, not the dumped field name, wherever the
+// two disagree — the opcode is verifiable (cryogen's CS2Opcode table and the
+// client's CS2Instruction agree) and the dumped names for the mouse hooks are
+// crossed. `hint` carries the dumped name so a field is still findable by it.
+// Full trace in EDITOR.md; the gameframe preview fires these three.
+const SCRIPT_FIELDS: [key: keyof IComponentDefinition, label: string, hint?: string][] = [
   ['onLoadScript', 'On Load'],
-  ['onMouseOver', 'On Mouse Over'],
-  ['onMouseLeaveScript', 'On Mouse Leave'],
+  ['onMouseOver', 'On Mouse Enter', 'HOOK_MOUSE_ENTER (968) — fires ONCE when the pointer enters. Dumped as `onMouseOver`.'],
+  ['onMouseLeaveScript', 'On Mouse Exit', 'HOOK_MOUSE_EXIT (600) — fires ONCE when the pointer leaves. Dumped as `onMouseLeaveScript`.'],
   ['hookParams', 'Hook Params'],
   ['onTargetEnter', 'On Target Enter'],
   ['onVarpTransmit', 'On Varp Transmit'],
-  ['mouseLeaveScript', 'Mouse Leave'],
+  ['mouseLeaveScript', 'Mouse Leave (misnomer)', 'IF_SETONMOUSELEAVE (809) writes this, but the client dispatches it like a TRANSMIT hook — a change-counter scanning a ring buffer against `mouseLeaveArrayParams`. Almost certainly an inventory transmit hook. Not fired as a mouse hook by the preview.'],
   ['onStatTransmit', 'On Stat Transmit'],
   ['onTimer', 'On Timer'],
   ['params', 'Params'],
   ['onTargetLeave', 'On Target Leave'],
-  ['popupScript', 'Popup'],
+  ['popupScript', 'On Mouse Over', 'IF_SETONMOUSEOVER (753) — fires EVERY client cycle while the pointer is inside, not once. Dumped as `popupScript`; it is not a popup.'],
   ['onClick', 'On Click'],
   ['onClickRepeat', 'On Click Repeat'],
   ['onRelease', 'On Release'],
@@ -396,6 +403,13 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   }
 
   const attachedScripts = selected ? SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null) : []
+  // The transmit filters only mean anything next to a transmit hook — showing
+  // two empty id lists on the thousands of components that have neither is
+  // noise. A stale list with no hook still shows, so it can be cleared.
+  const showsFilters = selected != null && (
+    selected.onVarpTransmit != null || selected.onStatTransmit != null
+    || (selected.varps?.length ?? 0) > 0 || (selected.statTransmitFilter?.length ?? 0) > 0
+  )
   const hasOps = selected != null && (selected.hasInteraction || selected.opBase !== '' || selected.targetVerb !== '' || (selected.options?.some((o) => o) ?? false))
 
   return (
@@ -478,6 +492,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
               opts={{ showHidden, showContainerOutlines: showOutlines }}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              onEditScript={onNavigate ? (id) => onNavigate('cs2', id) : undefined}
             />
           ) : (
             <div className="iface-canvas-wrap">
@@ -664,7 +679,40 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                 {attachedScripts.length === 0 && (
                   <div className="iface-no-scripts">No scripts attached to this component.</div>
                 )}
-                {attachedScripts.map(([key, label]) => {
+                {/* The subscription lists. A transmit hook does NOT fire on
+                    every var — the client only runs it when one of the ids
+                    listed here arrives, so a script with an empty list is dead
+                    in game. They belong beside the hooks for that reason: edit
+                    one without the other and the component silently stops
+                    updating. (The gameframe preview fires transmit hooks
+                    unconditionally — one static world state — so it can't warn
+                    you about this.) */}
+                <div className="iface-filter-row" hidden={!showsFilters}>
+                  <label className="item-field iface-text-field">
+                    <span className="item-field-label" title="Varp ids that make On Varp Transmit fire. Comma-separated; empty means it never fires.">
+                      Varp filter
+                    </span>
+                    <IntListInput
+                      value={selected.varps ?? undefined}
+                      onChange={(v) => set('varps', v ?? null)}
+                    />
+                  </label>
+                  <label className="item-field iface-text-field">
+                    <span className="item-field-label" title="Skill ids that make On Stat Transmit fire. Comma-separated; empty means it never fires.">
+                      Stat filter
+                    </span>
+                    <IntListInput
+                      value={selected.statTransmitFilter ?? undefined}
+                      onChange={(v) => set('statTransmitFilter', v ?? null)}
+                    />
+                    {(selected.statTransmitFilter?.length ?? 0) > 0 && (
+                      <span className="iface-filter-hint">
+                        {selected.statTransmitFilter!.map((s) => SKILL_NAMES[s] ?? `skill ${s}`).join(', ')}
+                      </span>
+                    )}
+                  </label>
+                </div>
+                {attachedScripts.map(([key, label, hint]) => {
                   // a hook is [scriptId, ...args] — the id is only viewable
                   // when it's actually a number (some hooks carry a string tag)
                   const hook = selected[key] as CS2Script | null
@@ -675,7 +723,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                           to another entry, so every cell's action sits in the
                           same place regardless of label length */}
                       <span className="item-field-label field-link-label">
-                        <span>{label}</span>
+                        <span title={hint}>{label}{hint && <span className="iface-label-note">?</span>}</span>
                         {id != null && id >= 0 && (
                           <button
                             type="button"
@@ -705,6 +753,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
           rootHandle={data.rootHandle ?? null}
           scriptId={viewScript}
           onClose={() => setViewScript(null)}
+          onEdit={onNavigate ? (id) => onNavigate('cs2', id) : undefined}
         />
       )}
 

@@ -3,15 +3,20 @@ import type { InterfaceData } from '../loaders/interfaces'
 import { InterfaceAssets } from './interfacePreview'
 import type { PreviewOptions } from './interfacePreview'
 import {
-  EDIT_SLOTS, FIXED_SIZE, RESIZABLE_MIN, loadGameframeScene, modeForRoot, paintGameframe, runGameframeCs2,
+  CLIENT_CYCLE_MS, EDIT_SLOTS, FIXED_SIZE, RESIZABLE_MIN, applyGameframeHover, hasHoverHook,
+  hasPerCycleHook, hoverTargets, loadGameframeScene, modeForRoot, paintGameframe, runGameframeCs2,
 } from './gameframe'
 import { hitTestComponent, resolveAbsoluteLayout } from './interfacePreview'
-import type { GameframeMode, GameframeScene } from './gameframe'
-import type { Cs2Warning } from '../cs2/runtime'
+import type {
+  Cs2VarRoute, GameframeMode, GameframePointer, GameframeRegion, GameframeRun, GameframeScene,
+  HoverTarget,
+} from './gameframe'
+import type { Cs2SceneSnapshot, Cs2TraceEntry, Cs2Warning } from '../cs2/runtime'
 import { Cs2Cache } from '../cs2/cache'
 import { preparePixelCanvas } from '../pixelScale'
 import { onVarOverridesChanged } from '../loaders/varOverrides'
 import VarOverridesModal from './VarOverridesModal'
+import Cs2Console from './Cs2Console'
 import './GameframePreview.css'
 
 /**
@@ -25,7 +30,11 @@ import './GameframePreview.css'
  * immediately — including when the interface being edited IS part of the
  * gameframe (548, 746, 752, an orb...).
  */
-export default function GameframePreview({ data, assets, opts, selectedId, onSelect }: {
+/** Client cycles the hover ticker runs before giving up, per hover change.
+ *  ~3s — the tooltip delay it exists for is around 24. */
+const TICK_BUDGET = 150
+
+export default function GameframePreview({ data, assets, opts, selectedId, onSelect, onEditScript }: {
   data: InterfaceData
   assets: InterfaceAssets | null
   opts: PreviewOptions
@@ -33,6 +42,8 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   selectedId?: number | null
   /** clicking a component of the edited interface selects it in the editor */
   onSelect?: (componentId: number) => void
+  /** leave for the cs2 entry to edit a script the console links to */
+  onEditScript?: (scriptId: number) => void
 }) {
   const [pickedMode, setPickedMode] = useState<GameframeMode>('fixed')
   // Editing a window pane pins the preview to that pane's mode: 548 IS the
@@ -46,7 +57,8 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   const [status, setStatus] = useState<string | null>('Loading gameframe…')
   const [cs2Enabled, setCs2Enabled] = useState(true)
   const [cs2Warnings, setCs2Warnings] = useState<Cs2Warning[]>([])
-  const [showWarnings, setShowWarnings] = useState(false)
+  const [cs2Trace, setCs2Trace] = useState<Cs2TraceEntry[]>([])
+  const [cs2Routes, setCs2Routes] = useState<Cs2VarRoute[]>([])
   const [showPlayer, setShowPlayer] = useState(false)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<GameframeScene | null>(null)
@@ -60,6 +72,29 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   /** the edited interface's placement + components from the last paint, for
    *  click hit-testing */
   const hitRef = useRef<{ place: { x: number; y: number; w: number; h: number }; comps: (import('../loaders/interfaces').IComponentDefinition | null)[] } | null>(null)
+  /** every painted interface from the last paint, for pointer hit-testing
+   *  across the WHOLE frame (hovering an orb has to reach the orb, not the
+   *  window pane it sits on) */
+  const regionsRef = useRef<GameframeRegion[]>([])
+  /** hover state fed to the CS2 run; a ref because the pointer moves far more
+   *  often than a repaint is warranted */
+  const pointerRef = useRef<GameframePointer>({ entered: [], over: [], exited: [] })
+  const [hoverLabel, setHoverLabel] = useState<string | null>(null)
+  /** The frame's CS2 state, kept across pointer movement. Rebuilt only when
+   *  its key changes — everything a pointer move does NOT affect. */
+  const frameRef = useRef<{ key: string; run: GameframeRun } | null>(null)
+  /** bumped when the composed scene is replaced (mode/slot/draft edit) */
+  const sceneGen = useRef(0)
+  /** bumped when the Variables modal saves — the frame hooks read that player */
+  const varsGen = useRef(0)
+  /** what the last hover run produced. Hover state accumulates like the
+   *  client's: an exit script has to see the highlight it's undoing, or the
+   *  console records it as having changed nothing. Dropped whenever the frame
+   *  is rebuilt, since it was layered over the old one. */
+  const hoverStateRef = useRef<Cs2SceneSnapshot | null>(null)
+  /** `client_clock()` — advanced by the hover ticker below */
+  const cycleRef = useRef(0)
+  const tickRef = useRef<number | null>(null)
 
   const viewport = mode === 'fixed' ? FIXED_SIZE : size
 
@@ -78,7 +113,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   // The HUD's CS2 hooks read the simulated player (levels, points, run
   // energy, name), so saving the Variables modal has to re-run them.
   const repaintRef = useRef<() => void>(() => {})
-  useEffect(() => onVarOverridesChanged(() => repaintRef.current()), [])
+  useEffect(() => onVarOverridesChanged(() => { varsGen.current++; repaintRef.current() }), [])
 
   // Scene assembly depends on mode/slot/draft identity; keyed on the
   // components ARRAY so a field edit (new array from the viewer) reloads.
@@ -92,6 +127,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
         const scene = await loadGameframeScene(data.rootHandle!, sceneKey.mode, { id: sceneKey.id, components: sceneKey.components }, sceneKey.slotKey)
         if (cancelled) return
         sceneRef.current = scene
+        sceneGen.current++
         setStatus(null)
         repaint()
       } catch (e) {
@@ -117,17 +153,57 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     void (async () => {
       // CS2 first: the mutated clones feed the painter. Painting only starts
       // once the hooks are done, so a stale run can't half-draw.
-      let override: Awaited<ReturnType<typeof runGameframeCs2>> | null = null
+      let override: Awaited<ReturnType<typeof applyGameframeHover>> | null = null
+      let routes: Cs2VarRoute[] = []
       if (cs2Enabled && data.rootHandle) {
         try {
           if (!cs2CacheRef.current) cs2CacheRef.current = new Cs2Cache()
-          override = await runGameframeCs2(data.rootHandle, scene, mode, width, height, cs2CacheRef.current)
+          // The frame passes are the expensive part and only depend on the
+          // scene, the viewport and the simulated player — none of which a
+          // pointer move touches. Cache them so hovering costs three hooks
+          // instead of sixty.
+          const key = `${sceneGen.current}|${mode}|${width}x${height}|${varsGen.current}`
+          const rebuilt = frameRef.current?.key !== key
+          if (rebuilt) {
+            const run = await runGameframeCs2(data.rootHandle, scene, mode, width, height, cs2CacheRef.current)
+            frameRef.current = { key, run }
+            hoverStateRef.current = null
+          }
+          const base = frameRef.current!.run
+          routes = base.routes
+          // One run IS one client cycle. Advancing the clock on the timer
+          // instead made the countdown in a delay script diverge: `varc_1`
+          // only moves when the hook actually RUNS (paint rate), while
+          // `client_clock() + delay` moved at timer rate, so the gap closed at
+          // the difference between the two rather than at the script's own
+          // pace — a ~0.5s tooltip took 3s, and would never have appeared at
+          // all if painting dropped below half the timer rate.
+          cycleRef.current++
+          const hover = await applyGameframeHover(base, pointerRef.current, hoverStateRef.current, cycleRef.current)
+          hoverStateRef.current = hover.snapshot
+          // What the console should call this run: a rebuild is the whole
+          // frame plus whatever the pointer added; a cache hit is ONLY the
+          // hover hooks, since the frame didn't run again and re-listing 60
+          // cached entries would bury the two that are news.
+          const merged = rebuilt ? [...base.trace, ...hover.trace] : hover.trace
+          override = {
+            ...hover,
+            // the two traces are numbered from their own scenes, so renumber
+            // rather than emit a run with two #1s
+            trace: merged.map((e, i) => (e.seq === i + 1 ? e : { ...e, seq: i + 1 })),
+          }
+          // entered/exited are one-shot edges: their hooks fire on the run
+          // that observed them and must not re-fire on later repaints. `over`
+          // stays, because its hook is per-cycle by design.
+          pointerRef.current = { entered: [], over: pointerRef.current.over, exited: [] }
         } catch (e) {
           setStatus(`CS2 run failed: ${e instanceof Error ? e.message : e}`)
         }
       }
       if (gen !== paintGen.current) { paintBusy.current = false; return }
       setCs2Warnings(override?.warnings ?? [])
+      setCs2Trace(override?.trace ?? [])
+      setCs2Routes(routes)
       // The canvas displays at 1:1 CSS size, so the buffer renders at the
       // device pixel ratio — every drawn pixel maps to a device pixel and
       // nothing is resampled. A fixed 2× buffer looked fine at DPR 1/2 but on
@@ -141,7 +217,8 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
       ctx.fillRect(0, 0, width, height)
       // no placeholder boxes in the composed frame — the client draws
       // nothing for runtime-filled content in a normal frame
-      const placements = await paintGameframe(ctx, assets, scene, width, height, { ...opts, showPlaceholders: false }, override ?? undefined)
+      const { placements, regions } = await paintGameframe(ctx, assets, scene, width, height, { ...opts, showPlaceholders: false }, override ?? undefined)
+      regionsRef.current = regions
       // selection outline: same dashed blue as the flat canvas, drawn where
       // the edited interface's component actually landed in the frame
       {
@@ -191,14 +268,103 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   }
   const onHandleUp = () => { dragRef.current = null }
 
+  /** canvas pixel under the event, in viewport units */
+  const canvasPoint = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const bounds = e.currentTarget.getBoundingClientRect()
+    const { width, height } = mode === 'fixed' ? FIXED_SIZE : size
+    return {
+      x: ((e.clientX - bounds.left) / bounds.width) * width,
+      y: ((e.clientY - bounds.top) / bounds.height) * height,
+    }
+  }
+
+  /**
+   * Hover tracking. The client keeps an "is hovered" flag per component and
+   * fires enter/leave on the transition, so this only has to notice the
+   * transition and hand it to the next run.
+   *
+   * The repaint is CONDITIONAL: a full CS2 run is ~60 hooks, and re-running it
+   * every time the pointer crosses any component boundary would make the
+   * preview crawl for no visible result. Only a component that actually
+   * carries a hover hook is worth a run — components already inside the set
+   * have had their effect applied.
+   */
+  /**
+   * The client cycle, run only while it can matter.
+   *
+   * The every-cycle hover hook is written expecting ~50 calls a second, and
+   * scripts time themselves off `client_clock()` against a varc they advance
+   * per call — the 11:18 tooltip needs roughly 24 cycles (~0.5s) of that
+   * before it shows. Firing the hook once per pointer movement made that
+   * "jiggle the mouse two dozen times".
+   *
+   * Bounded on purpose: each tick is a hover run plus a full repaint, so it
+   * stops after TICK_BUDGET cycles and restarts on the next hover change. A
+   * script still counting down after three seconds was not going to finish.
+   */
+  const stopTicking = () => {
+    if (tickRef.current != null) window.clearInterval(tickRef.current)
+    tickRef.current = null
+  }
+
+  const startTicking = () => {
+    stopTicking()
+    let budget = TICK_BUDGET
+    tickRef.current = window.setInterval(() => {
+      if (budget-- <= 0) { stopTicking(); return }
+      // asks for a cycle; repaint() advances the clock only when one actually
+      // runs, so a slow paint can't outrun the scripts timing against it
+      repaint()
+    }, CLIENT_CYCLE_MS)
+  }
+
+  useEffect(() => stopTicking, [])
+
+  const applyHover = (next: HoverTarget[]) => {
+    const prev = pointerRef.current.over
+    const prevHashes = new Set(prev.map((t) => t.hash))
+    const nextHashes = new Set(next.map((t) => t.hash))
+    const entered = next.filter((t) => !prevHashes.has(t.hash))
+    const exited = prev.filter((t) => !nextHashes.has(t.hash))
+    if (entered.length === 0 && exited.length === 0) {
+      // same components — just keep the coordinates current for the next run
+      pointerRef.current.over = next
+      return
+    }
+    pointerRef.current = { entered, over: next, exited }
+    // the label names the innermost component, since that's what the eye is
+    // on, and counts the ancestors also receiving the hover
+    const deepest = next[next.length - 1]
+    setHoverLabel(deepest
+      ? `${deepest.hash >>> 16}:${deepest.hash & 0xffff}${next.length > 1 ? ` +${next.length - 1}` : ''}`
+      : null)
+    if ([...entered, ...exited].some((t) => hasHoverHook(componentAt(t.hash)))) repaint()
+    // tick only while something under the pointer wants per-cycle calls
+    if (cs2Enabled && next.some((t) => hasPerCycleHook(componentAt(t.hash)))) startTicking()
+    else stopTicking()
+  }
+
+  const onCanvasMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const { x, y } = canvasPoint(e)
+    applyHover(hoverTargets(regionsRef.current, x, y, opts.showHidden === true))
+  }
+
+  const onCanvasLeave = () => applyHover([])
+
+  /** The painted (CS2-mutated) component behind a hit hash. */
+  const componentAt = (hash: number) => {
+    const region = regionsRef.current.find((r) => r.interfaceId === (hash >>> 16))
+    return region?.comps[hash & 0xffff] ?? null
+  }
+
+  // Selection stays scoped to the EDITED interface — clicking a chatbox
+  // component would have nothing to select in the tree.
   const onCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const hit = hitRef.current
-    const canvas = canvasRef.current
-    if (!hit || !canvas || !onSelect) return
-    const bounds = canvas.getBoundingClientRect()
-    const { width, height } = mode === 'fixed' ? FIXED_SIZE : size
-    const px = ((e.clientX - bounds.left) / bounds.width) * width - hit.place.x
-    const py = ((e.clientY - bounds.top) / bounds.height) * height - hit.place.y
+    if (!hit || !onSelect) return
+    const point = canvasPoint(e)
+    const px = point.x - hit.place.x
+    const py = point.y - hit.place.y
     if (px < 0 || py < 0 || px > hit.place.w || py > hit.place.h) return
     const layout = resolveAbsoluteLayout(hit.comps, hit.place.w, hit.place.h)
     const id = hitTestComponent(hit.comps, layout, px, py, opts.showHidden === true)
@@ -254,39 +420,35 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
           <input type="checkbox" checked={cs2Enabled} onChange={(e) => setCs2Enabled(e.target.checked)} />
           CS2 hooks
         </label>
-        {cs2Enabled && cs2Warnings.length > 0 && (
-          <button type="button" className="gfp-cs2-warnings" onClick={() => setShowWarnings((v) => !v)}>
-            {cs2Warnings.reduce((n, w) => n + w.count, 0)} stubbed CS2 calls ({cs2Warnings.length} ops)
-          </button>
-        )}
         <button
           type="button"
           className="gfp-player-btn"
-          title="The simulated player the HUD scripts read — levels, life/prayer points, run energy, display name"
+          title="The variables the HUD scripts read — varps, varbits, skill levels, plus the handful of player values (run energy, display name) that aren't vars"
           onClick={() => setShowPlayer(true)}
         >
-          Player…
+          Variables…
         </button>
+        {hoverLabel && (
+          <span className="gfp-hover" title="The component under the pointer. Its hover hooks (onMouseOver / popup / onMouseLeave) run in the preview — watch the console.">
+            hover {hoverLabel}
+          </span>
+        )}
         {zoomedOut && (
           <span className="gfp-zoom-warning" title="The browser has fewer device pixels than the frame needs, so 1px strokes (cache font glyphs, borders) get resampled. The client always draws 1:1 — reset zoom to compare accurately.">
             page zoom {Math.round(pageZoom * 100)}% — not pixel-accurate
           </span>
         )}
       </div>
-      {showWarnings && cs2Warnings.length > 0 && (
-        <div className="gfp-warning-list">
-          {cs2Warnings.slice(0, 40).map((w) => (
-            <div key={w.op} className="gfp-warning-row">
-              <span className="gfp-warning-op">{w.op}</span>
-              <span className="gfp-warning-count">×{w.count}</span>
-              <span className="gfp-warning-example">{w.example}</span>
-            </div>
-          ))}
-        </div>
-      )}
       <div className="gfp-stage">
         <div className="gfp-frame" style={{ width: viewport.width, height: viewport.height }}>
-          <canvas ref={canvasRef} className="gfp-canvas" style={{ width: viewport.width, height: viewport.height }} onClick={onCanvasClick} />
+          <canvas
+            ref={canvasRef}
+            className="gfp-canvas"
+            style={{ width: viewport.width, height: viewport.height }}
+            onClick={onCanvasClick}
+            onMouseMove={onCanvasMove}
+            onMouseLeave={onCanvasLeave}
+          />
           {mode === 'resizable' && (
             <div
               className="gfp-resize-handle"
@@ -300,6 +462,16 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
           {status && <div className="gfp-status">{status}</div>}
         </div>
       </div>
+      <Cs2Console
+        trace={cs2Trace}
+        routes={cs2Routes}
+        warnings={cs2Warnings}
+        enabled={cs2Enabled}
+        rootHandle={data.rootHandle ?? null}
+        editedInterfaceId={data.id}
+        onSelect={onSelect}
+        onEditScript={onEditScript}
+      />
       {showPlayer && <VarOverridesModal onClose={() => setShowPlayer(false)} />}
     </div>
   )

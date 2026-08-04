@@ -1,0 +1,335 @@
+/* The CS2 run log under the gameframe preview. Same palette and 11–12px type
+   as the preview's toolbar so it reads as part of that panel, not a new one;
+   the rows themselves are monospace because they're mostly ids and values. */
+
+.cs2-console {
+  border: 1px solid #232733;
+  border-radius: 6px;
+  background: #101319;
+  overflow: hidden;
+}
+
+.cs2-console-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 5px 8px;
+  background: #14161c;
+  border-bottom: 1px solid #232733;
+}
+
+.cs2-console.collapsed .cs2-console-head {
+  border-bottom: none;
+}
+
+.cs2-console-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: var(--text, #dfe6f2);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.cs2-console-caret {
+  color: #7f8a9e;
+  font-size: 10px;
+  width: 9px;
+}
+
+.cs2-console-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.cs2-console-tabs button {
+  background: transparent;
+  color: var(--text-dim, #aab3c5);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.cs2-console-tabs button:hover {
+  color: var(--text, #dfe6f2);
+}
+
+.cs2-console-tabs button.selected {
+  background: rgba(0, 102, 255, 0.18);
+  color: #fff;
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.cs2-console-tally {
+  color: #7f8a9e;
+  margin-left: 4px;
+}
+
+.cs2-console-tabs button.selected .cs2-console-tally {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.cs2-console-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+/* narrower than the shared sized input: this sits in a dense toolbar row */
+.cs2-console-filter {
+  width: 22ch;
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+.cs2-console-clear {
+  background: transparent;
+  color: var(--text-dim, #aab3c5);
+  border: 1px solid #3d4457;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.cs2-console-clear:hover {
+  color: var(--text, #dfe6f2);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+/* Taller than a single run's worth of rows: the point of keeping history is
+   being able to scroll back through it. */
+.cs2-console-body {
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.cs2-console-empty {
+  color: #7f8a9e;
+  padding: 10px 12px;
+  font-family: inherit;
+}
+
+/* One CS2 run. Runs stack newest-first and the header is what makes the log
+   readable as history rather than one undifferentiated stream. */
+.cs2-run + .cs2-run {
+  border-top: 1px solid #232733;
+}
+
+.cs2-run-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 10px;
+  background: #14161c;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* The newest run is the one you just caused — keep it obviously first. */
+.cs2-run:first-child .cs2-run-head {
+  background: #171b24;
+  box-shadow: inset 2px 0 0 var(--electric-blue-bright, #2f8fff);
+}
+
+.cs2-run-id {
+  color: var(--text, #dfe6f2);
+}
+
+.cs2-run-at,
+.cs2-run-counts {
+  color: #7f8a9e;
+}
+
+.cs2-run-repeats {
+  margin-left: auto;
+  color: #7f8a9e;
+  cursor: help;
+}
+
+/* A set variable that a hook in this run actually fires on — a varbit reaches
+   scripts through its CONTAINING varp, and without this line the log appears
+   to be discussing a var you never set. Variables nothing here watches are not
+   reported at all, so every one of these is a real connection. */
+.cs2-run-route {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 3px 10px 3px 32px;
+  line-height: 1.6;
+}
+
+.cs2-run-route::before {
+  content: "✓";
+  color: #57c98a;
+  margin-left: -14px;
+}
+
+.cs2-route-subject {
+  color: #c9d3e4;
+}
+
+.cs2-route-via,
+.cs2-route-heard {
+  color: #7f8a9e;
+}
+
+.cs2-route-via::before {
+  content: "→ ";
+}
+
+.cs2-log-entry {
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.cs2-log-entry:last-child {
+  border-bottom: none;
+}
+
+/* A hook that ran and moved nothing is context, not a result — dim it so the
+   rows that DID something stay the ones your eye lands on. */
+.cs2-log-entry.quiet {
+  opacity: 0.6;
+}
+
+.cs2-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 10px;
+  line-height: 1.7;
+}
+
+.cs2-log-seq {
+  color: #566076;
+  min-width: 22px;
+  text-align: right;
+}
+
+/* One colour per hook field, so a scroll through the log reads as phases
+   (everything opened, then the var block, then the tick) without labels
+   having to be read one at a time. */
+.cs2-log-hook {
+  min-width: 108px;
+  color: #8b96ab;
+}
+
+.cs2-log-hook.hook-onLoad { color: #6ea8ff; }
+.cs2-log-hook.hook-onVarpTransmit { color: #57c98a; }
+.cs2-log-hook.hook-onStatTransmit { color: #c79ae8; }
+.cs2-log-hook.hook-onTimer { color: #d9b45c; }
+
+/* Pointer-driven hooks share a warmer hue so a hover burst reads as one group
+   against the frame's own load/transmit passes. */
+.cs2-log-hook.hook-mouseEnter { color: #f08a5d; }
+.cs2-log-hook.hook-mouseExit { color: #d97a6c; }
+.cs2-log-hook.hook-mouseOver { color: #e0a06e; }
+
+.cs2-log-comp {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: #aab3c5;
+  min-width: 58px;
+  text-align: left;
+}
+
+.cs2-log-comp.selectable {
+  color: var(--electric-blue-bright, #2f8fff);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.cs2-log-comp.selectable:hover {
+  color: #7ab6ff;
+}
+
+.cs2-log-comp:disabled {
+  cursor: default;
+}
+
+.cs2-log-script {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: #9fb6d4;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  min-width: 92px;
+  text-align: left;
+}
+
+.cs2-log-script:hover {
+  color: #cfe1f7;
+}
+
+.cs2-log-trigger {
+  color: #7f8a9e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cs2-log-note {
+  color: #d9b45c;
+  white-space: nowrap;
+}
+
+/* Changes are indented under their hook and hairline-connected to it, so a
+   long run still reads as "this script → these components". */
+.cs2-log-changes {
+  margin: 0 10px 3px 42px;
+  border-left: 1px solid #262b36;
+  padding-left: 10px;
+}
+
+.cs2-log-change {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  line-height: 1.7;
+}
+
+.cs2-log-field {
+  color: #c9d3e4;
+  min-width: 120px;
+}
+
+.cs2-log-from {
+  color: #7f8a9e;
+  text-decoration: line-through;
+  text-decoration-color: #4b5364;
+}
+
+.cs2-log-arrow {
+  color: #566076;
+}
+
+.cs2-log-to {
+  color: #7fd6a3;
+}
+
+.cs2-log-detail {
+  color: #8b96ab;
+}

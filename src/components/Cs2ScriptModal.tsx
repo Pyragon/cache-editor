@@ -21,10 +21,15 @@ const TAB_SIZE = 2
  *  for the vertical scrollbar. */
 const DIALOG_CHROME = 60
 
-export default function Cs2ScriptModal({ rootHandle, scriptId, onClose }: {
+export default function Cs2ScriptModal({ rootHandle, scriptId, onClose, onEdit }: {
   rootHandle: FileSystemDirectoryHandle | null
   scriptId: number
   onClose: () => void
+  /** Leave for the cs2 entry to edit this script. Given the id CURRENTLY on
+   *  screen, not the one the modal opened with — following a call chain and
+   *  then hitting Edit should land on what you're reading. Absent = no button
+   *  (nothing wired a navigation handler up). */
+  onEdit?: (scriptId: number) => void
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   useEffect(() => { dialogRef.current?.showModal() }, [])
@@ -105,6 +110,21 @@ export default function Cs2ScriptModal({ rootHandle, scriptId, onClose }: {
           </h3>
           <span className="anim-fit-actions">
             {stack.length > 1 && <span className="cs2-trail">from {stack.slice(0, -1).join(' → ')}</span>}
+            {onEdit && (
+              <button
+                type="button"
+                className="save-bar-save"
+                title={`Open script ${current} in the cs2 editor. Leaves this interface — you'll be asked about unsaved changes first.`}
+                // Deliberately does NOT close: a successful navigation unmounts
+                // this whole viewer and takes the dialog with it, and a
+                // navigation the user CANCELS at the unsaved-changes prompt
+                // should leave them exactly where they were — still reading
+                // the script, not staring at the interface with it gone.
+                onClick={() => onEdit(current)}
+              >
+                Edit
+              </button>
+            )}
             <button type="button" className="save-bar-discard" onClick={onClose}>Close</button>
           </span>
         </div>

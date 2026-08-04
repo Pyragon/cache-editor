@@ -1523,3 +1523,368 @@ colour-0 tests), which SpriteViewer, the interface previews, and
 when a user paints #000000 into a frame whose alpha channel is absent or
 all-255 — it will render as transparency in-game, and an edit that adds a
 sub-255 alpha byte anywhere flips rule 1 for the whole frame.
+
+## Component CS2 hooks — when each one fires, and the args the client rewrites (traced 2026-08-03)
+
+**What the renderer does with it:** almost everything alive in the gameframe
+is script output, not stored fields — the orb fills and their numbers, the
+low-HP flash, the chat name, half the tab strip. The preview runs the hooks
+for real (`runGameframeCs2`), so getting *which* hooks fire and *what they
+receive* right is the difference between a HUD that responds to the simulated
+player and one frozen at its authored state. See `interfaces.md` → "Hook
+passes" / "Hook arg sentinels".
+
+**Fields (interfaces dump, `IComponentDefinition`):**
+
+| dumped field | fires when | filter field |
+| --- | --- | --- |
+| `onLoadScript` | the interface opens (IF_OPENTOP / IF_OPENSUB) | — |
+| `onVarpTransmit` | one of the component's listed varps arrives | `varps` |
+| `onStatTransmit` | one of the component's listed skills arrives | `statTransmitFilter` |
+| `onTimer` | every client cycle | — |
+| `onMouseOver` / `onClick` / `onDrag` / `onKey` / … | pointer & key events | `keyPressArray`, `mouseWheelArray`, … |
+
+Each is a flat array: `[scriptId, ...args]`. `varps` / `statTransmitFilter`
+are the client's *subscription lists* — they don't parameterise the script,
+they decide whether it fires at all.
+
+**The args are not all literals.** darkan-game-client
+`CS2Executor.executeHookInner` substitutes sentinels before the script starts:
+
+| stored value | becomes |
+| --- | --- |
+| `-2147483647` / `-2147483646` | mouse x / y |
+| **`-2147483645`** | **the hook's own component hash** |
+| `-2147483644` | op index |
+| `-2147483643` | the source component's slot |
+| `-2147483642` / `-2147483641` | the drag-target component / its slot |
+| `-2147483640` / `-2147483639` | typed key code / char |
+| `"event_opbase"` (string) | the hovered op's name |
+
+**What is already editable:** nothing. The hooks are loaded and run, and
+visible read-only in the console under the gameframe preview (click a script
+id to read its source in `Cs2ScriptModal`), but no viewer lets you change a
+hook's script or args. `InterfaceViewer` doesn't surface them at all.
+
+**Gotchas for whoever builds it:**
+- A hook editor MUST render the sentinels as named tokens ("this component",
+  "mouse x") — showing `-2147483645` as a number invites someone to "fix" it,
+  and typing a literal component hash there breaks the hook for every other
+  interface that shares the script.
+- `varps` / `statTransmitFilter` must be edited *with* the transmit hook.
+  Adding a script to `onVarpTransmit` and leaving `varps` empty means it never
+  fires in game, and the preview can't tell you that — the preview fires
+  transmit hooks unconditionally (one static world state, so it models "the
+  whole player block just arrived").
+- A hook aimed at a component that isn't in the scene fails **silently** in
+  the client too — every `if_*` setter no-ops on an unresolvable hash. That
+  is why the console logs unresolvable targets explicitly.
+- The same script id is usually wired to several hook fields at once (748:0
+  carries `script_2923` on load, varp-transmit *and* stat-transmit). An editor
+  that edits "the script" of one field must not silently rewrite the others.
+
+## Var names are ours, not the cache's (2026-08-03)
+
+**There is no name table for varps or varbits anywhere in the dump** — they are
+bare numbered slots, and the only way to learn what one is is to read the
+script that uses it. Skills are the exception: the id order is real and fixed
+(`SKILL_NAMES` in `src/loaders/varOverrides.ts`, from darkan-game-server
+`Skills.SKILL_NAME`).
+
+So names come from two places, and both live in `varOverrides.ts`:
+
+- **`KNOWN_VARS`** — traced by us, one entry per var found driving something in
+  a gameframe hook (varbit 7198 → hitpoints orb fill, varp 102 → the poisoned
+  orb variant, …). Each carries a `what` description and sometimes a `derive`
+  that supplies a sensible default (life/prayer points default to full for the
+  current level, so raising a level doesn't leave the orb half-drained).
+- **User names** (`cache-editor:var-names-v1`, `CustomVarName`) — typed into
+  the Variables modal's Name column. A user name for a var we already traced
+  replaces the *name* only: `mergeVarNames` keeps that entry's `what` and
+  `derive`, because renaming "Life points" to "HP" must not stop the orb
+  defaulting to full.
+
+**Editable:** yes — the Name column in `VarOverridesModal`, which also feeds the
+"add a named one" picker so a name outlives the row that taught it, and the
+gameframe console's `onVarpTransmit` trigger line, so a named varp reads back
+by name the next time it fires.
+
+**Gotchas:**
+- Names key off `kind:id`, not the row. Retyping a row's id shows the new id's
+  name rather than dragging the old one along — correct, but it means a name
+  typed *before* fixing a typo'd id is stranded on the typo.
+- `tracedVar()` vs `namedVar()`: the first ignores user names (use it wherever
+  the DESCRIPTION matters), the second is the merged view. The modal must use
+  `mergeVarNames(draft)` rather than `namedVars()` — the picker has to reflect
+  a name the moment it's typed, not after Save.
+- Storage is global, not per-cache. A name given while working one dump shows
+  in the next one.
+
+## Varbits reach interfaces through their containing varp (traced 2026-08-03)
+
+**Fields:** `varbits/<id>.json` — `baseVar`, `startBit`, `endBit`.
+
+```json
+{ "id": 7198, "baseVar": 1240, "startBit": 1, "endBit": 15 }
+```
+
+A varbit is not a variable of its own; it is a **named bit range inside a
+varp**. That matters for interfaces because a component's transmit
+subscription list (`varps`) only ever names **varps** — there is no way to
+subscribe to a varbit. So the chain is:
+
+    server sends varp 1240
+      → every component with 1240 in `varps` fires its onVarpTransmit
+        → those scripts read `varpbit_7198` back out of it
+
+**Two numbers that never appear together anywhere on screen.** Setting varbit
+455 fires the hooks watching varp 449; setting varbit 7198 fires those watching
+varp 1240 (the hitpoints orb, 748:0). Verified against the dump: of the fixed
+gameframe's 20 subscribed varps, 1240 and 2382 are exactly the base vars of the
+life-point and prayer-point varbits.
+
+**Editable:** varbit values in the Variables modal; `varps` / `statTransmitFilter`
+in `InterfaceViewer`'s CS2 Scripts group. The *mapping* is read-only — the
+gameframe console's per-run variable routing lines report it
+(`varbit 455 = 1 → bits 0–3 of varp 449 → fires the hook on 4:23`), loaded by
+`src/loaders/varbitDefs.ts`.
+
+**Gotchas:**
+- Anything reasoning about "which interfaces care about this varbit" MUST
+  resolve `baseVar` first. Matching varbit ids against `varps` finds nothing,
+  silently — the lists are in different number spaces.
+- `startBit`/`endBit` bound the value: bits 0–3 hold 0–15. Nothing validates
+  this yet, so the Variables modal will happily accept a value too wide for the
+  range, which the client would truncate.
+- There is a second, sparse `config/varbits` archive. The top-level `varbits/`
+  dump is the one with real data (same trap as enums — see the shared type-tag
+  note in CLAUDE.md).
+
+## `mouseLeaveScript` is an INVENTORY transmit hook, not a mouse hook (traced 2026-08-03)
+
+**A misnamed field that every source we trust agrees on.** cryogen's dumper,
+darkan-bot-refactor's `Component.kt`, and darkan-game-client's own
+deobfuscated `IComponentDefinitions` all call decode slot 7
+`mouseLeaveScript`, and its paired filter list `mouseLeaveArrayParams`. The
+client's CS2 installer op for it is even called `setOnMouseLeave`. All of that
+is wrong.
+
+**Evidence it's a transmit hook** (`client.java`, the dispatch loop):
+
+```java
+if (iCompDef.mouseLeaveScript != null && anInt7382 > iCompDef.anInt1444) {
+    if (iCompDef.mouseLeaveArrayParam != null && anInt7382 - iCompDef.anInt1444 <= 32) {
+        for (i_24 = iCompDef.anInt1444; i_24 < anInt7382; i_24++) {
+            i_25 = anIntArray7381[i_24 & 0x1f];          // 32-entry ring buffer
+            for (...) if (i_25 == iCompDef.mouseLeaveArrayParam[i_26]) { fire; }
+```
+
+A global change-counter against a per-component cursor, scanning a ring buffer
+of recently-changed ids against the component's filter list. That is
+**identical in shape** to the varp-transmit dispatch a few lines above it and
+the stat-transmit one below. Nothing reads the mouse. The real mouse-leave
+hook is slot 3 (`onMouseLeaveScript`), dispatched off the `aBool1440` hover
+flag with mouse coordinates attached.
+
+Position confirms it. Hooks decode `… onVarpTransmit, mouseLeaveScript,
+onStatTransmit …` and filter lists decode `… varps, mouseLeaveArrayParams,
+statTransmitFilter …` — the same slot in both sequences, between varp and
+stat. That's the classic **varp / inv / stat** transmit trio, and `ops.ts`
+already recognises a `setoninvtransmit` installer op.
+
+**Editor state:** the field is editable in `InterfaceViewer`'s CS2 Scripts
+group under its wrong name; `mouseLeaveArrayParams` isn't surfaced at all
+(unlike `varps` / `statTransmitFilter`, which now are). The gameframe preview
+deliberately does NOT fire it as a hover hook — see `HOVER_PASSES` in
+`gameframe.ts`.
+
+**If someone renames it** (`onInvTransmit` / `invTransmitFilter`): it is a
+cryogen dumper change plus a re-dump, and note that renaming to match darkan
+is *not* the fix here — darkan has the same wrong name. Confirm the ring
+buffer really carries container ids first; the shape is certain, the payload
+is inferred. One component in the fixed gameframe uses it, so there is a test
+case but a thin one.
+
+## The three hover hooks, and why two of them are misnamed (traced 2026-08-03)
+
+**Which cache field is which mouse event** — settled by the installer opcode,
+because the dumped field names for two of the three are crossed. cryogen's
+`CS2Opcode.java` and darkan-game-client's `CS2Instruction.java` agree on every
+opcode value below, and the client's handler chain shows which field each one
+writes:
+
+| opcode | client handler → setter | writes (decode slot) | dumped name | actually fires |
+| --- | --- | --- | --- | --- |
+| `HOOK_MOUSE_ENTER` (968) | `hookMouseEnter` → `method6289` | slot 2 | `onMouseOver` | **once**, on entering |
+| `IF_SETONMOUSEOVER` (753) | `ifSetOnMouseOver` → `setOnMouseOver` | slot 12 | `popupScript` | **every client cycle** while inside |
+| `HOOK_MOUSE_EXIT` (600) | `hookMouseExit` → `method11223` | slot 3 | `onMouseLeaveScript` | **once**, on leaving |
+| `IF_SETONMOUSELEAVE` (809) | `ifSetOnMouseLeave` → `setOnMouseLeave` | slot 7 | `mouseLeaveScript` | **not a mouse hook** — see the separate entry |
+
+The dispatch in `client.java` (around the per-component `aBool1440` hover flag)
+confirms the timing: enter is guarded by `!aBool1440 && over`, exit by
+`aBool1440 && !over`, and slot 12 by `aBool1440 && over` with no edge guard at
+all — so it runs on the entering cycle *and* every cycle after.
+
+**So `popupScript` is not a popup.** It is the genuine continuous "mouse is
+over" hook, and the enter-once hook is the one dumped as `onMouseOver`.
+Interface 9:5 and 9:6 are the type specimen:
+
+```json
+{ "popupScript":        [45, -2147483645, 16777215],
+  "onMouseLeaveScript": [45, -2147483645, 12875312] }
+```
+
+`script_45(comp, colour)` is one `if_setcolor` — hold white while the pointer
+is inside, restore on exit. Note it pairs slot 12 with slot 3, not slot 2 with
+slot 3; both pairings occur (9:33 uses slot 2 + slot 3 with `script_44` for a
+sprite swap), so an editor must not assume enter/exit come as a set.
+
+**Editable:** all three in `InterfaceViewer`'s CS2 Scripts group, labelled by
+OPCODE with the dumped name in a `?` tooltip. The gameframe preview fires all
+three (`HOVER_PASSES` in `gameframe.ts`), labelled `mouseEnter` / `mouseOver` /
+`mouseExit` in the console.
+
+**Gotchas:**
+- Don't rename the dumped fields to match without deciding what to do about
+  slot 7 at the same time — `IF_SETONMOUSELEAVE` writes it, so a naive rename
+  pass driven by opcode names would give slot 7 a mouse name it doesn't
+  deserve. See the `mouseLeaveScript` entry.
+- Anything that REPLAYS hover state must accumulate it rather than recomputing
+  from a pristine base. An exit script setting a colour back to what the base
+  already held is a no-op diff, so a from-base model reports the exit hook as
+  having changed nothing at the moment it visibly undoes a highlight.
+
+## Hover has no topmost-wins rule — every containing component is "over" (traced 2026-08-03)
+
+**What the client does** (`client.java`, the per-component loop): for each
+component of each open interface it computes that component's own hovered flag
+from a plain bounds test —
+
+```java
+boolean bool_48 = false;
+if (mouseX >= leftBound && mouseY >= lowerBound && mouseX < rightBound && mouseY < upperBound) {
+    ... bool_48 = true;
+}
+```
+
+— then fires that component's enter / over / exit hooks off it. There is no
+z-order arbitration and no "the pointer belongs to one component". Sitting on
+an icon means the icon, its container, and every ancestor container whose rect
+contains the point are **all** hovered at once, and every hover hook among them
+runs.
+
+The one refinement: a component with `clickMask` set, of type SPRITE, fully
+opaque, untiled and unrotated tests against the sprite's per-row opaque span
+(`anIntArray1457` / `anIntArray1455`) instead of the bare rect — so transparent
+parts of a masked sprite are not hovered. Not modelled in the preview yet;
+everything else uses the rect.
+
+**Why it matters for an editor:** a hover hook on a CONTAINER is the normal
+pattern (highlight a whole row, show a tooltip for a group), and it is
+invisible if you reason about hover as "the thing under the cursor". Interface
+9's prayer icon was the case that exposed it — the hook sits on an outer
+component and only fired when the pointer found a bare strip of it not covered
+by a child.
+
+**Editor state:** `hoverTargets` in `gameframe.ts` returns the full set and the
+gameframe preview fires all of their hooks. `hitTestComponent` still picks the
+deepest/smallest and is what click-to-select uses — the two are deliberately
+different and should stay that way.
+
+## CS2 arguments bind by TYPE, not position (traced 2026-08-03)
+
+CS2 keeps **separate int and string stacks**. A caller pushes each argument
+onto the stack for its type; the callee pops its parameters off those stacks.
+So the argument order at a call site has nothing to do with the parameter
+order in the signature, beyond ordering within each type. The client does the
+same when invoking a hook — `CS2Executor.executeHookInner` walks the stored
+params and fills `intLocals` and `objectLocals` from two independent counters
+— and cryogen's decompiler prints call arguments in push order, not declared
+order.
+
+**Type specimen — interface 11:18's tooltip:**
+
+```
+popupScript: [38, -2147483645, 720922, "Empty your backpack into your bank", 25, 150]
+script_38(int0: int, int1: int, int2: int, int3: int, string0: string)
+```
+
+Ints first, string last. Partitioned by type the binding is
+`int0=comp, int1=720922, int2=25, int3=150, string0="Empty…"`. Bound
+positionally the text lands in `int2` and the tooltip renders a leftover
+number. The same applies one level down — `script_38` calls
+`script_569(int0, -1, int1, string0, int2, int3)`, which only type-checks
+after partitioning.
+
+**Gotcha:** this looks correct on the overwhelming majority of scripts, which
+take ints only. It silently corrupts every mixed-type one, and the symptom is
+a plausible-looking wrong value rather than an error.
+
+**Caveat in our implementation:** a bare `script_N` callback reference
+evaluates to the STRING `"script_N"` (that's how `ops.ts` recognises hook
+installers by shape). If a script ever passes one as a normal argument it will
+be partitioned into the string bucket, which is wrong — the client treats it
+as an int. Not observed in practice; the installers that receive them are
+no-ops anyway.
+
+## Per-cycle hover hooks need an actual clock (traced 2026-08-03)
+
+The every-cycle hover hook (decode slot 12, `IF_SETONMOUSEOVER`) expects to be
+called ~50×/second, and scripts lean on that rather than on any engine-side
+timing:
+
+```
+script_4761(delay):                     // the hover DELAY
+    if (varc_1 < client_clock() + delay) { varc_1 = max(varc_1, clock) + 2; return 0 }
+    varc_1 = client_clock() + delay + 10; return 1
+```
+
+`varc_1` creeps forward 2 per call while the threshold moves 1 per cycle, so
+the tooltip appears after ~26 cycles (~0.5s at 20ms). A preview that fires the
+hook once per pointer movement instead needs two dozen deliberate mouse
+jiggles. `client_clock()` stubbed to a constant does NOT break it — the
+countdown just becomes call-driven rather than time-driven — which is exactly
+why the failure reads as "slow" rather than "broken".
+
+`varc_2` is the paired "tooltip is up" flag: `script_5335` skips rebuilding
+while it is 1, and `script_41` (from the exit hook) does
+`cc_deleteall(container); varc_2 = 0`. So the client is NOT rebuilding the
+tooltip every cycle — the guard is in the script, not the engine.
+
+**Editor state:** `GameframePreview` runs a 20ms ticker while a hovered
+component carries the per-cycle hook, bounded to `TICK_BUDGET` cycles per
+hover change.
+
+**`client_clock()` must advance once per HOOK RUN, not once per timer tick.**
+A script like the one above moves its own varc only when it actually runs
+(paint rate) while the threshold it races moves with the clock. Tie the clock
+to the timer and the gap closes at the *difference* between the two rates
+instead of at the script's intended pace — the 0.5s tooltip took 3s, and had
+painting dropped below half the timer rate it would never have appeared at
+all. One run is one cycle.
+
+**Gotcha for anyone re-running scenes:** `cc_create`'s keyed-replace and
+`cc_deleteall` both work off `RuntimeInterface.dynamicByKey`. Rebuilding a
+scene from components alone drops it, so a per-cycle script allocates a fresh
+component every tick (a tooltip duplicating 50×/second) and its own cleanup
+then finds nothing to delete. Carry the state with
+`Cs2InterfaceScene.snapshot()` / `continueFrom()`.
+
+## `parawidth` and `paramheight` are one layout, asked twice (traced 2026-08-03)
+
+`paramheight(text, width, font)` and `parawidth(text, width, font)` both lay
+the paragraph out wrapped at `width` — one returns the line count, the other
+the width of the widest resulting line. Scripts size boxes from the pair:
+
+```
+int12 = 4 + parawidth(string0, int4 - 4, 495);          // tooltip width
+int13 = 4 + 16 * paramheight(string0, int4 - 4, 495);   // tooltip height
+```
+
+**Gotcha:** implementing `parawidth` without wrapping (measuring the raw
+string, splitting only on `<br>`) returns the width the text *would* have on
+one line. Height stays correct, so the symptom is a box the right height with
+the wrapped text in its left portion and dead space to the right — it reads
+as a layout bug, not a measurement bug. Interface 11:18's tooltip ("Empty all
+the items you are wearing into your bank", max width 150) was the reported
+case. Both ops share `wrapPara` in `src/cs2/ops.ts` for exactly this reason.
