@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import type { InterfaceData, IComponentDefinition, ModelType, CS2Script } from '../loaders/interfaces'
-import { MODEL_TYPES } from '../loaders/interfaces'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import type { InterfaceData, IComponentDefinition, ComponentType, ModelType, CS2Script } from '../loaders/interfaces'
+import { COMPONENT_TYPES, MODEL_TYPES, blankComponent } from '../loaders/interfaces'
+import ConfirmDialog from './ConfirmDialog'
+import type { PendingConfirm } from './ConfirmDialog'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getLoader } from '../loaders'
 import type { ModelData } from '../loaders/models'
 import ModelViewer from './ModelViewer'
-import { IntListInput, NumberInput, NumGrid, ToggleGrid } from './defFields'
+import { CellDropdown, IntListInput, NumberInput, NumGrid, ToggleGrid } from './defFields'
 import type { NumFieldDef } from './defFields'
 import { SKILL_NAMES } from '../loaders/varOverrides'
 import { InterfaceAssets, childrenByParent, hitTestComponent, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
@@ -194,10 +197,77 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   const [gamePreview, setGamePreview] = useState(false)
   /** CS2 script open in the read-only viewer (null = closed) */
   const [viewScript, setViewScript] = useState<number | null>(null)
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null)
+  /** tree drag-to-reparent: what's being dragged, and what it's hovering */
+  const [dragId, setDragId] = useState<number | null>(null)
+  const [drop, setDrop] = useState<{ id: number; where: 'before' | 'inside' | 'after' } | null>(null)
+  /** a reorder has changed ids since the last save — see handleSave */
+  const [renumbered, setRenumbered] = useState(false)
+  /** tree context menu. `target` null = right-clicked empty space, which means
+   *  "top level" rather than "no target". */
+  const [menu, setMenu] = useState<{ x: number; y: number; target: number | null } | null>(null)
+
+  // Any click, Escape, or scroll dismisses it — a menu that outlives the thing
+  // it was opened on would act on a stale component.
+  useEffect(() => {
+    if (!menu) return
+    // Test containment rather than relying on stopPropagation inside the menu:
+    // the menu is portalled out of this component's DOM subtree, so a React
+    // handler on it can't be counted on to stop the native event before it
+    // reaches window — and swallowing the mousedown would unmount the menu
+    // before its own button's click could fire.
+    const close = (e: MouseEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return
+      setMenu(null)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(null) }
+    const onScroll = () => setMenu(null)
+    window.addEventListener('mousedown', close)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onScroll, true)
+    }
+  }, [menu])
+
+  // Keep it on screen: right-clicking near the bottom or right edge would
+  // otherwise open a menu partly outside the viewport, and a fixed element
+  // can't be scrolled to. Measured after mount rather than estimated, since
+  // the item labels carry component ids of varying width.
+  const menuRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const el = menuRef.current
+    if (!menu || !el) return
+    const box = el.getBoundingClientRect()
+    const x = Math.max(4, Math.min(menu.x, window.innerWidth - box.width - 4))
+    const y = Math.max(4, Math.min(menu.y, window.innerHeight - box.height - 4))
+    if (x !== menu.x || y !== menu.y) {
+      el.style.left = `${x}px`
+      el.style.top = `${y}px`
+    }
+  }, [menu])
+
+  /** Does the right-clicked component have anything nested under it? Decides
+   *  whether Clone needs to be offered as a choice. */
+  const menuHasChildren = menu?.target != null && subtreeOf(menu.target).length > 1
+
+  const openMenu = (e: React.MouseEvent, target: number | null) => {
+    e.preventDefault()
+    e.stopPropagation()
+    // right-clicking a row selects it, so the inspector follows the menu
+    if (target != null) setSelectedId(target)
+    setMenu({ x: e.clientX, y: e.clientY, target })
+  }
+  const confirm = (opts: Omit<PendingConfirm, 'resolve'>) =>
+    new Promise<boolean>((resolve) => setPendingConfirm({ ...opts, resolve }))
   /** collapsed tree parents (componentIds) */
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
   const [modelPreview, setModelPreview] = useState<{ modelId: number; loading: boolean; data: ModelData | null } | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  /** selection outline only, layered over the base — see the effect below */
+  const overlayRef = useRef<HTMLCanvasElement>(null)
   const assetsRef = useRef<InterfaceAssets | null>(null)
   const [assetsReady, setAssetsReady] = useState(0)
 
@@ -328,32 +398,47 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
       ctx.fillRect(0, 0, viewportW, viewportH)
     }
 
-    function paintSelection(ctx: CanvasRenderingContext2D) {
-      if (selectedId == null) return
-      const rect = layout.get(selectedId)
-      if (!rect) return
-      ctx.strokeStyle = '#2f8fff'
-      ctx.lineWidth = 1.5
-      ctx.setLineDash([5, 3])
-      ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width, rect.height)
-      ctx.setLineDash([])
-    }
-
     ;(async () => {
       const ctx = canvas.getContext('2d')!
       if (!assets) {
         paintBase(ctx)
-        paintSelection(ctx)
         return
       }
       const resolved = await loadPreviewAssets(assets, components, layout, viewportW, viewportH, opts)
       if (cancelled) return
       paintBase(ctx)
       paintInterface(ctx, components, layout, resolved, viewportW, viewportH, opts)
-      paintSelection(ctx)
     })()
     return () => { cancelled = true }
-  }, [components, layout, selectedId, viewportW, viewportH, showHidden, showOutlines, gamePreview, assetsReady])
+    // NOT selectedId — see the overlay effect below.
+  }, [components, layout, viewportW, viewportH, showHidden, showOutlines, gamePreview, assetsReady])
+
+  /**
+   * The selection outline, on its own canvas over the base.
+   *
+   * It used to be the last step of the paint above, which meant clicking a
+   * component re-resolved every sprite and font and redrew all of them to move
+   * a dashed rectangle. On interface 746 — 459 components — that made the tree
+   * unusable. A transparent overlay costs one stroke instead.
+   */
+  useEffect(() => {
+    if (gamePreview) return
+    const canvas = overlayRef.current
+    if (!canvas) return
+    const SCALE = 2
+    // assigning width clears the canvas, so deselecting needs no explicit erase
+    canvas.width = viewportW * SCALE
+    canvas.height = viewportH * SCALE
+    const ctx = canvas.getContext('2d')!
+    ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0)
+    if (selectedId == null) return
+    const rect = layout.get(selectedId)
+    if (!rect) return
+    ctx.strokeStyle = '#2f8fff'
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([5, 3])
+    ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width, rect.height)
+  }, [selectedId, layout, viewportW, viewportH, gamePreview])
 
   function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
     const canvas = canvasRef.current
@@ -376,16 +461,288 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     updateSelected({ [key]: value } as Partial<IComponentDefinition>)
   }
 
+  /**
+   * Add a component as a child of the selected one (or at the top level when
+   * nothing is selected).
+   *
+   * The id is the first FREE index, not `length` — the components array is
+   * indexed BY componentId and may have holes, and reusing a hole keeps ids
+   * dense. Holes matter on save: the loader writes one file per non-null
+   * index and deletes the file for every null one, so an id is the filename.
+   */
+  function addComponent(parentId: number | null) {
+    const id = freeIds(1)[0]
+    const parentHash = parentId == null ? -1 : (data.id << 16) | parentId
+    setComponents((prev) => {
+      const next = [...prev]
+      while (next.length <= id) next.push(null)
+      next[id] = blankComponent(data.id, id, parentHash, 0)
+      return next
+    })
+    setSelectedId(id)
+    setIsDirty(true)
+  }
+
+  /** `count` unused component ids, filling holes before extending. The array
+   *  is indexed BY id and the index is the filename on save, so a hole is a
+   *  genuinely free id rather than something to skip past. */
+  function freeIds(count: number): number[] {
+    const out: number[] = []
+    for (let i = 0; i < components.length && out.length < count; i++) {
+      if (components[i] == null) out.push(i)
+    }
+    for (let i = components.length; out.length < count; i++) out.push(i)
+    return out
+  }
+
+  /**
+   * Duplicate a component, optionally with everything under it.
+   *
+   * With children, hashes are rewired to the copies: a cloned button whose
+   * hook points at its own tooltip container gets a hook pointing at the
+   * CLONE's container, not the original's. References that leave the copied
+   * set are untouched — those still mean what they said, and that is exactly
+   * why cloning WITHOUT children rewrites nothing at all: the copy's hooks go
+   * on addressing the original's children, because those are the only ones
+   * that exist.
+   */
+  function cloneComponent(id: number, withChildren: boolean) {
+    const subtree = withChildren ? subtreeOf(id) : [id] // deepest first
+    const ids = freeIds(subtree.length)
+    const remap = new Map<number, number>()
+    subtree.forEach((old, i) => remap.set(old, ids[i]))
+    const hashOf = (n: number) => (data.id << 16) | n
+    const remapHash = (v: number | string) => {
+      if (typeof v !== 'number' || v < 0 || (v >>> 16) !== data.id) return v
+      const to = remap.get(v & 0xffff)
+      return to === undefined ? v : hashOf(to)
+    }
+
+    setComponents((prev) => {
+      const next = [...prev]
+      for (const old of subtree) {
+        const src = prev[old]
+        if (!src) continue
+        const newId = remap.get(old)!
+        const clone: IComponentDefinition = {
+          ...src,
+          componentId: newId,
+          // the subtree's ROOT keeps its parent — the copy lands beside the
+          // original; everything below it follows its own copied parent
+          parent: old === id ? src.parent : remapHash(src.parent) as number,
+        }
+        for (const [key] of SCRIPT_FIELDS) {
+          const hook = src[key] as CS2Script | null
+          if (hook) (clone[key] as CS2Script) = hook.map(remapHash)
+        }
+        if (src.targetParams && src.targetParams.interfaceId === data.id) {
+          const to = remap.get(src.targetParams.componentId)
+          if (to !== undefined) clone.targetParams = { ...src.targetParams, componentId: to }
+        }
+        while (next.length <= newId) next.push(null)
+        next[newId] = clone
+      }
+      return next
+    })
+    setSelectedId(remap.get(id)!)
+    setIsDirty(true)
+  }
+
+  /**
+   * Move a component under a new parent. −1 makes it top-level.
+   *
+   * Nothing is renumbered: `parent` is a hash the component stores about
+   * ITSELF, so reparenting touches exactly one field on one component. Ids
+   * stay put, which matters because an id is the component's filename and the
+   * low half of every hash that references it — including from other
+   * interfaces, which this viewer can't see. Interface 746 already has 46
+   * components whose id is lower than their parent's, so a hierarchy that
+   * disagrees with id order is normal cache data, not something to tidy up.
+   */
+  function reparent(childId: number, newParentId: number) {
+    if (childId === newParentId) return
+    // a component can't be moved inside its own subtree — the tree walk would
+    // never terminate and the client's layout pass would recurse forever
+    if (subtreeOf(childId).includes(newParentId)) return
+    const parentHash = newParentId === -1 ? -1 : (data.id << 16) | newParentId
+    setComponents((prev) => prev.map((c) => (
+      c && c.componentId === childId ? { ...c, parent: parentHash } : c
+    )))
+    setIsDirty(true)
+  }
+
+  /**
+   * Put `dragId` immediately before or after `targetId`, becoming a sibling of
+   * it.
+   *
+   * Sibling draw order IS componentId order — the client builds its draw list
+   * with a straight `System.arraycopy` of the id-indexed array
+   * (`Interface.getDefinitionsFromComponents`), and the only reordering it
+   * does (bring-to-front, from CS2) mutates that copy at runtime and never
+   * reaches the cache. So expressing a new order means changing ids.
+   *
+   * It changes as few as possible: the new sibling list keeps the exact SET of
+   * ids it already had, and only which component holds which is permuted. No
+   * id outside that group moves, so nothing outside it needs rewriting.
+   */
+  function moveBeside(dragId: number, targetId: number, after: boolean) {
+    const target = byId.get(targetId)
+    const dragged = byId.get(dragId)
+    if (!target || !dragged || dragId === targetId) return
+    const newParentId = target.parent === -1 ? -1 : target.parent & 0xffff
+    if (subtreeOf(dragId).includes(newParentId)) return
+
+    // `list` is array order, so siblings come out ascending by id already
+    const siblings = list.filter((c) => (
+      (c.parent === -1 ? -1 : c.parent & 0xffff) === newParentId && c.componentId !== dragId
+    ))
+    const at = siblings.findIndex((c) => c.componentId === targetId)
+    if (at === -1) return
+    const ordered = [...siblings]
+    ordered.splice(after ? at + 1 : at, 0, dragged)
+
+    // the same ids, ascending, handed out in the new order
+    const slots = ordered.map((c) => c.componentId).sort((a, b) => a - b)
+    const remap = new Map<number, number>()
+    ordered.forEach((c, i) => { if (c.componentId !== slots[i]) remap.set(c.componentId, slots[i]) })
+    if (remap.size === 0) {
+      reparent(dragId, newParentId) // already in place; may still be a move
+      return
+    }
+    applyRenumber(remap, dragId, newParentId)
+  }
+
+  /**
+   * Rewrite ids across the interface: the components themselves, every
+   * `parent` hash, every hook argument that names one, and drag/target
+   * settings.
+   *
+   * Interface-LOCAL only. A component's id is the low half of the hash any
+   * script uses to reach it, and hooks in other interfaces hold those hashes
+   * too — 548 references 746's components today. Nothing here can see those,
+   * which is why saving after a reorder warns.
+   */
+  function applyRenumber(remap: Map<number, number>, movedId: number, movedParentId: number) {
+    const hashOf = (id: number) => (data.id << 16) | id
+    const remapHash = (v: number | string) => {
+      if (typeof v !== 'number' || v < 0) return v
+      if ((v >>> 16) !== data.id) return v // a hash into a different interface
+      const to = remap.get(v & 0xffff)
+      return to === undefined ? v : hashOf(to)
+    }
+
+    setComponents((prev) => {
+      const moved: (IComponentDefinition | null)[] = []
+      for (const c of prev) {
+        if (!c) continue
+        const id = remap.get(c.componentId) ?? c.componentId
+        const parent = c.componentId === movedId
+          ? (movedParentId === -1 ? -1 : hashOf(movedParentId))
+          : (c.parent === -1 ? -1 : remapHash(c.parent) as number)
+        const next: IComponentDefinition = { ...c, componentId: id, parent }
+        for (const [key] of SCRIPT_FIELDS) {
+          const hook = c[key] as CS2Script | null
+          if (hook) (next[key] as CS2Script) = hook.map(remapHash)
+        }
+        if (c.targetParams && c.targetParams.interfaceId === data.id) {
+          const to = remap.get(c.targetParams.componentId)
+          if (to !== undefined) next.targetParams = { ...c.targetParams, componentId: to }
+        }
+        moved.push(next)
+      }
+      // index must equal componentId — that index is the filename on save
+      const out: (IComponentDefinition | null)[] = []
+      for (const c of moved) {
+        if (!c) continue
+        while (out.length <= c.componentId) out.push(null)
+        out[c.componentId] = c
+      }
+      return out
+    })
+    // follow the component the user actually dragged
+    setSelectedId(remap.get(movedId) ?? movedId)
+    setRenumbered(true)
+    setIsDirty(true)
+  }
+
+  /** Would this drop be legal? Rejected up front so an impossible target
+   *  never lights up — a drop into your own subtree, or a no-op onto the
+   *  parent you already have. */
+  function canDropInto(childId: number, parentId: number): boolean {
+    if (childId === parentId) return false
+    const child = byId.get(childId)
+    if (child && (child.parent === -1 ? -1 : child.parent & 0xffff) === parentId) return false
+    return !subtreeOf(childId).includes(parentId)
+  }
+
+  /** A component and everything under it, deepest first. */
+  function subtreeOf(rootId: number): number[] {
+    const out: number[] = []
+    const walk = (id: number, depth: number) => {
+      if (depth > 32) return
+      for (const c of components) {
+        if (c && c.parent !== -1 && (c.parent & 0xffff) === id && c.componentId !== id) walk(c.componentId, depth + 1)
+      }
+      out.push(id)
+    }
+    walk(rootId, 0)
+    return out
+  }
+
+  /**
+   * Remove the selected component AND its descendants. Deleting a container
+   * on its own would leave its children pointing at an id that no longer
+   * resolves — they'd still save, still load, and render as orphans at the
+   * top of the tree, which is a worse outcome than losing them deliberately.
+   */
+  async function removeComponent(id: number) {
+    const doomed = subtreeOf(id)
+    const kids = doomed.length - 1
+    // Always ask. Removal is the one edit here with no undo short of
+    // discarding every other change too.
+    if (!(await confirm({
+      title: 'Remove component',
+      message: kids > 0
+        ? `Remove component ${id} and the ${kids} component${kids === 1 ? '' : 's'} inside it? Everything nested under it goes as well — left behind, they would point at a parent that no longer exists.`
+        : `Remove component ${id}?`,
+      confirmLabel: kids > 0 ? `Remove all ${doomed.length}` : 'Remove',
+      danger: true,
+    }))) return
+    setComponents((prev) => {
+      const next = [...prev]
+      for (const id of doomed) if (id < next.length) next[id] = null
+      // trailing holes would keep the array long for no reason; the loader
+      // deletes their files either way, this just keeps ids tidy
+      while (next.length > 0 && next[next.length - 1] == null) next.pop()
+      return next
+    })
+    setSelectedId(null)
+    setIsDirty(true)
+  }
+
   async function handleSave() {
+    // A reorder changed component IDS, and an id is the low half of every hash
+    // that reaches the component. References inside this interface were
+    // rewritten; references from ANYWHERE ELSE cannot be — not other
+    // interfaces' hooks, not hardcoded hashes in CS2 scripts, not server code.
+    // Worth a stop, because nothing about it fails loudly.
+    if (renumbered && !(await confirm({
+      title: 'Component ids changed',
+      message: `Reordering changed component ids in interface ${data.id}. Hashes inside this interface were updated, but anything OUTSIDE it that names those components — hooks on other interfaces, ids baked into CS2 scripts, server code — still points at the old numbers and will now reach the wrong component. Check before saving.`,
+      confirmLabel: 'Save anyway',
+      danger: true,
+    }))) return
     setIsSaving(true)
     await onSave({ ...data, components })
     setIsSaving(false)
     setIsDirty(false)
+    setRenumbered(false)
   }
 
   function handleDiscard() {
     setComponents(data.components)
     setIsDirty(false)
+    setRenumbered(false)
   }
 
   async function openModelPreview(modelId: number) {
@@ -403,6 +760,7 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   }
 
   const attachedScripts = selected ? SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) != null) : []
+  const unattachedScripts = selected ? SCRIPT_FIELDS.filter(([key]) => (selected[key] as CS2Script | null) == null) : []
   // The transmit filters only mean anything next to a transmit hook — showing
   // two empty id lists on the thousands of components that have neither is
   // noise. A stale list with no hook still shows, so it can be cleared.
@@ -457,14 +815,55 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
       </div>
 
       <div className="iface-body">
-        <div className="iface-tree">
+        <div className="iface-tree" onContextMenu={(e) => openMenu(e, null)}>
           {treeRows.map(({ c, depth, hasChildren }) => (
             <div
               key={c.componentId}
               ref={c.componentId === selectedId ? selectedRowRef : undefined}
-              className={`iface-tree-row${c.componentId === selectedId ? ' selected' : ''}${c.hidden ? ' hidden-row' : ''}`}
+              className={[
+                'iface-tree-row',
+                c.componentId === selectedId ? 'selected' : '',
+                c.hidden ? 'hidden-row' : '',
+                dragId === c.componentId ? 'dragging' : '',
+                drop?.id === c.componentId ? `drop-${drop.where}` : '',
+              ].filter(Boolean).join(' ')}
               style={{ paddingLeft: `${8 + depth * 12}px` }}
               onClick={() => setSelectedId(c.componentId)}
+              onContextMenu={(e) => openMenu(e, c.componentId)}
+              draggable
+              onDragStart={(e) => {
+                setDragId(c.componentId)
+                e.dataTransfer.effectAllowed = 'move'
+                // Firefox ignores a drag with no payload
+                e.dataTransfer.setData('text/plain', String(c.componentId))
+              }}
+              onDragEnd={() => { setDragId(null); setDrop(null) }}
+              onDragOver={(e) => {
+                if (dragId == null) return
+                // Three zones: the edges mean "beside this one" (a reorder,
+                // which renumbers), the middle means "inside it" (just a
+                // reparent). The middle is the larger target because it's the
+                // cheaper operation.
+                const box = e.currentTarget.getBoundingClientRect()
+                const frac = (e.clientY - box.top) / box.height
+                const where = frac < 0.25 ? 'before' : frac > 0.75 ? 'after' : 'inside'
+                if (where === 'inside' && !canDropInto(dragId, c.componentId)) return
+                if (where !== 'inside' && c.componentId === dragId) return
+                e.preventDefault() // "yes, this is a drop target"
+                e.dataTransfer.dropEffect = 'move'
+                setDrop({ id: c.componentId, where })
+              }}
+              onDragLeave={() => setDrop((d) => (d?.id === c.componentId ? null : d))}
+              onDrop={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                if (dragId != null && drop?.id === c.componentId) {
+                  if (drop.where === 'inside') reparent(dragId, c.componentId)
+                  else moveBeside(dragId, c.componentId, drop.where === 'after')
+                }
+                setDragId(null)
+                setDrop(null)
+              }}
             >
               {hasChildren ? (
                 <button
@@ -482,6 +881,29 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
               {c.name && <span className="iface-tree-name">{c.name}</span>}
             </div>
           ))}
+          {/* Drop here to move a component OUT of its parent — there is no
+              row representing "top level" to aim at otherwise. Fills the
+              leftover space so it's an easy target on a short tree. */}
+          <div
+            className={`iface-tree-root-drop${drop?.id === -1 ? ' drop-inside' : ''}`}
+            onDragOver={(e) => {
+              if (dragId == null || !canDropInto(dragId, -1)) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+              setDrop({ id: -1, where: 'inside' })
+            }}
+            onDragLeave={() => setDrop((d) => (d?.id === -1 ? null : d))}
+            onDrop={(e) => {
+              e.preventDefault()
+              if (dragId != null) reparent(dragId, -1)
+              setDragId(null)
+              setDrop(null)
+            }}
+          >
+            {/* doubles as the only signpost for the context menu, now that
+                add/remove live there rather than on a toolbar */}
+            {dragId != null ? 'drop here for top level' : 'right-click for add · clone · remove'}
+          </div>
         </div>
 
         <div className="iface-main">
@@ -502,6 +924,12 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                 onClick={handleCanvasClick}
                 style={zoom == null ? undefined : { width: `${viewportW * zoom}px`, maxWidth: 'none', maxHeight: 'none' }}
               />
+              {/* selection only — pointer-events off so clicks reach the base */}
+              <canvas
+                ref={overlayRef}
+                className="iface-canvas iface-canvas-overlay"
+                style={zoom == null ? undefined : { width: `${viewportW * zoom}px`, maxWidth: 'none', maxHeight: 'none' }}
+              />
             </div>
           )}
         </div>
@@ -513,7 +941,18 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
           {selected && (
             <>
               <div className="iface-fields-title">
-                Component {selected.componentId} — {selected.type}
+                Component {selected.componentId}
+                {/* The type decides which field groups below even apply, so it
+                    has to be changeable — a component added as a container
+                    could otherwise never become a sprite. `typeId` is written
+                    alongside because the JSON carries both and they must not
+                    disagree. */}
+                <CellDropdown<ComponentType>
+                  value={selected.type}
+                  options={COMPONENT_TYPES.map((t) => ({ value: t, label: t }))}
+                  title="What this component IS. Changing it changes which fields apply."
+                  onChange={(type) => updateSelected({ type, typeId: COMPONENT_TYPES.indexOf(type) })}
+                />
                 {selected.parent !== -1 && (
                   <button type="button" className="iface-parent-link" onClick={() => setSelectedId(selected.parent & 0xffff)}>
                     parent {selected.parent & 0xffff}
@@ -724,16 +1163,30 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                           same place regardless of label length */}
                       <span className="item-field-label field-link-label">
                         <span title={hint}>{label}{hint && <span className="iface-label-note">?</span>}</span>
-                        {id != null && id >= 0 && (
+                        <span className="iface-hook-actions">
+                          {id != null && id >= 0 && (
+                            <button
+                              type="button"
+                              className="field-link-btn"
+                              title={`Read script ${id} without leaving this component`}
+                              onClick={(e) => { e.preventDefault(); setViewScript(id) }}
+                            >
+                              View
+                            </button>
+                          )}
+                          {/* Detaches the hook entirely — null, not an empty
+                              array. A zero-length hook still writes the field
+                              to the JSON, and the client treats "present but
+                              empty" differently from absent. */}
                           <button
                             type="button"
-                            className="field-link-btn"
-                            title={`Read script ${id} without leaving this component`}
-                            onClick={(e) => { e.preventDefault(); setViewScript(id) }}
+                            className="row-remove-btn"
+                            title={`Detach ${label} from this component`}
+                            onClick={(e) => { e.preventDefault(); set(key, null) }}
                           >
-                            View
+                            ×
                           </button>
-                        )}
+                        </span>
                       </span>
                       <ScriptInput
                         script={hook}
@@ -742,11 +1195,102 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
                     </label>
                   )
                 })}
+                {unattachedScripts.length > 0 && (
+                  <div className="var-add-row">
+                    <select
+                      className="item-stackable-select"
+                      value=""
+                      onChange={(e) => {
+                        // -1 is "no script yet": the field now exists so it can
+                        // be edited, but the preview skips negative ids rather
+                        // than reporting a missing script on every run
+                        set(e.target.value as keyof IComponentDefinition, [-1])
+                        e.currentTarget.value = ''
+                      }}
+                    >
+                      <option value="" disabled>+ Attach a hook…</option>
+                      {unattachedScripts.map(([key, label, hint]) => (
+                        <option key={key} value={key} title={hint}>{label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </Group>
             </>
           )}
         </div>
       </div>
+
+      {menu && createPortal(
+        // Portalled to <body> deliberately. `position: fixed` resolves against
+        // the viewport only if NO ancestor creates a containing block for it —
+        // a transform, filter, backdrop-filter, will-change or contain
+        // anywhere up the tree silently re-anchors it, which is what put this
+        // menu far to the right of the cursor. Out at the body there is no
+        // ancestor left to do that, and it also escapes any overflow clipping
+        // and z-index stacking on the way up.
+        <div
+          ref={menuRef}
+          className="iface-ctx-menu cell-dropdown-menu"
+          style={{ top: menu.y, left: menu.x }}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation() }}
+        >
+          <button
+            type="button"
+            className="cell-dropdown-item"
+            onClick={() => { addComponent(menu.target); setMenu(null) }}
+          >
+            Add component
+          </button>
+          {menu.target != null && (
+            <>
+              {/* Only a component with children needs the choice — offering
+                  both on a leaf would be two items that do the same thing. */}
+              {menuHasChildren ? (
+                <>
+                  <button
+                    type="button"
+                    className="cell-dropdown-item"
+                    onClick={() => { cloneComponent(menu.target!, true); setMenu(null) }}
+                  >
+                    Clone (with children)
+                  </button>
+                  <button
+                    type="button"
+                    className="cell-dropdown-item"
+                    onClick={() => { cloneComponent(menu.target!, false); setMenu(null) }}
+                  >
+                    Clone (without children)
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="cell-dropdown-item"
+                  onClick={() => { cloneComponent(menu.target!, false); setMenu(null) }}
+                >
+                  Clone
+                </button>
+              )}
+              <button
+                type="button"
+                className="cell-dropdown-item danger"
+                onClick={() => { const t = menu.target!; setMenu(null); void removeComponent(t) }}
+              >
+                Remove
+              </button>
+            </>
+          )}
+        </div>,
+        document.body,
+      )}
+
+      {pendingConfirm && (
+        <ConfirmDialog
+          pending={pendingConfirm}
+          onClose={(result) => { pendingConfirm.resolve(result); setPendingConfirm(null) }}
+        />
+      )}
 
       {viewScript != null && (
         <Cs2ScriptModal
@@ -759,7 +1303,17 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
 
       {isDirty && (
         <div className="save-bar">
-          <span className="save-bar-label">Unsaved changes</span>
+          <span className="save-bar-label">
+            Unsaved changes
+            {renumbered && (
+              <span
+                className="save-bar-warn"
+                title="Reordering siblings changes component ids, because id order IS draw order in the cache. References inside this interface were rewritten; anything outside it still points at the old ids."
+              >
+                component ids changed
+              </span>
+            )}
+          </span>
           <button type="button" className="save-bar-discard" onClick={handleDiscard} disabled={isSaving}>Discard</button>
           <button type="button" className="save-bar-save" onClick={handleSave} disabled={isSaving}>
             {isSaving ? 'Saving…' : 'Save'}

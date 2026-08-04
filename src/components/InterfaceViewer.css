@@ -66,9 +66,12 @@
   padding-top: 10px;
 }
 
+/* column so the root drop zone can take the leftover height */
 .iface-tree {
   width: 220px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -77,6 +80,8 @@
 
 .iface-tree-row {
   display: flex;
+  /* the tree is a flex column now — rows must keep their height */
+  flex: none;
   align-items: center;
   gap: 6px;
   padding: 3px 8px 3px 0;
@@ -126,7 +131,10 @@
 
 /* Default (Fit): the whole interface is visible, canvas scaled down by CSS.
    Explicit zoom sets the canvas width inline and this wrap scrolls instead. */
+/* `relative` anchors the selection overlay; the wrap scrolls, so the overlay
+   has to be positioned against the same box the base canvas sits in. */
 .iface-canvas-wrap {
+  position: relative;
   flex: none;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -299,6 +307,19 @@
 .iface-fields-title {
   font-weight: 600;
   margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Sits exactly over the base canvas, transparent, and never eats a click —
+   the base keeps the click-to-select handler. */
+.iface-canvas-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
 }
 
 .iface-parent-note {
@@ -340,6 +361,115 @@
 .iface-filter-row .item-field {
   flex: 1 1 140px;
   min-width: 0;
+}
+
+/* The type picker sits inline in the component header, so it sizes to its
+   label rather than stretching the way a table cell's dropdown does. */
+.iface-fields-title .cell-dropdown-trigger {
+  width: auto;
+  gap: 4px;
+  font-weight: 600;
+  border-color: var(--border);
+}
+
+/* Renumbering is the one edit here with consequences the app can't verify, so
+   the save bar says so rather than only warning at the moment of saving. */
+.save-bar-warn {
+  margin-left: 10px;
+  padding: 1px 8px;
+  border: 1px solid #4a3f2a;
+  border-radius: 5px;
+  color: #d9b45c;
+  font-size: 11px;
+  font-weight: 400;
+  cursor: help;
+}
+
+/* Drag-to-reparent. The dragged row fades; the row it would drop INTO gets a
+   ring, since "inside this one" is the whole gesture and needs to be
+   unmistakable from a neighbouring row. */
+.iface-tree-row.dragging {
+  opacity: 0.4;
+}
+
+/* A filled ring means "inside this one" — a pure reparent. */
+.iface-tree-row.drop-inside {
+  outline: 1px solid var(--electric-blue-bright, #2f8fff);
+  outline-offset: -1px;
+  background: rgba(0, 102, 255, 0.16);
+}
+
+/* An edge line means "beside this one" — a reorder, which renumbers. Amber,
+   not blue, because it is the more consequential of the two drops. */
+.iface-tree-row.drop-before,
+.iface-tree-row.drop-after {
+  position: relative;
+}
+
+.iface-tree-row.drop-before::after,
+.iface-tree-row.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #d9b45c;
+}
+
+.iface-tree-row.drop-before::after { top: -1px; }
+.iface-tree-row.drop-after::after { bottom: -1px; }
+
+/* Takes the tree's leftover height so "out of any parent" is an easy target,
+   and stays invisible until something is actually being dragged. */
+.iface-tree-root-drop {
+  min-height: 42px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  font-style: italic;
+  border-radius: 4px;
+  margin: 4px;
+}
+
+.iface-tree-root-drop.drop-inside {
+  outline: 1px dashed var(--electric-blue-bright, #2f8fff);
+  background: rgba(0, 102, 255, 0.1);
+}
+
+/* Tree context menu. Borrows the dropdown menu's look (.cell-dropdown-menu /
+   -item) so it matches every other popup; only the positioning is its own —
+   `fixed` to the pointer, above the inspector and the canvas.
+
+   Both class names are in the selector deliberately. `.cell-dropdown-menu`
+   also sets `position` (absolute, anchored under its trigger) at the same
+   specificity, so a single-class rule here was decided by stylesheet order —
+   and losing meant the menu positioned against the nearest positioned
+   ancestor instead of the viewport, landing far to the right of the cursor.
+   `top`/`left` come from inline styles, which beat both. */
+.iface-ctx-menu.cell-dropdown-menu {
+  position: fixed;
+  z-index: 400;
+}
+
+.cell-dropdown-item.danger {
+  color: rgba(255, 160, 160, 0.85);
+}
+
+.cell-dropdown-item.danger:hover {
+  color: #ffd9d9;
+  background: rgba(255, 90, 90, 0.12);
+}
+
+/* View / detach sit together at the label's right edge, so a hook row's
+   actions are in the same place whatever the label's length. */
+.iface-hook-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
 }
 
 /* Marks a hook field whose label follows its installer OPCODE rather than the
