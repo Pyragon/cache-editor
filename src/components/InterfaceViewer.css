@@ -372,6 +372,36 @@
   border-color: var(--border);
 }
 
+/* Snap toggle. Governs dragging on BOTH previews, so it lives in the viewer's
+   own header rather than either canvas's toolbar. */
+.iface-snap-pill {
+  background: var(--bg-elevated, #1c1f27);
+  color: var(--text-dim, #aab3c5);
+  border: 1px solid #3d4457;
+  border-radius: 999px;
+  padding: 2px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.iface-snap-pill:hover {
+  color: var(--text, #dfe6f2);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.iface-snap-pill.selected {
+  background: rgba(0, 102, 255, 0.18);
+  color: #fff;
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+/* the canvas is a drag surface now — the browser's own image drag would
+   fight the pointer handlers */
+.iface-canvas {
+  touch-action: none;
+  user-select: none;
+}
+
 /* Renumbering is the one edit here with consequences the app can't verify, so
    the save bar says so rather than only warning at the moment of saving. */
 .save-bar-warn {

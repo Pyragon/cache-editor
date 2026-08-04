@@ -8,6 +8,8 @@ import {
   runGameframeCs2,
 } from './gameframe'
 import { hitTestComponent, resolveAbsoluteLayout } from './interfacePreview'
+import { dragToBasePosition, parentBoxOf } from './ifaceDrag'
+import type { SnapGuide } from './ifaceDrag'
 import type {
   Cs2VarRoute, GameframeMode, GameframePointer, GameframeRegion, GameframeRun, GameframeScene,
   HoverTarget,
@@ -35,7 +37,7 @@ import './GameframePreview.css'
  *  ~3s — the tooltip delay it exists for is around 24. */
 const TICK_BUDGET = 150
 
-export default function GameframePreview({ data, assets, opts, selectedId, onSelect, onEditScript }: {
+export default function GameframePreview({ data, assets, opts, selectedId, onSelect, onEditScript, snap, onMoveComponent }: {
   data: InterfaceData
   assets: InterfaceAssets | null
   opts: PreviewOptions
@@ -45,6 +47,10 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   onSelect?: (componentId: number) => void
   /** leave for the cs2 entry to edit a script the console links to */
   onEditScript?: (scriptId: number) => void
+  /** snap dragging to parent/sibling edges — one toggle governs both previews */
+  snap?: boolean
+  /** a drag wrote new aspect-mode-correct base coordinates */
+  onMoveComponent?: (componentId: number, basePositionX: number, basePositionY: number) => void
 }) {
   const [pickedMode, setPickedMode] = useState<GameframeMode>('fixed')
   // Editing a window pane pins the preview to that pane's mode: 548 IS the
@@ -85,6 +91,10 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   /** what a click on the canvas does — pick a component to edit, or act as a
    *  real click and fire its onClick/onRelease hooks */
   const [clickMode, setClickMode] = useState<'select' | 'script'>('select')
+  const dragCompRef = useRef<{ id: number; grabX: number; grabY: number; moved: boolean; downX: number; downY: number } | null>(null)
+  const [guides, setGuides] = useState<SnapGuide[]>([])
+  /** a drag just ended — swallow the click that follows it */
+  const suppressClickRef = useRef(false)
   const [hoverLabel, setHoverLabel] = useState<string | null>(null)
   /** The frame's CS2 state, kept across pointer movement. Rebuilt only when
    *  its key changes — everything a pointer move does NOT affect. */
@@ -262,6 +272,22 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     // preparePixelCanvas assigns canvas.width, which clears it — so a
     // deselection needs no explicit erase
     const ctx = preparePixelCanvas(canvas, width, height)
+    // snap guides under the outline, so the selection still reads on top
+    if (guides.length > 0) {
+      ctx.strokeStyle = '#d9b45c'
+      ctx.lineWidth = 1
+      for (const g of guides) {
+        // a guide on a far edge sits on the canvas boundary and a 1px line
+        // centred there is half outside, drawing nothing — pull it inside
+        const at = g.axis === 'x'
+          ? Math.min(Math.max(g.at + 0.5, 0.5), width - 0.5)
+          : Math.min(Math.max(g.at + 0.5, 0.5), height - 0.5)
+        ctx.beginPath()
+        if (g.axis === 'x') { ctx.moveTo(at, 0); ctx.lineTo(at, height) }
+        else { ctx.moveTo(0, at); ctx.lineTo(width, at) }
+        ctx.stroke()
+      }
+    }
     if (selectedId == null) return
     const place = hitRef.current?.place
     const comps = hitRef.current?.comps
@@ -277,7 +303,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   // repaint on size/asset/option changes (scene changes repaint via the loader).
   // NOT selectedId — that only moves the overlay.
   useEffect(() => { repaint() }, [size, mode, assets, cs2Enabled, opts.showHidden, opts.showContainerOutlines]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { drawSelection() }, [selectedId]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { drawSelection() }, [selectedId, guides]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const onHandleDown = (e: React.PointerEvent) => {
     if (mode === 'fixed') return
@@ -385,7 +411,76 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     return region?.comps[hash & 0xffff] ?? null
   }
 
+  /**
+   * Drag a component of the EDITED interface to move it. Only in "click
+   * selects / drags" mode — in onClick mode a drag would be indistinguishable
+   * from a click, and firing hooks mid-drag would be nonsense.
+   *
+   * Restricted to the edited interface for the same reason selection is: the
+   * other interfaces in the frame are on-disk copies this viewer isn't editing
+   * and can't save.
+   */
+  const onCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (clickMode !== 'select' || !onMoveComponent) return
+    const hit = hitRef.current
+    if (!hit) return
+    const p = canvasPoint(e)
+    const px = p.x - hit.place.x
+    const py = p.y - hit.place.y
+    if (px < 0 || py < 0 || px > hit.place.w || py > hit.place.h) return
+    const layout = resolveAbsoluteLayout(hit.comps, hit.place.w, hit.place.h)
+    // The SELECTED component drags, even when the press lands on a child drawn
+    // over it — otherwise a container is unmovable, since the pointer is
+    // almost always over one of the sprites inside it.
+    const selRect = selectedId != null ? layout.get(selectedId) : null
+    const inSelection = selRect != null
+      && px >= selRect.x && px <= selRect.x + selRect.width
+      && py >= selRect.y && py <= selRect.y + selRect.height
+    const id = inSelection ? selectedId! : hitTestComponent(hit.comps, layout, px, py, opts.showHidden === true)
+    if (id == null) return
+    const rect = layout.get(id)
+    if (!rect) return
+    if (!inSelection) onSelect?.(id)
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragCompRef.current = { id, grabX: px - rect.x, grabY: py - rect.y, moved: false, downX: px, downY: py }
+  }
+
+  const onCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragCompRef.current
+    const hit = hitRef.current
+    if (!drag || !hit || !onMoveComponent) return
+    const comp = hit.comps.find((c) => c?.componentId === drag.id)
+    const layout = resolveAbsoluteLayout(hit.comps, hit.place.w, hit.place.h)
+    const rect = layout.get(drag.id)
+    if (!comp || !rect) return
+    const p = canvasPoint(e)
+    // work in the edited interface's own coordinates, not the frame's
+    const local = { x: p.x - hit.place.x, y: p.y - hit.place.y }
+    // slop, so a click that twitches isn't treated as a move
+    if (!drag.moved && Math.abs(local.x - drag.downX) < 2 && Math.abs(local.y - drag.downY) < 2) return
+    drag.moved = true
+    const parent = parentBoxOf(comp, hit.comps, layout, hit.place.w, hit.place.h)
+    const out = dragToBasePosition(
+      comp, rect, parent, hit.comps, layout, local, { x: drag.grabX, y: drag.grabY }, snap === true,
+    )
+    setGuides(out.guides.map((g) => ({
+      axis: g.axis,
+      at: g.at + (g.axis === 'x' ? hit.place.x : hit.place.y),
+    })))
+    onMoveComponent(drag.id, out.basePositionX, out.basePositionY)
+  }
+
+  const onCanvasPointerUp = () => {
+    // A drag is followed by a click event. Without this the click would
+    // hit-test where the pointer ended up and select the child you just
+    // dragged the container out from under.
+    suppressClickRef.current = dragCompRef.current?.moved === true
+    dragCompRef.current = null
+    setGuides([])
+  }
+
   const onCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (suppressClickRef.current) { suppressClickRef.current = false; return }
     if (clickMode === 'script') {
       // Same set semantics as hover: the client fires the click hooks of
       // every component whose bounds contain the point, not just the topmost.
@@ -455,13 +550,13 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
           ))}
         </div>
         )}
-        <div className="gfp-slot-pills" title="What clicking the frame does. Selecting is for editing; firing onClick makes the preview behave like the client, running the clicked component's onClick and onRelease hooks — watch the console.">
+        <div className="gfp-slot-pills" title="What clicking the frame does. Selecting is for editing — and lets you drag the edited interface's components to move them. Firing onClick makes the preview behave like the client, running the clicked component's onClick and onRelease hooks; dragging is off in that mode so a drag can't be mistaken for a click.">
           <button
             type="button"
             className={clickMode === 'select' ? 'selected' : ''}
             onClick={() => setClickMode('select')}
           >
-            Click selects
+            Click selects / drags
           </button>
           <button
             type="button"
@@ -501,6 +596,10 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
             className="gfp-canvas"
             style={{ width: viewport.width, height: viewport.height }}
             onClick={onCanvasClick}
+            onPointerDown={onCanvasPointerDown}
+            onPointerMove={onCanvasPointerMove}
+            onPointerUp={onCanvasPointerUp}
+            onPointerCancel={onCanvasPointerUp}
             onMouseMove={onCanvasMove}
             onMouseLeave={onCanvasLeave}
           />

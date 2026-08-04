@@ -12,6 +12,8 @@ import { CellDropdown, IntListInput, NumberInput, NumGrid, ToggleGrid } from './
 import type { NumFieldDef } from './defFields'
 import { SKILL_NAMES } from '../loaders/varOverrides'
 import { InterfaceAssets, childrenByParent, hitTestComponent, loadPreviewAssets, paintInterface, resolveAbsoluteLayout } from './interfacePreview'
+import { dragToBasePosition, parentBoxOf } from './ifaceDrag'
+import type { SnapGuide } from './ifaceDrag'
 import GameframePreview from './GameframePreview'
 import Cs2ScriptModal from './Cs2ScriptModal'
 import './InterfaceViewer.css'
@@ -266,8 +268,11 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
   const [modelPreview, setModelPreview] = useState<{ modelId: number; loading: boolean; data: ModelData | null } | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  /** selection outline only, layered over the base — see the effect below */
+  /** selection outline + snap guides, layered over the base */
   const overlayRef = useRef<HTMLCanvasElement>(null)
+  const dragCompRef = useRef<{ id: number; grabX: number; grabY: number; moved: boolean; downX: number; downY: number } | null>(null)
+  const [guides, setGuides] = useState<SnapGuide[]>([])
+  const [snapEnabled, setSnapEnabled] = useState(true)
   const assetsRef = useRef<InterfaceAssets | null>(null)
   const [assetsReady, setAssetsReady] = useState(0)
 
@@ -431,6 +436,24 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     canvas.height = viewportH * SCALE
     const ctx = canvas.getContext('2d')!
     ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0)
+    // snap guides first, so the selection outline reads on top of them
+    if (guides.length > 0) {
+      ctx.strokeStyle = '#d9b45c'
+      ctx.lineWidth = 1
+      for (const g of guides) {
+        // A guide on the parent's FAR edge sits exactly on the canvas
+        // boundary, and a 1px line centred there is half outside — it drew
+        // nothing at all, so bottom and right snaps looked like they weren't
+        // snapping. Pull the line inside by half its width.
+        const at = g.axis === 'x'
+          ? Math.min(Math.max(g.at + 0.5, 0.5), viewportW - 0.5)
+          : Math.min(Math.max(g.at + 0.5, 0.5), viewportH - 0.5)
+        ctx.beginPath()
+        if (g.axis === 'x') { ctx.moveTo(at, 0); ctx.lineTo(at, viewportH) }
+        else { ctx.moveTo(0, at); ctx.lineTo(viewportW, at) }
+        ctx.stroke()
+      }
+    }
     if (selectedId == null) return
     const rect = layout.get(selectedId)
     if (!rect) return
@@ -438,17 +461,80 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
     ctx.lineWidth = 1.5
     ctx.setLineDash([5, 3])
     ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width, rect.height)
-  }, [selectedId, layout, viewportW, viewportH, gamePreview])
+  }, [selectedId, layout, viewportW, viewportH, gamePreview, guides])
 
-  function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const rectBounds = canvas.getBoundingClientRect()
-    const px = ((e.clientX - rectBounds.left) / rectBounds.width) * viewportW
-    const py = ((e.clientY - rectBounds.top) / rectBounds.height) * viewportH
+  /** Canvas pixel under the event, in interface units — the canvas is CSS-fitted
+   *  (or zoomed), so its displayed size is not its logical size. */
+  function canvasPoint(e: React.PointerEvent<HTMLCanvasElement> | React.MouseEvent<HTMLCanvasElement>) {
+    const bounds = e.currentTarget.getBoundingClientRect()
+    return {
+      x: ((e.clientX - bounds.left) / bounds.width) * viewportW,
+      y: ((e.clientY - bounds.top) / bounds.height) * viewportH,
+    }
+  }
 
-    const id = hitTestComponent(list, layout, px, py, showHidden)
-    if (id != null) setSelectedId(id)
+  /**
+   * The SELECTED component is what drags, even when the press lands on a child
+   * drawn on top of it.
+   *
+   * Hit-testing the press instead made a container or a backing figure
+   * effectively immovable: the pointer is almost always over one of the
+   * sprites inside it, so the drag grabbed the sprite. Selecting in the tree
+   * and then dragging anywhere inside the selection is the way to move the
+   * thing you actually mean.
+   *
+   * A press that DOESN'T move still selects whatever is under the cursor on
+   * release, so clicking through to a child is unaffected.
+   */
+  function handleCanvasPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    const p = canvasPoint(e)
+    const selRect = selectedId != null ? layout.get(selectedId) : null
+    const inSelection = selRect != null
+      && p.x >= selRect.x && p.x <= selRect.x + selRect.width
+      && p.y >= selRect.y && p.y <= selRect.y + selRect.height
+    const id = inSelection ? selectedId! : hitTestComponent(list, layout, p.x, p.y, showHidden)
+    if (id == null) return
+    if (!inSelection) setSelectedId(id)
+    const rect = layout.get(id)
+    if (!rect) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragCompRef.current = { id, grabX: p.x - rect.x, grabY: p.y - rect.y, moved: false, downX: p.x, downY: p.y }
+  }
+
+  function handleCanvasPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+    const drag = dragCompRef.current
+    if (!drag) return
+    const comp = byId.get(drag.id)
+    const rect = layout.get(drag.id)
+    if (!comp || !rect) return
+    const p = canvasPoint(e)
+    // a couple of pixels of slop, so a click that twitches isn't a move
+    if (!drag.moved && Math.abs(p.x - drag.downX) < 2 && Math.abs(p.y - drag.downY) < 2) return
+    const parent = parentBoxOf(comp, list, layout, viewportW, viewportH)
+    const out = dragToBasePosition(
+      comp, rect, parent, list, layout, p, { x: drag.grabX, y: drag.grabY }, snapEnabled,
+    )
+    drag.moved = true
+    setGuides(out.guides)
+    setComponents((prev) => prev.map((c) => (
+      c && c.componentId === drag.id
+        ? { ...c, basePositionX: out.basePositionX, basePositionY: out.basePositionY }
+        : c
+    )))
+    setIsDirty(true)
+  }
+
+  function handleCanvasPointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+    const drag = dragCompRef.current
+    dragCompRef.current = null
+    setGuides([])
+    // a click, not a drag: select what's actually under the cursor, so a
+    // container being selected doesn't block clicking through to its children
+    if (drag && !drag.moved) {
+      const p = canvasPoint(e)
+      const id = hitTestComponent(list, layout, p.x, p.y, showHidden)
+      if (id != null) setSelectedId(id)
+    }
   }
 
   function updateSelected(patch: Partial<IComponentDefinition>) {
@@ -812,6 +898,18 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
           <input type="checkbox" checked={showOutlines} onChange={(e) => setShowOutlines(e.target.checked)} />
           Container outlines
         </label>
+        {/* One control for both previews — the flat canvas and the gameframe
+            drag through the same code, so two toggles would only disagree. */}
+        <button
+          type="button"
+          className={`iface-snap-pill${snapEnabled ? ' selected' : ''}`}
+          title={snapEnabled
+            ? 'Dragging snaps to the parent’s edges and centre and to sibling edges. Click to drag freely.'
+            : 'Dragging is free. Click to snap to parent and sibling edges.'}
+          onClick={() => setSnapEnabled((v) => !v)}
+        >
+          Snap {snapEnabled ? 'on' : 'off'}
+        </button>
       </div>
 
       <div className="iface-body">
@@ -915,13 +1013,23 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
               selectedId={selectedId}
               onSelect={setSelectedId}
               onEditScript={onNavigate ? (id) => onNavigate('cs2', id) : undefined}
+              snap={snapEnabled}
+              onMoveComponent={(id, basePositionX, basePositionY) => {
+                setComponents((prev) => prev.map((c) => (
+                  c && c.componentId === id ? { ...c, basePositionX, basePositionY } : c
+                )))
+                setIsDirty(true)
+              }}
             />
           ) : (
             <div className="iface-canvas-wrap">
               <canvas
                 ref={canvasRef}
                 className="iface-canvas"
-                onClick={handleCanvasClick}
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handleCanvasPointerMove}
+                onPointerUp={handleCanvasPointerUp}
+                onPointerCancel={handleCanvasPointerUp}
                 style={zoom == null ? undefined : { width: `${viewportW * zoom}px`, maxWidth: 'none', maxHeight: 'none' }}
               />
               {/* selection only — pointer-events off so clicks reach the base */}

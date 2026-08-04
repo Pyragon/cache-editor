@@ -57,6 +57,33 @@ function resolvePosition(c: IComponentDefinition, parentW: number, parentH: numb
   return { x, y }
 }
 
+/**
+ * The inverse of `resolvePosition` for one axis: given where the component
+ * should sit inside its parent, what `basePositionX/Y` produces it?
+ *
+ * Dragging has to write back through the aspect mode, not around it. The modes
+ * mean genuinely different things — 0 is a plain offset from the top/left, 2
+ * measures from the RIGHT/BOTTOM edge (so dragging right DECREASES the stored
+ * number), and 3–5 are sixteenths-of-a-parent fractions in 1/16384 units, not
+ * pixels. Writing a pixel delta straight into basePosition would silently
+ * corrupt every component that isn't mode 0, and it would look correct until
+ * the parent resized.
+ *
+ * `extent` is the component's resolved width/height, `parentExtent` the
+ * parent's basis on the same axis.
+ */
+export function positionFromLocal(mode: number, local: number, extent: number, parentExtent: number): number {
+  const frac = (v: number) => (parentExtent === 0 ? 0 : Math.round((v * 16384) / parentExtent))
+  switch (mode) {
+    case 0: return Math.round(local)
+    case 1: return Math.round(local - ((parentExtent - extent) >> 1))
+    case 2: return Math.round(parentExtent - extent - local)
+    case 3: return frac(local)
+    case 4: return frac(local - ((parentExtent - extent) >> 1))
+    default: return frac(parentExtent - extent - local)
+  }
+}
+
 /** Children of each parent id, in components-array order (the client's sibling draw order). */
 export function childrenByParent(components: (IComponentDefinition | null)[]): Map<number, IComponentDefinition[]> {
   const byParent = new Map<number, IComponentDefinition[]>()
