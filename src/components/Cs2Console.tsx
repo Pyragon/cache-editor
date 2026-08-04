@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Cs2TraceEntry, Cs2Warning } from '../cs2/runtime'
-import type { Cs2VarRoute } from './gameframe'
+import type { Cs2VarRoute, HookCensus } from './gameframe'
 import Cs2ScriptModal from './Cs2ScriptModal'
 import './Cs2Console.css'
 
@@ -55,10 +55,12 @@ function signatureOf(trace: Cs2TraceEntry[], routes: Cs2VarRoute[]): string {
   return parts.join('|') + '#' + routes.map((r) => `${r.subject}${r.route ?? ''}${r.watchers.join(',')}`).join('|')
 }
 
-export default function Cs2Console({ trace, routes, warnings, enabled, rootHandle, editedInterfaceId, onSelect, onEditScript }: {
+export default function Cs2Console({ trace, routes, warnings, enabled, census, rootHandle, editedInterfaceId, onSelect, onEditScript }: {
   trace: Cs2TraceEntry[]
   /** where each set variable goes in this frame */
   routes: Cs2VarRoute[]
+  /** what the EDITED interface carries, so an empty log can say why */
+  census: HookCensus
   warnings: Cs2Warning[]
   /** CS2 hooks toggle — off means the trace is empty for a reason */
   enabled: boolean
@@ -158,6 +160,43 @@ export default function Cs2Console({ trace, routes, warnings, enabled, rootHandl
    *  reads as "the console broke". */
   const allEmpty = visibleRuns.length === 0
 
+  /**
+   * Why there is nothing to show. Worth getting right: an empty log is the
+   * normal state for an interface whose hooks are all pointer-driven, and the
+   * message has to distinguish that from one that genuinely carries none.
+   * The census counts what the interface HAS; the trace says what has run.
+   */
+  const emptyReason = useMemo(() => {
+    const mineRan = trace.some(mine)
+    if (onlyMine && !mineRan) {
+      const unrunTotal = census.unrun.reduce((n, u) => n + u.count, 0)
+      if (census.frame + census.hover + census.click + unrunTotal === 0) {
+        return `Interface ${editedInterfaceId} carries no hooks at all.`
+      }
+      const has: string[] = []
+      if (census.hover > 0) has.push(plural(census.hover, 'hover hook'))
+      if (census.click > 0) has.push(plural(census.click, 'click hook'))
+      // named, not bucketed — a summary like "drag/key hooks" can't be
+      // checked against the components and sends you looking for the wrong
+      // thing
+      if (unrunTotal > 0) {
+        has.push(`${census.unrun.map((u) => `${u.count} ${u.field}`).join(', ')} the preview never fires`)
+      }
+      if (census.frame > 0) has.push(plural(census.frame, 'load or transmit hook'))
+      // how to make something happen, given what it has
+      const how = [
+        census.hover > 0 ? 'point at one of its components' : null,
+        census.click > 0 ? 'click one with "Click fires onClick" on' : null,
+      ].filter(Boolean)
+      return how.length > 0
+        ? `Nothing of interface ${editedInterfaceId} has run yet — it carries ${has.join(', ')}. To fire them, ${how.join(', or ')}.`
+        : `Nothing of interface ${editedInterfaceId} has run — it carries ${has.join(', ')}.`
+    }
+    if (runs.length === 0) return 'No hooks have run in this frame yet.'
+    if (changed === 0) return `${plural(trace.length, 'hook')} ran and none changed a component — tick "No-ops" to see them.`
+    return 'Nothing matches the filter.'
+  }, [trace, mine, onlyMine, census, editedInterfaceId, runs.length, changed])
+
   /** A component reference is clickable only when it's in the interface the
    *  editor has open — selecting a component of the chatbox would have nothing
    *  to select in. */
@@ -238,15 +277,8 @@ export default function Cs2Console({ trace, routes, warnings, enabled, rootHandl
       {open && tab === 'run' && (
         <div className="cs2-console-body">
           {!enabled && <div className="cs2-console-empty">CS2 hooks are off — nothing ran.</div>}
-          {enabled && runs.length === 0 && <div className="cs2-console-empty">No hooks in this frame.</div>}
-          {enabled && runs.length > 0 && allEmpty && (
-            <div className="cs2-console-empty">
-              {onlyMine && trace.every((e) => !mine(e))
-                ? `Interface ${editedInterfaceId} carries no hooks, and nothing in the gameframe touched it — all ${trace.length} that ran belong to the rest of the frame.`
-                : changed === 0
-                  ? `${trace.length} hooks ran and none changed a component — tick "No-ops" to see them.`
-                  : 'Nothing matches the filter.'}
-            </div>
+          {enabled && (runs.length === 0 || allEmpty) && (
+            <div className="cs2-console-empty">{emptyReason}</div>
           )}
           {enabled && visibleRuns.map((run) => (
             <div key={run.id} className="cs2-run">

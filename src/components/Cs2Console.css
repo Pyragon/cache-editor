@@ -240,6 +240,10 @@
 .cs2-log-hook.hook-mouseExit { color: #d97a6c; }
 .cs2-log-hook.hook-mouseOver { color: #e0a06e; }
 
+/* A click is deliberate, unlike a hover you swept through — brighter. */
+.cs2-log-hook.hook-onClick { color: #ff9a6a; }
+.cs2-log-hook.hook-onRelease { color: #c9856f; }
+
 .cs2-log-comp {
   background: transparent;
   border: none;
