@@ -72,9 +72,7 @@ export class Cs2Interpreter {
       return []
     }
     const locals = new Map<string, Cs2Value>()
-    script.params.forEach((p, i) => {
-      locals.set(p.name, args[i] ?? (p.type === 'string' ? '' : 0))
-    })
+    for (const [name, value] of bindParams(script.params, args)) locals.set(name, value)
     const flow = await this.execBlock(script.body, locals)
     return flow.kind === 'return' ? flow.values : []
   }
@@ -263,6 +261,46 @@ export class Cs2Interpreter {
     if (result === undefined) return []
     return Array.isArray(result) ? result : [result]
   }
+}
+
+/**
+ * Bind call arguments to a script's parameters BY TYPE, not by position.
+ *
+ * CS2 has separate int and string stacks. A caller pushes each argument onto
+ * the stack for its type, and the callee pops its parameters off those stacks
+ * — so the argument ORDER at the call site has nothing to do with the
+ * parameter order in the signature, beyond ordering within each type. The
+ * client does exactly this when it invokes a hook
+ * (`CS2Executor.executeHookInner` fills `intLocals` and `objectLocals` from
+ * two independent counters), and the decompiler prints call arguments in
+ * push order for the same reason.
+ *
+ * Positional binding looked right on the vast majority of scripts, which take
+ * only ints — and then silently corrupted every mixed-type one. Interface
+ * 11:18's tooltip is the type specimen: the hook carries
+ * `[comp, 720922, "Empty your backpack into your bank", 25, 150]` and
+ * `script_38` declares `(int0, int1, int2, int3, string0)` — ints first,
+ * string last. Positionally the text landed in `int2` and the tooltip
+ * rendered the leftover number instead of the string.
+ *
+ * Anything not a string counts as an int here; arrays are passed by reference
+ * through the same slot and there is no separate array parameter type in the
+ * emitted signatures.
+ */
+export function bindParams(
+  params: { name: string; type: string }[],
+  args: Cs2Value[],
+): [string, Cs2Value][] {
+  const ints: Cs2Value[] = []
+  const strings: Cs2Value[] = []
+  for (const a of args) (typeof a === 'string' ? strings : ints).push(a)
+  let intAt = 0
+  let stringAt = 0
+  return params.map((p) => {
+    const isString = p.type === 'string'
+    const value = isString ? strings[stringAt++] : ints[intAt++]
+    return [p.name, value ?? (isString ? '' : 0)]
+  })
 }
 
 export function asInt(v: Cs2Value): number {
