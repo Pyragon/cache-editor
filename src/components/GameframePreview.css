@@ -96,6 +96,15 @@
   cursor: crosshair;
 }
 
+/* Exactly over the frame, transparent, and click-through so the base canvas
+   keeps hover tracking and click handling. */
+.gfp-canvas-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
 .gfp-resize-handle {
   position: absolute;
   right: -6px;

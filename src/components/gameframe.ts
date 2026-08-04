@@ -1,4 +1,4 @@
-import type { IComponentDefinition, InterfaceData } from '../loaders/interfaces'
+import type { CS2Script, IComponentDefinition, InterfaceData } from '../loaders/interfaces'
 import { loadInterfaceById } from '../loaders/interfaces'
 import {
   InterfaceAssets, resolveAbsoluteLayout, loadPreviewAssets, paintInterface,
@@ -274,6 +274,8 @@ export type GameframePointer = {
   over: HoverTarget[]
   /** newly outside — edge-triggered, fires the exit hook once */
   exited: HoverTarget[]
+  /** just clicked — one press/release cycle, for one run only */
+  clicked: HoverTarget[]
 }
 
 /**
@@ -309,9 +311,9 @@ export type GameframePointer = {
  * and `statTransmitFilter`. It's an inventory transmit hook. See EDITOR.md.
  */
 const HOVER_PASSES: {
-  field: 'onMouseOver' | 'popupScript' | 'onMouseLeaveScript'
+  field: 'onMouseOver' | 'popupScript' | 'onMouseLeaveScript' | 'onClick' | 'onRelease'
   label: string
-  /** which of the pointer's three sets this pass walks */
+  /** which of the pointer's sets this pass walks */
   on: keyof GameframePointer
   trigger: string
 }[] = [
@@ -332,6 +334,25 @@ const HOVER_PASSES: {
     label: 'mouseOver',
     on: 'over',
     trigger: 'pointer is inside — every client cycle (IF_SETONMOUSEOVER, dumped as popupScript — not a popup)',
+  },
+  // A click is a press and a release, and the client fires a different hook
+  // for each — mapping decode slots to the dispatch: slot 13 fires on the
+  // press edge (`!pressed && down`), slot 15 on the release
+  // (`pressed && !down`). Slots 14 and 16 (onClickRepeat / onHold) fire while
+  // the button is HELD, which a single click never reaches, so they stay
+  // unfired. Last in the list because the pointer is over a component before
+  // it clicks it.
+  {
+    field: 'onClick',
+    label: 'onClick',
+    on: 'clicked',
+    trigger: 'button pressed on the component',
+  },
+  {
+    field: 'onRelease',
+    label: 'onRelease',
+    on: 'clicked',
+    trigger: 'button released — the other half of the same click',
   },
 ]
 
@@ -360,6 +381,55 @@ export function hasPerCycleHook(comp: IComponentDefinition | null | undefined): 
 /** The client's cycle length. Scripts that time themselves off
  *  `client_clock()` are calibrated against this. */
 export const CLIENT_CYCLE_MS = 20
+
+/** Hook fields the preview does not fire at all — they need an event we don't
+ *  model. Counted so the console can say so rather than implying an interface
+ *  is inert. */
+const UNRUN_HOOKS = [
+  'onClickRepeat', 'onHold', 'onDrag', 'onDragComplete',
+  'onMouseMove', 'onKey', 'onScrollWheel', 'onTargetEnter', 'onTargetLeave',
+] as const
+
+export type HookCensus = {
+  /** onLoad / varp / stat / timer — fire on their own when the frame runs */
+  frame: number
+  /** enter / over / exit — need the pointer */
+  hover: number
+  /** click / release — need a click, in the toolbar's "fire onClick" mode */
+  click: number
+  /** the ones we never fire, BY FIELD. Named individually on purpose: this
+   *  used to be a bare count summarised as "drag/key hooks", which sent
+   *  someone hunting through interface 11 for a drag script that was never
+   *  there — the two hooks were `onMouseMove`. A count of a nine-field bucket
+   *  can't be checked against the data. */
+  unrun: { field: string; count: number }[]
+}
+
+/**
+ * What hooks an interface actually carries, split by whether the preview can
+ * ever fire them.
+ *
+ * The console needs this to explain an empty log honestly. Interface 11's
+ * components carry only HOVER hooks, so before the pointer touches one the
+ * log is legitimately empty — and reporting that as "carries no hooks" is
+ * simply false.
+ */
+export function censusHooks(components: (IComponentDefinition | null)[]): HookCensus {
+  const census: HookCensus = { frame: 0, hover: 0, click: 0, unrun: [] }
+  const unrun = new Map<string, number>()
+  for (const comp of components) {
+    if (!comp) continue
+    for (const p of HOOK_PASSES) if (comp[p.field]?.length) census.frame++
+    for (const p of HOVER_PASSES) {
+      if (comp[p.field]?.length) census[p.on === 'clicked' ? 'click' : 'hover']++
+    }
+    for (const f of UNRUN_HOOKS) {
+      if ((comp[f] as unknown[] | null)?.length) unrun.set(f, (unrun.get(f) ?? 0) + 1)
+    }
+  }
+  census.unrun = [...unrun].map(([field, count]) => ({ field, count })).sort((a, b) => b.count - a.count)
+  return census
+}
 
 /**
  * Run the CS2 hooks the composed gameframe carries, the way the client does on
@@ -432,7 +502,7 @@ export async function runGameframeCs2(
       if (!iface) continue
       for (const comp of iface.components) {
         const hook = comp?.[pass.field]
-        if (!comp || !hook || hook.length === 0) continue
+        if (!comp || !runnableHook(hook)) continue
         await fire(comp, ifaceId, hook, pass.label, pass.trigger(comp, vars))
       }
     }
@@ -452,6 +522,15 @@ export async function runGameframeCs2(
     routes: await varRouting(cs2, rootHandle),
     ctx: { rootHandle, mode, basis, cache, vars },
   }
+}
+
+/**
+ * Is there actually a script to run? A hook the editor has just attached but
+ * not yet pointed at a script holds id −1 — the field has to exist to be
+ * editable, but running it would report a missing script on every pass.
+ */
+function runnableHook(hook: CS2Script | null | undefined): hook is CS2Script {
+  return !!hook && hook.length > 0 && typeof hook[0] === 'number' && hook[0] >= 0
 }
 
 /** Run one hook against a scene, traced. */
@@ -571,7 +650,7 @@ export async function applyGameframeHover(
     const ifaceId = target.hash >>> 16
     const comp = cs2.interfaces.get(ifaceId)?.components[target.hash & 0xffff]
     const hook = comp?.[pass.field]
-    if (!comp || !hook || hook.length === 0) continue
+    if (!comp || !runnableHook(hook)) continue
     await fire(comp, ifaceId, hook, pass.label, pass.trigger, { x: target.x, y: target.y })
   }
 

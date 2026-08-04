@@ -19,7 +19,7 @@ import { Cs2InterfaceScene } from './runtime'
 import { Cs2Cache } from './cache'
 import {
   VARBIT_LIFE_POINTS, VARBIT_PRAYER_POINTS, VARP_DISEASE, VARP_POISON,
-  loadPlayerState, playerVar, skillLevel,
+  loadPlayerState, playerVar, skillLevel, varNumberValue, varStringValue,
 } from '../loaders/varOverrides'
 import type { EnumDef } from './cache'
 
@@ -56,6 +56,19 @@ export class Cs2VarStore {
 
   varbit(id: number): number {
     return this.varbits.get(id) ?? playerVar('varbit', id)
+  }
+
+  // Client vars fall back to the Variables modal too. Not seeded up front like
+  // the varps above: scripts write these constantly (varc 2 is the tooltip's
+  // "already built" flag), and a written value has to win over the override
+  // for the rest of the run — reading through means the map only ever holds
+  // what the run itself put there.
+  varc(id: number): number {
+    return this.varcs.get(id) ?? varNumberValue('varc', id) ?? 0
+  }
+
+  varcString(id: number): string {
+    return this.varcStrings.get(id) ?? varStringValue(id) ?? ''
   }
 }
 
@@ -419,14 +432,14 @@ export function makeCs2Env(ctx: Cs2Context): Cs2Env {
       if (name === '__set_varc') { varcs.set(asInt(args[0]), asInt(args[1])); return }
       if (name === '__set_varc_string') { varcStrings.set(asInt(args[0]), asStr(args[1])); return }
       if (name.startsWith('__set_clan')) return
-      if (name === '__get_varc' || name === '__get_clientvarp') return varcs.get(asInt(args[0])) ?? 0
-      if (name === '__get_varc_string' || name === '__get_varcstring') return varcStrings.get(asInt(args[0])) ?? ''
+      if (name === '__get_varc' || name === '__get_clientvarp') return vars.varc(asInt(args[0]))
+      if (name === '__get_varc_string' || name === '__get_varcstring') return vars.varcString(asInt(args[0]))
       if (name === 'setvarc_int' || name === 'setvarcint') { varcs.set(asInt(args[0]), asInt(args[1])); return }
       if (name === 'setvarc_string') { varcStrings.set(asInt(args[0]), asStr(args[1])); return }
       if (name === 'setvarp' || name === 'setvar') { varps.set(asInt(args[0]), asInt(args[1])); return }
       if (name === 'setvarbit') { varbits.set(asInt(args[0]), asInt(args[1])); return }
-      if (name === 'getvarc_int') return varcs.get(asInt(args[0])) ?? 0
-      if (name === 'getvarc_string') return varcStrings.get(asInt(args[0])) ?? ''
+      if (name === 'getvarc_int') return vars.varc(asInt(args[0]))
+      if (name === 'getvarc_string') return vars.varcString(asInt(args[0]))
       if (name === 'getvarbit') return varbits.get(asInt(args[0])) ?? 0
       if (name === 'getvarp') return varps.get(asInt(args[0])) ?? 0
 

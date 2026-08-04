@@ -3,8 +3,9 @@ import type { InterfaceData } from '../loaders/interfaces'
 import { InterfaceAssets } from './interfacePreview'
 import type { PreviewOptions } from './interfacePreview'
 import {
-  CLIENT_CYCLE_MS, EDIT_SLOTS, FIXED_SIZE, RESIZABLE_MIN, applyGameframeHover, hasHoverHook,
-  hasPerCycleHook, hoverTargets, loadGameframeScene, modeForRoot, paintGameframe, runGameframeCs2,
+  CLIENT_CYCLE_MS, EDIT_SLOTS, FIXED_SIZE, RESIZABLE_MIN, applyGameframeHover, censusHooks,
+  hasHoverHook, hasPerCycleHook, hoverTargets, loadGameframeScene, modeForRoot, paintGameframe,
+  runGameframeCs2,
 } from './gameframe'
 import { hitTestComponent, resolveAbsoluteLayout } from './interfacePreview'
 import type {
@@ -61,6 +62,8 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   const [cs2Routes, setCs2Routes] = useState<Cs2VarRoute[]>([])
   const [showPlayer, setShowPlayer] = useState(false)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  /** selection outline only, layered over the frame — see `drawSelection` */
+  const overlayRef = useRef<HTMLCanvasElement>(null)
   const sceneRef = useRef<GameframeScene | null>(null)
   const paintGen = useRef(0)
   /** parsed scripts + enum/param data survive across repaints (a resize drag
@@ -78,7 +81,10 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   const regionsRef = useRef<GameframeRegion[]>([])
   /** hover state fed to the CS2 run; a ref because the pointer moves far more
    *  often than a repaint is warranted */
-  const pointerRef = useRef<GameframePointer>({ entered: [], over: [], exited: [] })
+  const pointerRef = useRef<GameframePointer>({ entered: [], over: [], exited: [], clicked: [] })
+  /** what a click on the canvas does — pick a component to edit, or act as a
+   *  real click and fire its onClick/onRelease hooks */
+  const [clickMode, setClickMode] = useState<'select' | 'script'>('select')
   const [hoverLabel, setHoverLabel] = useState<string | null>(null)
   /** The frame's CS2 state, kept across pointer movement. Rebuilt only when
    *  its key changes — everything a pointer move does NOT affect. */
@@ -118,6 +124,11 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   // Scene assembly depends on mode/slot/draft identity; keyed on the
   // components ARRAY so a field edit (new array from the viewer) reloads.
   const sceneKey = useMemo(() => ({ mode, slotKey, components: data.components, id: data.id }), [mode, slotKey, data.components, data.id])
+
+  /** What the edited interface carries, so the console can explain an empty
+   *  log — "no hooks" and "only hover hooks, none pointed at yet" look
+   *  identical in the trace but mean very different things. */
+  const hookCensus = useMemo(() => censusHooks(data.components), [data.components])
 
   useEffect(() => {
     if (!data.rootHandle) { setStatus('No cache folder'); return }
@@ -195,7 +206,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
           // entered/exited are one-shot edges: their hooks fire on the run
           // that observed them and must not re-fire on later repaints. `over`
           // stays, because its hook is per-cycle by design.
-          pointerRef.current = { entered: [], over: pointerRef.current.over, exited: [] }
+          pointerRef.current = { entered: [], over: pointerRef.current.over, exited: [], clicked: [] }
         } catch (e) {
           setStatus(`CS2 run failed: ${e instanceof Error ? e.message : e}`)
         }
@@ -226,20 +237,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
         const comps = override?.interfaces.get(data.id) ?? scene.interfaces.get(data.id)
         hitRef.current = place && comps ? { place, comps } : null
       }
-      if (selectedId != null) {
-        const place = hitRef.current?.place
-        const comps = hitRef.current?.comps
-        if (place && comps) {
-          const rect = resolveAbsoluteLayout(comps, place.w, place.h).get(selectedId)
-          if (rect) {
-            ctx.strokeStyle = '#2f8fff'
-            ctx.lineWidth = 1.5
-            ctx.setLineDash([5, 3])
-            ctx.strokeRect(place.x + rect.x + 0.5, place.y + rect.y + 0.5, rect.width, rect.height)
-            ctx.setLineDash([])
-          }
-        }
-      }
+      drawSelection()
       paintBusy.current = false
       if (paintQueued.current) {
         paintQueued.current = false
@@ -248,8 +246,38 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     })()
   }
 
-  // repaint on size/asset/option changes (scene changes repaint via the loader)
-  useEffect(() => { repaint() }, [size, mode, assets, cs2Enabled, selectedId, opts.showHidden, opts.showContainerOutlines]) // eslint-disable-line react-hooks/exhaustive-deps
+  /**
+   * The selection outline, on its own transparent canvas over the frame.
+   *
+   * Selecting used to be in the repaint deps, so clicking a component in the
+   * tree re-ran the whole compositor — every attached interface's assets
+   * resolved and redrawn — to move a dashed rectangle. Its own canvas costs
+   * one stroke. Called at the end of a paint too, since the component may
+   * have MOVED even when the selection didn't change.
+   */
+  const drawSelection = () => {
+    const canvas = overlayRef.current
+    if (!canvas) return
+    const { width, height } = mode === 'fixed' ? FIXED_SIZE : size
+    // preparePixelCanvas assigns canvas.width, which clears it — so a
+    // deselection needs no explicit erase
+    const ctx = preparePixelCanvas(canvas, width, height)
+    if (selectedId == null) return
+    const place = hitRef.current?.place
+    const comps = hitRef.current?.comps
+    if (!place || !comps) return
+    const rect = resolveAbsoluteLayout(comps, place.w, place.h).get(selectedId)
+    if (!rect) return
+    ctx.strokeStyle = '#2f8fff'
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([5, 3])
+    ctx.strokeRect(place.x + rect.x + 0.5, place.y + rect.y + 0.5, rect.width, rect.height)
+  }
+
+  // repaint on size/asset/option changes (scene changes repaint via the loader).
+  // NOT selectedId — that only moves the overlay.
+  useEffect(() => { repaint() }, [size, mode, assets, cs2Enabled, opts.showHidden, opts.showContainerOutlines]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { drawSelection() }, [selectedId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const onHandleDown = (e: React.PointerEvent) => {
     if (mode === 'fixed') return
@@ -331,7 +359,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
       pointerRef.current.over = next
       return
     }
-    pointerRef.current = { entered, over: next, exited }
+    pointerRef.current = { ...pointerRef.current, entered, over: next, exited }
     // the label names the innermost component, since that's what the eye is
     // on, and counts the ancestors also receiving the hover
     const deepest = next[next.length - 1]
@@ -357,9 +385,20 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     return region?.comps[hash & 0xffff] ?? null
   }
 
-  // Selection stays scoped to the EDITED interface — clicking a chatbox
-  // component would have nothing to select in the tree.
   const onCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (clickMode === 'script') {
+      // Same set semantics as hover: the client fires the click hooks of
+      // every component whose bounds contain the point, not just the topmost.
+      const { x, y } = canvasPoint(e)
+      pointerRef.current = {
+        ...pointerRef.current,
+        clicked: hoverTargets(regionsRef.current, x, y, opts.showHidden === true),
+      }
+      repaint()
+      return
+    }
+    // Selection stays scoped to the EDITED interface — clicking a chatbox
+    // component would have nothing to select in the tree.
     const hit = hitRef.current
     if (!hit || !onSelect) return
     const point = canvasPoint(e)
@@ -416,6 +455,22 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
           ))}
         </div>
         )}
+        <div className="gfp-slot-pills" title="What clicking the frame does. Selecting is for editing; firing onClick makes the preview behave like the client, running the clicked component's onClick and onRelease hooks — watch the console.">
+          <button
+            type="button"
+            className={clickMode === 'select' ? 'selected' : ''}
+            onClick={() => setClickMode('select')}
+          >
+            Click selects
+          </button>
+          <button
+            type="button"
+            className={clickMode === 'script' ? 'selected' : ''}
+            onClick={() => setClickMode('script')}
+          >
+            Click fires onClick
+          </button>
+        </div>
         <label className="gfp-cs2">
           <input type="checkbox" checked={cs2Enabled} onChange={(e) => setCs2Enabled(e.target.checked)} />
           CS2 hooks
@@ -449,6 +504,12 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
             onMouseMove={onCanvasMove}
             onMouseLeave={onCanvasLeave}
           />
+          {/* selection only — pointer-events off so the frame keeps hover */}
+          <canvas
+            ref={overlayRef}
+            className="gfp-canvas gfp-canvas-overlay"
+            style={{ width: viewport.width, height: viewport.height }}
+          />
           {mode === 'resizable' && (
             <div
               className="gfp-resize-handle"
@@ -466,6 +527,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
         trace={cs2Trace}
         routes={cs2Routes}
         warnings={cs2Warnings}
+        census={hookCensus}
         enabled={cs2Enabled}
         rootHandle={data.rootHandle ?? null}
         editedInterfaceId={data.id}
