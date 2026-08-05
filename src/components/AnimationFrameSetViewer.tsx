@@ -26,6 +26,15 @@ type Props = {
  *  durations — so stepping here runs at a flat rate the user picks. */
 const PLAY_FPS = [5, 10, 20, 30]
 
+/** Slot types with something in the scene to grab. Face alpha/colour and the
+ *  billboard effects stay numeric — there is no handle for "fade these faces". */
+const GIZMO_TYPES = new Set([0, 1, 2, 3])
+
+/** What the handle does, per slot type, for the button's tooltip. */
+const GIZMO_LABEL: Record<number, string> = {
+  0: 'move-the-pivot', 1: 'move', 2: 'rotate', 3: 'scale',
+}
+
 /** A model to try the skeleton on, derived from the anim-compat index. */
 type ModelCandidate = { modelIds: number[]; label: string }
 
@@ -100,6 +109,27 @@ function slotsScanned(indices: number[]): number {
   return indices.length === 0 ? 0 : Math.max(...indices) + 1
 }
 
+/**
+ * Gizmo drags arrive in THREE space; the frame stores RS deltas. The mesh is
+ * mapped (x, -y, -z), which is a 180-degree turn about X, so conjugating each
+ * rotation through it leaves X alone and negates Y and Z. Combined with the
+ * evaluator's own conventions — X and Y are standard right-handed rotations
+ * while Z is negated (checked against its trig, not assumed) — a three-space
+ * rotation of phi about each axis lands as:
+ *     three X -> RS x = +phi     three Y -> RS y = -phi     three Z -> RS z = +phi
+ * Verified numerically to under a unit of fixed-point rounding.
+ */
+const RS_PER_RADIAN = 16384 / (2 * Math.PI)
+
+/** Rotation deltas are stored PRE-shift: the client promotes them `<<2 & 0x3fff`
+ *  at the point of use, so only the low 12 bits survive and the resolution is a
+ *  quarter of a 14-bit step (about 0.09 degrees). */
+function packAngle(baseStored: number, deltaRadians: number): number {
+  const baseAngle = (baseStored << 2) & 0x3fff
+  const next = Math.round(baseAngle + deltaRadians * RS_PER_RADIAN)
+  return ((next % 16384) + 16384) % 16384 >> 2
+}
+
 /** Insert into a parallel array at `at`, without mutating the original. */
 function insertAt<T>(arr: T[], at: number, value: T): T[] {
   const next = arr.slice()
@@ -122,6 +152,21 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
   const root = data.rootHandle
 
   const [draft, setDraft] = useState<Map<number, AnimationFrameDef>>(data.frames)
+  /**
+   * Undo history. Snapshots are whole drafts — a Map of frames, each frame
+   * replaced wholesale rather than mutated, so a shallow copy is a real
+   * snapshot and the depth here is frames-touched, not bytes.
+   *
+   * A gizmo drag fires on every pointer move, so it pushes ONE entry on grab
+   * and nothing after: the whole drag undoes as the single gesture it was.
+   */
+  const undoStack = useRef<Map<number, AnimationFrameDef>[]>([])
+  const redoStack = useRef<Map<number, AnimationFrameDef>[]>([])
+  const [historyDepth, setHistoryDepth] = useState({ undo: 0, redo: 0 })
+  // setDraft's updater form can't be read back, and pushUndo needs the state
+  // as it stands right now.
+  const draftRef = useRef(draft)
+  draftRef.current = draft
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
 
@@ -141,11 +186,20 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
   const [modelError, setModelError] = useState<string | null>(null)
   const [modelLoading, setModelLoading] = useState(false)
   const cameraStateRef = useRef<CameraState | null>(null)
+  /** Skeleton the auto-suggest has already fired for, so it offers a model once
+   *  per frame set rather than fighting a hand-typed id. */
+  const autoTriedRef = useRef<number | null>(null)
 
   // --- Transport + hover ----------------------------------------------------
   const [playing, setPlaying] = useState(false)
   const [fps, setFps] = useState(10)
   const [hoverSlot, setHoverSlot] = useState<number | null>(null)
+  /** Index into the frame's entries that the gizmo is driving. */
+  const [gizmoEntry, setGizmoEntry] = useState<number | null>(null)
+  /** The entry's deltas when the drag started — every frame of the drag is
+   *  applied against these, not against the last value, so a drag can't
+   *  accumulate rounding. */
+  const dragBase = useRef<{ x: number; y: number; z: number } | null>(null)
   const [addSlot, setAddSlot] = useState<number | ''>('')
 
   // --- Model suggestions from the anim-compat index -------------------------
@@ -158,8 +212,22 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
     setBaseError(null)
     setPlaying(false)
     setHoverSlot(null)
+    setGizmoEntry(null)
+    undoStack.current = []
+    redoStack.current = []
+    setHistoryDepth({ undo: 0, redo: 0 })
     const first = [...data.frames.keys()].sort((a, b) => a - b)[0]
     setSelectedFileId(first ?? null)
+    // The preview belongs to the frame set that loaded it. A model rigged to
+    // set 4's skeleton posed against set 3's frames is nonsense, and leaving
+    // its id sitting in the field made it look deliberate — worse, the
+    // auto-suggest below then declined to run, because it skips when a model is
+    // already loaded. Cleared on every navigation, so the new set either offers
+    // its own model or asks for one.
+    setModelIds([])
+    setModel(null)
+    setModelError(null)
+    autoTriedRef.current = null
   }, [data])
 
   useEffect(() => {
@@ -228,9 +296,8 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
     }
   }, [root])
 
-  // Auto-load the first suggestion once per skeleton, so opening a frame set
-  // with the index already built lands straight on a posed model.
-  const autoTriedRef = useRef<number | null>(null)
+  // Auto-load the first suggestion once per frame set, so opening one with the
+  // index already built lands straight on a posed model.
   useEffect(() => {
     if (baseId == null || baseId < 0 || model || autoTriedRef.current === baseId) return
     const first = candidates[0]
@@ -263,10 +330,103 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
     return () => clearInterval(timer)
   }, [playing, fps, fileIds])
 
+  /** The slot the gizmo drives, and which handle it should be. Only the
+   *  geometry transforms get one — a face alpha or a billboard roll has nothing
+   *  in the scene to grab. */
+  const gizmoSlot = gizmoEntry != null && frame ? frame.transformationIndices[gizmoEntry] ?? null : null
+  const gizmoMode = useMemo((): 'translate' | 'rotate' | 'scale' | null => {
+    if (gizmoSlot == null || !frameBase) return null
+    switch (frameBase.transformationTypes[gizmoSlot]) {
+      case 0: case 1: return 'translate'
+      case 2: return 'rotate'
+      case 3: return 'scale'
+      default: return null
+    }
+  }, [gizmoSlot, frameBase])
+
   const posed = useMemo(() => {
     if (!model || !frameBase || !frame || frame.rawFallbackBytes) return null
-    return applyAnimationFrame(model, frameBase, frame)
-  }, [model, frameBase, frame])
+    return applyAnimationFrame(model, frameBase, frame, null, 0, 1, undefined, gizmoSlot ?? undefined)
+  }, [model, frameBase, frame, gizmoSlot])
+
+  /**
+   * Where the handle sits — resolved ONCE when it attaches to a slot, then left
+   * alone.
+   *
+   * It's tempting to track the live pose: a rotate turns about the frame's
+   * running pivot, and that pivot genuinely drifts as you edit, because it's
+   * re-derived from vertex positions an earlier transform may have just moved.
+   * But following it means the handle moves while you drag it, and jumps on
+   * undo — the pose reverts, the pivot with it, and the handle teleports. A
+   * handle that won't hold still is worse than one that's a few units stale, so
+   * this recomputes only when the selection changes.
+   */
+  const posedRef = useRef(posed)
+  posedRef.current = posed
+  const gizmoPos = useMemo((): [number, number, number] | null => {
+    if (gizmoMode == null || gizmoSlot == null || !model || !frameBase) return null
+    const at = posedRef.current
+    const type = frameBase.transformationTypes[gizmoSlot]
+    if ((type === 2 || type === 3) && at?.pivot) return at.pivot
+    const verts = slotVertices(model, frameBase, gizmoSlot)
+    if (verts.size === 0) return at?.pivot ?? [0, 0, 0]
+    const X = at?.x ?? model.vertexX, Y = at?.y ?? model.vertexY, Z = at?.z ?? model.vertexZ
+    let sx = 0, sy = 0, sz = 0
+    for (const v of verts) { sx += X[v]; sy += Y[v]; sz += Z[v] }
+    return [Math.round(sx / verts.size), Math.round(sy / verts.size), Math.round(sz / verts.size)]
+    // deliberately NOT keyed on the pose — see above
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gizmoMode, gizmoSlot, model, frameBase, selectedFileId])
+
+  /** Apply a drag. Written against the deltas captured on grab, and only ever
+   *  touching the axes the frame actually stores for this slot type. */
+  function onGizmoTransform(t: {
+    dx: number; dy: number; dz: number
+    rx: number; ry: number; rz: number
+    sx: number; sy: number; sz: number
+  }) {
+    const base = dragBase.current
+    if (base == null || gizmoEntry == null || selectedFileId == null || !frameBase || gizmoSlot == null) return
+    const type = frameBase.transformationTypes[gizmoSlot]
+    let x = base.x, y = base.y, z = base.z
+    if (type === 0 || type === 1) {
+      // scene space is (x, -y, -z), so two axes come back negated
+      x = base.x + Math.round(t.dx)
+      y = base.y - Math.round(t.dy)
+      z = base.z - Math.round(t.dz)
+    } else if (type === 2) {
+      x = packAngle(base.x, t.rx)
+      y = packAngle(base.y, -t.ry)
+      z = packAngle(base.z, t.rz)
+    } else if (type === 3) {
+      // the stored value IS the multiplier in 128ths, so the handle scales it
+      x = Math.max(0, Math.round(base.x * t.sx))
+      y = Math.max(0, Math.round(base.y * t.sy))
+      z = Math.max(0, Math.round(base.z * t.sz))
+    }
+    const target = draft.get(selectedFileId)
+    if (!target) return
+    const set = (arr: number[], v: number) => { const a = arr.slice(); a[gizmoEntry] = v; return a }
+    editFrame(selectedFileId, {
+      ...target,
+      transformationX: set(target.transformationX, x),
+      transformationY: set(target.transformationY, y),
+      transformationZ: set(target.transformationZ, z),
+    }, true)
+  }
+
+  function onGizmoDragging(dragging: boolean) {
+    if (!dragging) { dragBase.current = null; return }
+    const target = selectedFileId != null ? draft.get(selectedFileId) : null
+    if (!target || gizmoEntry == null) return
+    // the state to come back to is the one before the handle moved at all
+    pushUndo()
+    dragBase.current = {
+      x: target.transformationX[gizmoEntry],
+      y: target.transformationY[gizmoEntry],
+      z: target.transformationZ[gizmoEntry],
+    }
+  }
 
   const highlight = useMemo(() => {
     if (hoverSlot == null || !model || !frameBase) return null
@@ -274,7 +434,59 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
   }, [hoverSlot, model, frameBase])
 
   // --- Editing --------------------------------------------------------------
-  function editFrame(fileId: number, next: AnimationFrameDef) {
+  // Kept in a ref so the key handler below doesn't need re-binding on every
+  // edit — it fires rarely and always wants the newest version.
+  const historyFns = useRef({ undo: () => {}, redo: () => {} })
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return
+      // a focused field has its own undo, and stealing it would be worse than
+      // not having ours there
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      const key = e.key.toLowerCase()
+      if (key === 'z' && !e.shiftKey) { e.preventDefault(); historyFns.current.undo() }
+      else if ((key === 'z' && e.shiftKey) || key === 'y') { e.preventDefault(); historyFns.current.redo() }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  /** Snapshot the draft before a change. A new edit invalidates the redo
+   *  branch, which is what every editor does and what people expect. */
+  function pushUndo() {
+    undoStack.current.push(new Map(draftRef.current))
+    // 100 deep is plenty for a session's worth of nudging and bounds the memory
+    if (undoStack.current.length > 100) undoStack.current.shift()
+    redoStack.current = []
+    setHistoryDepth({ undo: undoStack.current.length, redo: 0 })
+  }
+
+  function undo() {
+    const previous = undoStack.current.pop()
+    if (!previous) return
+    redoStack.current.push(new Map(draftRef.current))
+    setDraft(previous)
+    setIsDirty(true)
+    setHistoryDepth({ undo: undoStack.current.length, redo: redoStack.current.length })
+  }
+
+  function redo() {
+    const next = redoStack.current.pop()
+    if (!next) return
+    undoStack.current.push(new Map(draftRef.current))
+    setDraft(next)
+    setIsDirty(true)
+    setHistoryDepth({ undo: undoStack.current.length, redo: redoStack.current.length })
+  }
+
+  historyFns.current = { undo, redo }
+
+  /** `coalesce` skips the snapshot — used by the frames of a gizmo drag, which
+   *  already pushed one when the handle was grabbed. */
+  function editFrame(fileId: number, next: AnimationFrameDef, coalesce = false) {
+    if (!coalesce) pushUndo()
     setDraft((prev) => new Map(prev).set(fileId, next))
     setIsDirty(true)
   }
@@ -441,6 +653,9 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
               data={model}
               posedVertices={posed}
               highlightVertices={highlight}
+              gizmo={gizmoMode && gizmoPos ? { mode: gizmoMode, position: gizmoPos } : null}
+              onGizmoTransform={onGizmoTransform}
+              onGizmoDragging={onGizmoDragging}
               cameraStateRef={cameraStateRef}
               statsExtra={selectedFileId != null ? `frame ${selectedFileId}` : undefined}
             />
@@ -515,17 +730,41 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
               <h3>
                 Transforms in frame {selectedFileId}
                 <span className="item-stack-index"> {frame.transformationIndices.length} of {frameBase?.transformationTypes.length ?? '?'} slots</span>
+                <span className="btn-pill">
+                  <button
+                    type="button"
+                    className="zoom-btn"
+                    disabled={historyDepth.undo === 0}
+                    title="Undo (Ctrl+Z) — a whole gizmo drag counts as one step"
+                    onClick={undo}
+                  >
+                    ↶ Undo{historyDepth.undo > 0 ? ` ${historyDepth.undo}` : ''}
+                  </button>
+                  <button
+                    type="button"
+                    className="zoom-btn"
+                    disabled={historyDepth.redo === 0}
+                    title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
+                    onClick={redo}
+                  >
+                    ↷ Redo
+                  </button>
+                </span>
               </h3>
               {!frameBase ? (
                 <p className="anim-preview-status">Loading frame base {baseId}…</p>
               ) : (
                 <>
-                  <p className="map-sprite-hint">Hover a row to light up the vertices it moves.</p>
+                  <p className="map-sprite-hint">
+                    Hover a row to light up the vertices it moves. Hit <strong>Drag</strong> on a row
+                    to get a handle on it in the preview above — arrows to move, rings to rotate, boxes
+                    to scale — or just type the numbers. A whole drag undoes in one step.
+                  </p>
                   <div className="quest-table-wrap">
                     <table className="quest-table">
                       <thead>
                         <tr>
-                          <th>Slot</th><th>Type</th><th>Groups</th>
+                          <th>Handle</th><th>Slot</th><th>Type</th><th>Groups</th>
                           <th>X</th><th>Y</th><th>Z</th>
                           <th>Means</th><th>Flags</th><th>Skip</th><th />
                         </tr>
@@ -537,10 +776,32 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
                           return (
                             <tr
                               key={i}
-                              className={hoverSlot === slot ? 'linked-hover' : undefined}
+                              className={hoverSlot === slot || gizmoEntry === i ? 'linked-hover' : undefined}
                               onMouseEnter={() => setHoverSlot(slot)}
                               onMouseLeave={() => setHoverSlot((cur) => (cur === slot ? null : cur))}
                             >
+                              <td>
+                                {!GIZMO_TYPES.has(type) ? (
+                                  <span
+                                    className="item-stack-index"
+                                    title="Face and billboard effects have nothing in the scene to grab — type these"
+                                  >—</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className={`field-link-btn${gizmoEntry === i ? ' active' : ''}`}
+                                    disabled={!model}
+                                    title={!model
+                                      ? 'Load a model first — the handle lives in the preview'
+                                      : gizmoEntry === i
+                                      ? 'Hide the handle'
+                                      : `Put a ${GIZMO_LABEL[type]} handle on this transform in the preview`}
+                                    onClick={() => setGizmoEntry((cur) => (cur === i ? null : i))}
+                                  >
+                                    {gizmoEntry === i ? '✓ Dragging' : 'Drag'}
+                                  </button>
+                                )}
+                              </td>
                               <td className="item-stack-index">{slot}</td>
                               <td title={TRANSFORM_TYPE_HELP[type] ?? ''}>{TRANSFORM_TYPE_NAMES[type] ?? `type ${type}`}</td>
                               <td className="item-stack-index">{labels.join(', ') || '—'}</td>
@@ -683,7 +944,13 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
       {isDirty && (
         <div className="save-bar">
           <span className="save-bar-label">Unsaved changes</span>
-          <button type="button" className="save-bar-discard" onClick={() => { setDraft(data.frames); setIsDirty(false) }}>Discard</button>
+          <button type="button" className="save-bar-discard" onClick={() => {
+            setDraft(data.frames)
+            setIsDirty(false)
+            undoStack.current = []
+            redoStack.current = []
+            setHistoryDepth({ undo: 0, redo: 0 })
+          }}>Discard</button>
           <button type="button" className="save-bar-save" onClick={handleSave} disabled={isSaving}>
             {isSaving ? 'Saving…' : 'Save'}
           </button>

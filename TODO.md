@@ -8,7 +8,6 @@ Open work only — completed passes live in git history and README.
 
 ## Animations
 
-- **REMINDER (2026-07-19): Cody found an animations issue while testing in the live client** — parked while other editors get finished; ask him what it was when animations come back up. (He never described it — don't guess.)
 - **Keyframe tweening is PORTED (2026-07-28)** — `applyAnimationFrame` takes an
   optional next frame + elapsed/duration and blends per the client's
   `MeshRasterizer.method11266`: slot-ordered union of both keyframes, identity
@@ -33,9 +32,33 @@ Open work only — completed passes live in git history and README.
   moves, per-type delta units, add/remove transform entries) landed 2026-08-04.
   See EDITOR.md's "Animation frame bases and frame sets" census for the numbers
   behind the plan. Open:
-  - **Gizmos.** Select a slot → `TransformControls` at the current pivot →
-    dragging writes the 14-bit rotation / integer translation / ×128 scale back
-    into the frame. This is what makes animations authorable rather than typed.
+  - **Gizmos: DONE 2026-08-04.** The ○ in each transform row puts a
+    `TransformControls` handle on that slot — translate for types 0/1, rotate
+    for 2, scale for 3; face and billboard effects stay numeric because there
+    is nothing in the scene to grab. Rotate and scale sit on the frame's
+    RUNNING pivot, which only the evaluator knows, so `applyAnimationFrame`
+    gained an optional `probeSlot` that reports the origin in effect when that
+    entry is reached; translate sits on the centroid of the vertices it moves.
+    Drags are applied against the deltas captured on grab, never the last
+    value, so they can't accumulate rounding.
+
+    The axis mapping was derived from the evaluator's own trig rather than
+    assumed: X and Y are standard right-handed rotations but Z is negated, and
+    the (x, −y, −z) render mapping negates Y and Z again, so a three-space drag
+    of phi lands as RS x=+phi, y=−phi, z=+phi. Verified end to end (drag →
+    stored → rendered) over 21 angle/axis cases: worst error 1.21 units on a
+    1000-unit vector, under the 1.53-unit floor set by rotations being stored
+    pre-shift at quarter-step resolution.
+
+    Undo/redo landed with it (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, plus buttons on
+    the transform table): whole-draft snapshots, and a gizmo drag pushes ONE
+    entry on grab rather than one per pointer move, so a gesture undoes as a
+    gesture. History is per frame set — it clears on navigation and on Discard.
+    Skipped while a text field has focus, so the browser's own input undo keeps
+    working.
+
+    Open: a drag still writes on every pointer move, so the dirty flag trips as
+    soon as you touch a handle.
   - **glTF export (one-way).** Bake mode always works: one bone per vertex
     group, flat, composed affine matrix per frame. A real bone tree is possible
     for the 74.6% of bases whose slot label sets nest cleanly; the other 25.4%

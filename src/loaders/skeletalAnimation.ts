@@ -185,6 +185,11 @@ export type PosedVertices = {
   /** Billboard group poses keyed by group id (= the attachment's `depth`),
    *  only when a type-8/9/10 transform ran. */
   billboardGroups: Map<number, BillboardGroupPose> | null
+  /** Where the pivot stood when `probeSlot`'s entry was reached, in model
+   *  space. Only the evaluator knows this — the origin is a running register
+   *  re-established from live vertex positions as the frame executes — and a
+   *  rotate or scale gizmo has to sit exactly on it. Null unless probed. */
+  pivot: [number, number, number] | null
 }
 
 // Applies every transform in one frame to a model's vertices, in order, and
@@ -404,6 +409,8 @@ export function applyAnimationFrame(
    * is always safe.
    */
   scratch?: PoseScratch,
+  /** Report the pivot in effect for this slot — see PosedVertices.pivot. */
+  probeSlot?: number,
 ): PosedVertices | null {
   if (!model.vertexSkins || frame.rawFallbackBytes) return null
 
@@ -431,6 +438,7 @@ export function applyAnimationFrame(
   let faceColor: Uint16Array | null = null
   // Created lazily on the first billboard-group transform.
   let billboardGroups: Map<number, BillboardGroupPose> | null = null
+  let pivot: [number, number, number] | null = null
 
   // Which transforms run — and with what deltas — comes from resolveEntries:
   // frame1's entries verbatim in the single-frame case, or the client's
@@ -452,6 +460,15 @@ export function applyAnimationFrame(
     // tweening, frame1's skip wins and frame2's fills in (client 483-487).
     if (entry.skip !== -1) {
       applyTransform(state, model.vertexCount, 0, verticesForSlot(entry.skip), 0, 0, 0)
+    }
+
+    // AFTER the skip re-established it, which is the pivot this entry actually
+    // turns about. Origin state lives in the upscaled space while the transform
+    // math runs, so it comes back down the same 4 bits the vertices do.
+    if (probeSlot != null && slot === probeSlot) {
+      pivot = state.upscaled
+        ? [state.originX >> 4, state.originY >> 4, state.originZ >> 4]
+        : [state.originX, state.originY, state.originZ]
     }
 
     // Face-group effects (types 5/7) — deltas already interpolated.
@@ -517,5 +534,5 @@ export function applyAnimationFrame(
     }
   }
 
-  return { x: state.x, y: state.y, z: state.z, faceAlpha, faceColor, billboardGroups }
+  return { x: state.x, y: state.y, z: state.z, faceAlpha, faceColor, billboardGroups, pivot }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import type { ModelData } from '../loaders/models'
 import { hslToRgb } from '../loaders/models'
 import type { PosedVertices } from '../loaders/skeletalAnimation'
@@ -107,6 +108,19 @@ type Props = {
   /** Hides the id/vertex-count header — for embeds where the surrounding panel
    *  already says what is being shown. */
   hideHeader?: boolean
+  /** Put a drag gizmo at a point in MODEL space. The viewer only reports the
+   *  handle's transform; what it means is the caller's business. */
+  gizmo?: { mode: 'translate' | 'rotate' | 'scale'; position: [number, number, number] } | null
+  /** The handle's transform relative to where it was placed, in THREE space
+   *  (rotations in radians, scale a multiplier). Fires on every drag frame. */
+  onGizmoTransform?: (t: {
+    dx: number; dy: number; dz: number
+    rx: number; ry: number; rz: number
+    sx: number; sy: number; sz: number
+  }) => void
+  /** True on grab, false on release — the caller snapshots a baseline on grab
+   *  and the handle resets to identity on release. */
+  onGizmoDragging?: (dragging: boolean) => void
   /** Model vertex indices to mark with dots on top of the mesh — the frame
    *  editor uses it to answer "which part of the mesh does this transform
    *  slot actually move?". Follows the posed positions, and changing it never
@@ -298,7 +312,7 @@ function makeDotTexture(): THREE.Texture {
   return texture
 }
 
-export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds, highlightVertices }: Props) {
+export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds, highlightVertices, gizmo, onGizmoTransform, onGizmoDragging }: Props) {
   // `world` is built inline by callers, so its identity churns every render —
   // the in-place apply effect keys off its VALUE instead.
   const worldKey = world ? JSON.stringify(world) : ''
@@ -333,6 +347,13 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
   // And for the highlight overlay, which changes on every hover — read
   // imperatively from a ref so a hover can't rebuild the scene either.
   const applyHighlightFnRef = useRef<(() => void) | null>(null)
+  // Same in-place treatment for the gizmo: selecting a different slot moves the
+  // handle, it must never rebuild the scene (and leak a GL context).
+  const applyGizmoFnRef = useRef<((g: Props['gizmo']) => void) | null>(null)
+  const gizmoCbRef = useRef({ onGizmoTransform, onGizmoDragging })
+  gizmoCbRef.current = { onGizmoTransform, onGizmoDragging }
+  const gizmoRef = useRef(gizmo)
+  gizmoRef.current = gizmo
   const highlightRef = useRef<ReadonlySet<number> | null>(null)
   highlightRef.current = highlightVertices ?? null
   // Has the user driven the camera themselves? Auto-framing must not fight an
@@ -1112,6 +1133,78 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     }
     applyHighlightFnRef.current = writeHighlight
 
+    // --- Drag gizmo. A dummy anchor carries the handle: TransformControls
+    // moves the object it's attached to, and reading that object's transform
+    // relative to where it was placed is the whole interface. Nothing here
+    // touches the mesh — the caller decides what a drag means.
+    const gizmoAnchor = new THREE.Object3D()
+    mesh.add(gizmoAnchor)
+    let transformControls: TransformControls | null = null
+    let gizmoHelper: THREE.Object3D | null = null
+    let gizmoDragging = false
+    /** The most recently requested handle. A translate drag moves the very
+     *  vertices the caller derives the position from, so requests arrive
+     *  mid-drag — applying them then would yank the handle out from under the
+     *  pointer. They're held here and applied on release instead. */
+    let pendingGizmo: Props['gizmo'] = null
+
+    function applyGizmo(next: Props['gizmo']) {
+      pendingGizmo = next
+      if (gizmoDragging) return
+      placeGizmo(next)
+    }
+
+    function placeGizmo(next: Props['gizmo']) {
+      if (!next) {
+        if (gizmoHelper) { scene.remove(gizmoHelper); gizmoHelper = null }
+        if (transformControls) { transformControls.detach(); transformControls.dispose(); transformControls = null }
+        return
+      }
+      if (!transformControls) {
+        transformControls = new TransformControls(camera, renderer.domElement)
+        transformControls.setSize(0.7)
+        transformControls.addEventListener('dragging-changed', (e) => {
+          // orbiting while dragging a handle fights it
+          controls.enabled = !e.value
+          gizmoDragging = e.value as boolean
+          gizmoCbRef.current.onGizmoDragging?.(e.value as boolean)
+          if (!e.value) {
+            // Back to a clean slate so the next drag is measured from scratch —
+            // but back to the ANCHOR, not the origin. Resetting position to
+            // (0,0,0) parked the handle at the mesh's centre, and the caller
+            // only re-places it when the pivot actually moves, so a rotation
+            // about a fixed pivot left it stranded there.
+            gizmoAnchor.position.copy(anchorHome)
+            gizmoAnchor.rotation.set(0, 0, 0)
+            gizmoAnchor.scale.set(1, 1, 1)
+            // catch up on anything requested while the pointer was down
+            placeGizmo(pendingGizmo)
+          }
+        })
+        transformControls.addEventListener('objectChange', () => {
+          const e = gizmoAnchor.rotation
+          gizmoCbRef.current.onGizmoTransform?.({
+            dx: gizmoAnchor.position.x - anchorHome.x,
+            dy: gizmoAnchor.position.y - anchorHome.y,
+            dz: gizmoAnchor.position.z - anchorHome.z,
+            rx: e.x, ry: e.y, rz: e.z,
+            sx: gizmoAnchor.scale.x, sy: gizmoAnchor.scale.y, sz: gizmoAnchor.scale.z,
+          })
+        })
+        gizmoHelper = transformControls.getHelper()
+        scene.add(gizmoHelper)
+        transformControls.attach(gizmoAnchor)
+      }
+      transformControls.setMode(next.mode)
+      // model space -> scene space, the same (x, -y, -z) the vertices take
+      anchorHome.set(next.position[0], -next.position[1], -next.position[2])
+      gizmoAnchor.position.copy(anchorHome)
+      gizmoAnchor.rotation.set(0, 0, 0)
+      gizmoAnchor.scale.set(1, 1, 1)
+    }
+    const anchorHome = new THREE.Vector3()
+    applyGizmoFnRef.current = applyGizmo
+
     // --- Animated pose: rewrites the live position buffer in place (plus
     // billboard centres and particle-emitter/effector anchors) — no scene
     // rebuild. Colours, UVs and the centring offset stay at rest pose: UVs
@@ -1291,6 +1384,7 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     // starts from the active pose instead of flashing the rest pose.
     if (posedVertices) applyPosed(posedVertices)
     else writeHighlight()
+    applyGizmo(gizmoRef.current)
 
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
@@ -1366,6 +1460,10 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
       applyWorldFnRef.current = null
       applyFramingFnRef.current = null
       applyHighlightFnRef.current = null
+      applyGizmoFnRef.current = null
+      if (gizmoHelper) scene.remove(gizmoHelper)
+      transformControls?.detach()
+      transformControls?.dispose()
       if (cameraStateRef) {
         cameraStateRef.current = {
           position: [camera.position.x, camera.position.y, camera.position.z],
@@ -1426,6 +1524,14 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
   useEffect(() => {
     applyHighlightFnRef.current?.()
   }, [highlightVertices])
+
+  // Nor does moving the gizmo to a different slot's pivot. Keyed by value: the
+  // caller builds the object inline, so its identity churns every render.
+  const gizmoKey = gizmo ? `${gizmo.mode}:${gizmo.position.join(',')}` : ''
+  useEffect(() => {
+    applyGizmoFnRef.current?.(gizmoRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gizmoKey])
 
   useEffect(() => {
     for (const material of matsRef.current) material.wireframe = wireframe
