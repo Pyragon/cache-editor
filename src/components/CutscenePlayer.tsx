@@ -165,6 +165,9 @@ export type CutsceneSceneHandle = {
    *  actions stop driving it. */
   setFreeCamera: (on: boolean) => void
   isFreeCamera: () => boolean
+  /** Jump the sim to a cycle and pause — what clicking the piano roll does.
+   *  Scrubbing backwards rebuilds scene state from 0, same as the transport. */
+  seek: (cycle: number) => void
 }
 
 type Props = {
@@ -1647,6 +1650,9 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       },
       setFreeCamera: (on) => { r.freeCamera = on },
       isFreeCamera: () => r.freeCamera,
+      // through the ref, like the action list's buttons — `seek` is a fresh
+      // closure every render and this effect must not depend on it
+      seek: (target) => { seekRef.current(Math.max(0, target)); setPlaying(false) },
     }
     return () => { sceneHandle.current = null }
     // the handle closes over refs, which are stable for the component's life

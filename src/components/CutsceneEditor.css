@@ -99,3 +99,12 @@
 .cutscene-editor-timeline td {
   vertical-align: top;
 }
+
+/* Add buttons live under their table, the same shape as the map section's
+   "+ Add a region block" — a header pill read as a section control rather than
+   as "append a row". */
+.cutscene-editor-addrow {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}

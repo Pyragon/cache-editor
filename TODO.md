@@ -412,6 +412,30 @@ cutscene opens with, and a FINISHED), Clone deep-copies the selected one. Both
 arrive staged in memory with the Discard/Save banner, so an unwanted one costs
 nothing.
 
+**Piano roll (2026-08-04).** `CutscenePianoRoll` sits above the action table:
+time across, one lane per action kind, colours matching the player's badges.
+Two playheads — the solid one is the sim clock, the dashed one follows the
+pointer — and clicking bare track scrubs there. Actions closer together than
+14px at the current zoom collapse into a single `#n` cell that fans out above
+the lane on hover (click to pin), so a crowded moment is readable without the
+lanes reflowing; verified against cutscene 11's 342 actions, which come down to
+111-223 cells depending on zoom with nothing lost or duplicated. Keybinds while
+hovering: `A` opens the add-action modal at the ghost cycle, `C` the camera
+modal. Both park the cursor first, which also pauses, so a running clock can't
+move the insertion point out from under a shot being captured.
+
+It sits directly under the preview so you can watch the actions go by as the
+scene plays. A cell is never wider than the room before its neighbour: below
+34px the name is dropped and the cell becomes a plain coloured marker with the
+name in its tooltip, which is what stopped a busy camera lane rendering as an
+unreadable smear of overlapping "direct camera" labels. On cutscene 11 at the
+default 1x that's 85 named cells, 29 markers and 56 collapsed stacks.
+
+Open: cells can't be dragged to retime an action yet (edit the Start field),
+and there's no lane filter. Duration bars are deliberately NOT done — only
+`FADE_SCREEN` and `SET_HINT_DETAILS` have one and Cody called it unnecessary
+(2026-08-04); revisit only if it starts to bite.
+
 Working model is "the clock is the cursor" — scrub, then click. Picking hits
 entities, spawned objects and the ground; the ground pick reports a cutscene
 tile and the plane whose mesh was hit. An entity stays "active" across a tile
@@ -433,7 +457,19 @@ Not done / worth a look when testing:
   (`repointActions` drops the actions that used the removed entry and shifts
   higher indices down) — there is no route-removal UI yet, so nothing can
   trigger it, but adding one needs the same treatment. Camera paths likewise.
-- **No region picker** for map areas — the table takes raw region tile coords.
+- **Region picker (2026-08-04): done for NEW cutscenes only.** Add on the
+  cutscenes entry now opens `CutsceneNewModal` — place source regions into the
+  13x13-chunk destination grid, one row per block, with a live preview of which
+  chunk each block claims; it expands to the four per-plane rows on create
+  (`areasForBlocks`). The units were confirmed against shipped cutscenes:
+  `regionX/Y` are TILE coords (region coord x 64), `width/length` are CHUNKS,
+  and the map is 13 chunks square (cutscene 0's 8x8 block at 0,0 plus a 5x5 at
+  8,8 pins it exactly). The editor's Map section uses the same picker
+  (`CutsceneAreaBlocks`, shared with the modal), recovering blocks from stored
+  rows via `blocksFromAreas` — which returns null, falling back to the raw
+  table, when the rows can't be expressed as whole-region blocks with matching
+  source/destination planes. No cutscene in the cache trips that: all 208 rows
+  group into 52 blocks of exactly 4 planes.
 - Field editing has no validation beyond min/max; a nonsense value saves.
 - `EXECUTE_SCRIPT` can be authored but does nothing (no cutscene script exists —
   see EDITOR.md).

@@ -42,7 +42,9 @@ import type { ObjectData } from './loaders/objects'
 import NpcViewer from './components/NpcViewer'
 import type { NpcData } from './loaders/npcs'
 import CutsceneViewer from './components/CutsceneViewer'
-import type { CutsceneData } from './loaders/cutscenes'
+import type { CutsceneAreaDef, CutsceneData } from './loaders/cutscenes'
+import { createCutsceneWithAreas } from './loaders/cutscenes'
+import CutsceneNewModal from './components/CutsceneNewModal'
 import VarbitViewer from './components/VarbitViewer'
 import VarbitPlanner from './components/VarbitPlanner'
 import type { VarbitData } from './loaders/varbits'
@@ -355,6 +357,11 @@ function App() {
   const [pendingNew, setPendingNew] = useState<{ entry: string; id: number } | null>(null)
   /** Add on the varbits entry opens the bit-layout planner instead of creating one. */
   const [varbitPlannerOpen, setVarbitPlannerOpen] = useState(false)
+  /** Add on the cutscenes entry asks which regions the scene is built from. */
+  const [cutsceneNewOpen, setCutsceneNewOpen] = useState(false)
+  /** A region something asked the world viewer to open on. The maps entry has
+   *  no item list, so a navigation to it carries a place instead of an id. */
+  const [mapGoto, setMapGoto] = useState<{ id: number; nonce: number } | null>(null)
 
   // Ctrl/Cmd+S saves whatever is being edited, app-wide: every editable viewer renders the
   // shared "Unsaved changes" bar (.save-bar) when dirty, so clicking its Save button is a
@@ -859,9 +866,28 @@ function App() {
       setVarbitPlannerOpen(true)
       return
     }
+    // A cutscene is meaningless without a map to play on, and the map is the one
+    // thing the editor can't infer later — so Add asks for it first. That's the
+    // whole difference between adding and editing one.
+    if (selectedEntry?.name === 'cutscenes' && cacheHandle) {
+      setCutsceneNewOpen(true)
+      return
+    }
     if (!(await confirmLeaveItem())) return
     await discardPendingNew()
     const item = await loader.createItem(entryHandle)
+    await stagePendingItem(loader, entryHandle, item)
+  }
+
+  /** The new-cutscene modal picked a map — write it and stage it like any Add. */
+  async function handleCreateCutscene(areas: CutsceneAreaDef[]) {
+    setCutsceneNewOpen(false)
+    const loader = selectedEntry ? getLoader(selectedEntry.name) : null
+    const entryHandle = await currentEntryHandle()
+    if (!loader || !entryHandle) return
+    if (!(await confirmLeaveItem())) return
+    await discardPendingNew()
+    const item = await createCutsceneWithAreas(entryHandle, areas)
     await stagePendingItem(loader, entryHandle, item)
   }
 
@@ -1064,6 +1090,12 @@ function App() {
   async function handleNavigateToItem(entryName: string, itemId: number): Promise<boolean> {
     const entry = entries.find((e) => e.name === entryName)
     if (!entry?.available) return false
+    // The world viewer owns its own position and has no items, so navigating to
+    // it means "show me this region" rather than "select this item".
+    if (entryName === 'maps') {
+      setMapGoto((prev) => ({ id: itemId, nonce: (prev?.nonce ?? 0) + 1 }))
+      return entry.id === selectedEntryId ? true : handleSelectEntry(entry.id)
+    }
     if (entry.id === selectedEntryId) return handleSelectItem(itemId)
     return handleSelectEntry(entry.id, itemId)
   }
@@ -1762,7 +1794,7 @@ function App() {
                 : selectedEntry?.name === 'native_libraries'
                 ? <NativeLibrariesViewer data={activeContent as NativeLibrariesData} />
                 : selectedEntry?.name === 'maps'
-                ? <MapViewer world={activeContent as WorldMapData} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
+                ? <MapViewer world={activeContent as WorldMapData} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} gotoRegion={mapGoto} />
                 : <pre className="content-json">{JSON.stringify(activeContent, null, 2)}</pre>
             ) : selectedItemContent != null ? (
               <>
@@ -1886,6 +1918,12 @@ function App() {
         </main>
       </div>
       {confirmDialogElement}
+      {cutsceneNewOpen && cacheHandle && (
+        <CutsceneNewModal
+          onCreate={handleCreateCutscene}
+          onClose={() => setCutsceneNewOpen(false)}
+        />
+      )}
       {varbitPlannerOpen && cacheHandle && (
         <VarbitPlanner
           rootHandle={cacheHandle}

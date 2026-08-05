@@ -192,6 +192,7 @@ export default function CutsceneViewer({ data, onNavigate, cacheRoot, onSave, on
         cacheRoot={cacheRoot ?? null}
         onSave={onSave}
         onDirtyChange={onDirtyChange}
+        onNavigate={onNavigate}
         onClose={() => setMode('preview')}
       />
     )

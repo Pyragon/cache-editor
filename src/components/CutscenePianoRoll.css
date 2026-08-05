@@ -1,0 +1,355 @@
+/* Piano roll over a cutscene's actions — time across, action kind down. */
+
+.piano-roll {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #14161d;
+  outline: none;
+}
+
+/* It takes keybinds, so it has to be able to hold focus and say that it does. */
+.piano-roll:focus-visible {
+  border-color: rgba(126, 184, 255, 0.7);
+  box-shadow: 0 0 0 1px rgba(126, 184, 255, 0.35);
+}
+
+.piano-roll-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.piano-roll-hint {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.piano-roll-hint kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(126, 184, 255, 0.12);
+  font-family: inherit;
+  font-size: 11px;
+  color: #7eb8ff;
+}
+
+.piano-roll-body {
+  display: flex;
+  align-items: stretch;
+}
+
+/* Fixed lane labels; only the track scrolls. */
+.piano-roll-lanes {
+  flex: none;
+  width: 74px;
+  border-right: 1px solid var(--border);
+}
+
+.piano-roll-ruler-spacer {
+  height: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.piano-roll-lane-label {
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.piano-roll-track {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: visible;
+  cursor: crosshair;
+}
+
+.piano-roll-canvas {
+  position: relative;
+}
+
+.piano-roll-ruler {
+  position: relative;
+  height: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.piano-roll-tick {
+  position: absolute;
+  top: 3px;
+  padding-left: 4px;
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.piano-roll-lane {
+  position: relative;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.piano-roll-lane:nth-child(even) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+/* Anchored at its cycle; the fan grows upward out of it. */
+.piano-roll-stack {
+  position: absolute;
+  top: 3px;
+}
+
+.piano-roll-cell {
+  display: block;
+  max-width: 150px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.piano-roll-cell.selected {
+  border-color: #fff;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
+}
+
+/* A collapsed stack is deliberately small and centred — it reads as a marker
+   ("something happens here") rather than as one of the actions inside it. */
+.piano-roll-cell.stacked {
+  min-width: 26px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.piano-roll-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Too little room before the next cell for a readable name — the colour and the
+   tooltip carry it instead. Still wide enough to be a comfortable click target. */
+.piano-roll-cell.bare {
+  min-width: 8px;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* The stack container caps the width; the cell fills whatever that leaves. */
+.piano-roll-stack > .piano-roll-cell {
+  max-width: 100%;
+}
+
+/* The fan, portalled to the body: the track is an overflow scroller, so a fan
+   nested in a lane is clipped at the top of the roll however tall it gets.
+   Position comes from the trigger's viewport rect, set inline. */
+.piano-roll-fan {
+  z-index: 60;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 2px;
+  padding: 3px;
+  min-width: max-content;
+  /* a moment with a dozen actions must not run off the top of the window */
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #1a1d26;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+}
+
+/* Each fanned cell leads with its own time — the whole point of opening one is
+   that the actions inside are at slightly different cycles. */
+.piano-roll-fan-time {
+  display: inline-block;
+  min-width: 34px;
+  margin-right: 6px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Lane colours, matching the action badges elsewhere. */
+.piano-roll-camera { background: rgba(126, 184, 255, 0.32); color: #cfe4ff; }
+.piano-roll-entity { background: rgba(126, 232, 160, 0.28); color: #d3f7e2; }
+.piano-roll-object { background: rgba(240, 179, 76, 0.28); color: #ffe7bd; }
+.piano-roll-gfx    { background: rgba(206, 140, 255, 0.28); color: #eeddff; }
+.piano-roll-sound  { background: rgba(255, 140, 180, 0.26); color: #ffd9e6; }
+.piano-roll-misc   { background: rgba(255, 255, 255, 0.14); color: var(--text-dim); }
+.piano-roll-end    { background: rgba(232, 106, 106, 0.3); color: #ffd6d6; }
+
+.piano-roll-cell:hover {
+  filter: brightness(1.35);
+}
+
+.piano-roll-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #7eb8ff;
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* The ghost is the pointer's position, not the clock's — dimmer and dashed so
+   the two are never confused at a glance. */
+.piano-roll-playhead.ghost {
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(126, 184, 255, 0.55) 0 4px,
+    transparent 4px 8px
+  );
+  z-index: 2;
+}
+
+/* ---- Cutscene modals (add action, camera, new map) ----------------------- */
+.cutscene-modal-body {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(96vw, 1240px);
+  max-height: 86vh;
+  overflow-y: auto;
+}
+
+/* Action picker: a wrapped grid of the type cells, coloured by lane so the
+   thing you click looks like the cell it will become on the roll. */
+.cutscene-modal-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cutscene-modal-type {
+  max-width: none;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.cutscene-modal-type em {
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.cutscene-modal-chosen {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* New-map modal: the block table beside the destination grid. */
+.cutscene-newmap {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+/* The table and its own add button, as one column beside the grid. */
+.cutscene-newmap-blocks {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Headers here are short labels that read badly broken across two lines, and
+   the numeric cells need room for a five-digit region id. */
+.cutscene-newmap th,
+.cutscene-newmap td {
+  white-space: nowrap;
+}
+
+/* NumberInput is a full-width wrapper around the field, so both need the floor
+   — a five-digit region id was being cut off at the table's natural width. The
+   steppers overlay ~41px on the right, which this has to clear too. */
+.cutscene-newmap .num-input,
+.cutscene-newmap .cell-input {
+  min-width: 88px;
+}
+
+/* The two chunk columns and the 0-3 ones never need that much. */
+.cutscene-newmap .cutscene-narrow .num-input,
+.cutscene-newmap .cutscene-narrow .cell-input {
+  min-width: 68px;
+}
+
+.cutscene-grid {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #14161d;
+}
+
+.cutscene-grid-row {
+  display: flex;
+  gap: 2px;
+}
+
+.cutscene-grid-cell {
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+}
+
+/* Only the UNCLAIMED squares get the empty fill. Setting it on every cell meant
+   this rule (later in the file, same specificity) beat the lane colour a placed
+   block hands it, so the grid always looked empty. */
+.cutscene-grid-cell.empty {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Row marker tying a block to its colour in the grid. */
+.cutscene-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+/* Per-block plane checkboxes in the map table. */
+.cutscene-planes {
+  white-space: nowrap;
+}
+
+.cutscene-planes .zoom-btn {
+  min-width: 24px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+/* Coord-mode toggle above the block table. */
+.cutscene-newmap-head {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+/* Snapshot cell in the cast / objects tables. */
+.cutscene-icon-cell {
+  width: 1%;
+  padding-right: 0;
+}
+
+.cutscene-defname {
+  color: var(--text);
+  white-space: nowrap;
+}

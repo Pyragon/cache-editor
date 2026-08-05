@@ -48,13 +48,28 @@ function withoutLights(env: RegionEnvironment): RegionEnvironment {
   return rest
 }
 
-export default function MapViewer({ world, onDirtyChange, onNavigate }: {
+export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion }: {
   world: WorldMapData
   onDirtyChange?: (dirty: boolean) => void
   /** jump to another entry's item (the 3D panel's View links) */
   onNavigate?: (entryName: string, itemId: number) => void
+  /** Region id to open on, from something that navigated here wanting a place
+   *  rather than the entry — e.g. a cutscene's map block. Bumped by the caller
+   *  so asking for the SAME region twice still moves the view back. */
+  gotoRegion?: { id: number; nonce: number } | null
 }) {
   const [coords, setCoords] = useState<WorldCoords>(HOME)
+
+  // Land on the middle of the requested region, so the whole of it is in view
+  // rather than its corner.
+  useEffect(() => {
+    if (!gotoRegion) return
+    setCoords({
+      x: ((gotoRegion.id >> 8) & 0xff) * 64 + 32,
+      y: (gotoRegion.id & 0xff) * 64 + 32,
+      plane: 0,
+    })
+  }, [gotoRegion])
   const [data, setData] = useState<MapData | null>(null)
   const [loadError, setLoadError] = useState('')
   const [terrain, setTerrain] = useState<MapData['terrain'] | null>(null)

@@ -8,6 +8,12 @@ import type { ActionField } from './cutsceneActionFields'
 import { NumberInput } from './defFields'
 import { CLOCK_UNITS, clockShort } from './cutsceneClock'
 import type { CutsceneClockUnit } from './cutsceneClock'
+import CutscenePianoRoll from './CutscenePianoRoll'
+import CutsceneAreaBlocks from './CutsceneAreaBlocks'
+import { areasForBlocks, blocksFromAreas } from '../loaders/cutscenes'
+import { useCutsceneDefInfo } from './useCutsceneDefInfo'
+import CutsceneAddActionModal from './CutsceneAddActionModal'
+import CutsceneCameraModal from './CutsceneCameraModal'
 import './CutsceneEditor.css'
 
 // Authoring surface for a cutscene: the same simulated 3D scene the preview
@@ -25,6 +31,8 @@ type Props = {
   cacheRoot: FileSystemDirectoryHandle | null
   onSave: (data: CutsceneData) => void
   onDirtyChange?: (dirty: boolean) => void
+  /** Jump to another entry — the map blocks use it to open the world viewer. */
+  onNavigate?: (entryName: string, itemId: number) => void
   /** Back to the read-only page. */
   onClose: () => void
 }
@@ -86,7 +94,7 @@ function repointActions(
   return { actions: kept, dropped }
 }
 
-export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange, onClose }: Props) {
+export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange, onNavigate, onClose }: Props) {
   const [draft, setDraft] = useState<CutsceneDef>(data.def)
   const [dirty, setDirty] = useState(false)
   const [selection, setSelection] = useState<Selection>(null)
@@ -99,6 +107,12 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
   const [unit, setUnit] = useState<CutsceneClockUnit>('cycles')
   const [note, setNote] = useState('')
   const scene = useRef<CutsceneSceneHandle | null>(null)
+  /** Which action the piano roll has highlighted, so clicking a cell and
+   *  editing its row are the same selection. */
+  const [selectedAction, setSelectedAction] = useState<number | null>(null)
+  /** Cycle the A / C keybinds fired at — non-null means that modal is open. */
+  const [addAtCycle, setAddAtCycle] = useState<number | null>(null)
+  const [cameraAtCycle, setCameraAtCycle] = useState<number | null>(null)
 
   const edit = useCallback((next: CutsceneDef) => {
     setDraft(next)
@@ -106,17 +120,32 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
     onDirtyChange?.(true)
   }, [onDirtyChange])
 
-  /** Add an action at the insertion cycle, with sensible starting fields. */
-  const addAction = useCallback((type: string, fields: Record<string, number | string> = {}) => {
+  /** Add an action at a cycle (the insertion cycle unless one is given), with
+   *  sensible starting fields. */
+  const addActionAt = useCallback((
+    cycle: number,
+    type: string,
+    fields: Record<string, number | string> = {},
+  ) => {
     const action: CutsceneActionDef = {
       typeId: actionTypeId(type),
       type,
-      lengthInCycles: insertCycle,
+      lengthInCycles: cycle,
       fields: { ...defaultFields(type), ...fields },
     }
     edit({ ...draft, actions: [...draft.actions, action].sort((a, b) => a.lengthInCycles - b.lengthInCycles) })
-    setNote(`Added ${type.toLowerCase().replace(/_/g, ' ')} at ${insertCycle}c`)
-  }, [draft, edit, insertCycle])
+    setNote(`Added ${type.toLowerCase().replace(/_/g, ' ')} at ${cycle}c`)
+  }, [draft, edit])
+
+  const addAction = useCallback((type: string, fields: Record<string, number | string> = {}) =>
+    addActionAt(insertCycle, type, fields), [addActionAt, insertCycle])
+
+  /** Clicking the roll moves both the sim and the insertion point — they are
+   *  the same cursor, which is the whole working model of this page. */
+  const scrubTo = useCallback((cycle: number) => {
+    setInsertCycle(cycle)
+    scene.current?.seek(cycle)
+  }, [])
 
   // ------------------------------------------------------------------ picking
 
@@ -350,6 +379,13 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
     [draft],
   )
 
+  const npcInfo = useCutsceneDefInfo(cacheRoot, draft.entities.map((e) => e.id).filter((id) => id >= 0), 'npcs')
+  const objectInfo = useCutsceneDefInfo(cacheRoot, draft.objects.map((o) => o.locId).filter((id) => id >= 0), 'objects')
+
+  /** The map as placed region blocks, or null when the rows can't be expressed
+   *  that way and the raw table has to stand in. */
+  const areaBlocks = useMemo(() => blocksFromAreas(draft.areas), [draft.areas])
+
   /** Camera-move actions, which are what pairs two paths into a shot. */
   const shots = useMemo(
     () => draft.actions
@@ -486,6 +522,20 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
             ? <CutscenePlayer def={draft} rootHandle={cacheRoot} unit={unit} sceneHandle={scene} onCycle={reportCycle} />
             : <p className="cutscene-note">Reopen the cache to edit this cutscene.</p>}
         </div>
+        <CutscenePianoRoll
+          actions={draft.actions}
+          durationCycles={durationCycles}
+          cycle={insertCycle}
+          unit={unit}
+          selectedIndex={selectedAction}
+          onScrub={scrubTo}
+          onSelectAction={setSelectedAction}
+          // Park the cursor before opening either modal: seeking also pauses,
+          // so a running clock can't move the insertion point out from under
+          // the shot you're about to capture.
+          onAddAt={(c) => { scrubTo(c); setAddAtCycle(c) }}
+          onCameraAt={(c) => { scrubTo(c); setCameraAtCycle(c) }}
+        />
       </section>
 
       <section className="item-section">
@@ -627,12 +677,14 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
                     <td>{f.lookAtMovementIndex}</td>
                     <td>{keyframes}</td>
                     <td>
-                      <button type="button" className="field-link-btn" onClick={() => addShotKeyframe(index)}>
-                        Add keyframe from view
-                      </button>
-                      <button type="button" className="field-link-btn" onClick={() => previewShot(index)}>
-                        Go to shot
-                      </button>
+                      <span className="anim-fit-actions">
+                        <button type="button" className="field-link-btn" onClick={() => addShotKeyframe(index)}>
+                          Add keyframe from view
+                        </button>
+                        <button type="button" className="field-link-btn" onClick={() => previewShot(index)}>
+                          Go to shot
+                        </button>
+                      </span>
                     </td>
                   </tr>
                 )
@@ -646,16 +698,10 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
       </section>
 
       <section className="item-section">
-        <div className="cutscene-section-head">
-          <h3>Cast — {draft.entities.length}</h3>
-          <span className="btn-pill">
-            <button type="button" className="zoom-btn" onClick={() => addEntity(-1)}>+ Player</button>
-            <button type="button" className="zoom-btn" onClick={() => addEntity(0)}>+ NPC</button>
-          </span>
-        </div>
+        <h3>Cast — {draft.entities.length}</h3>
         <div className="quest-table-wrap">
           <table className="quest-table">
-            <thead><tr><th>#</th><th>NPC id</th><th>Dev label</th><th /></tr></thead>
+            <thead><tr><th>#</th><th /><th>NPC id</th><th>Name</th><th>Dev label</th><th /></tr></thead>
             <tbody>
               {draft.entities.map((e, i) => (
                 <tr key={i} className={activeEntity === e.index ? 'linked-hover' : undefined}>
@@ -669,6 +715,13 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
                       {e.index}
                     </button>
                   </td>
+                  <td className="cutscene-icon-cell">
+                    {e.id < 0
+                      ? <span className="npc-model-row-icon" title="The player" />
+                      : npcInfo.get(e.id)?.icon
+                      ? <img className="npc-model-row-icon" src={npcInfo.get(e.id)!.icon!} alt="" />
+                      : <span className="npc-model-row-icon" />}
+                  </td>
                   <td>
                     <NumberInput
                       className="cell-input"
@@ -676,6 +729,9 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
                       min={-1}
                       onChange={(v) => edit({ ...draft, entities: draft.entities.map((x, j) => (j === i ? { ...x, id: v } : x)) })}
                     />
+                  </td>
+                  <td className="cutscene-defname">
+                    {e.id < 0 ? 'Player' : npcInfo.get(e.id)?.name ?? '…'}
                   </td>
                   <td>
                     <input
@@ -706,27 +762,31 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
                 </tr>
               ))}
               {draft.entities.length === 0 && (
-                <tr><td colSpan={4} className="cutscene-editor-empty">No cast yet — add the player or an NPC.</td></tr>
+                <tr><td colSpan={6} className="cutscene-editor-empty">No cast yet — add the player or an NPC.</td></tr>
               )}
             </tbody>
           </table>
         </div>
+        <div className="cutscene-editor-addrow">
+          <button type="button" className="add-row-btn" onClick={() => addEntity(-1)}>+ Player</button>
+          <button type="button" className="add-row-btn" onClick={() => addEntity(0)}>+ NPC</button>
+        </div>
       </section>
 
       <section className="item-section">
-        <div className="cutscene-section-head">
-          <h3>Objects — {draft.objects.length}</h3>
-          <span className="btn-pill">
-            <button type="button" className="zoom-btn" onClick={() => addObject(0, 10)}>+ Object</button>
-          </span>
-        </div>
+        <h3>Objects — {draft.objects.length}</h3>
         <div className="quest-table-wrap">
           <table className="quest-table">
-            <thead><tr><th>#</th><th>Loc id</th><th>Shape</th><th /></tr></thead>
+            <thead><tr><th>#</th><th /><th>Loc id</th><th>Name</th><th>Shape</th><th /></tr></thead>
             <tbody>
               {draft.objects.map((o, i) => (
                 <tr key={i}>
                   <td>{i}</td>
+                  <td className="cutscene-icon-cell">
+                    {objectInfo.get(o.locId)?.icon
+                      ? <img className="npc-model-row-icon" src={objectInfo.get(o.locId)!.icon!} alt="" />
+                      : <span className="npc-model-row-icon" />}
+                  </td>
                   <td>
                     <NumberInput
                       className="cell-input"
@@ -735,6 +795,7 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
                       onChange={(v) => edit({ ...draft, objects: draft.objects.map((x, j) => (j === i ? { ...x, locId: v } : x)) })}
                     />
                   </td>
+                  <td className="cutscene-defname">{objectInfo.get(o.locId)?.name ?? '…'}</td>
                   <td>
                     <NumberInput
                       className="cell-input"
@@ -761,18 +822,40 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
                 </tr>
               ))}
               {draft.objects.length === 0 && (
-                <tr><td colSpan={4} className="cutscene-editor-empty">No objects yet.</td></tr>
+                <tr><td colSpan={6} className="cutscene-editor-empty">No objects yet.</td></tr>
               )}
             </tbody>
           </table>
         </div>
+        <div className="cutscene-editor-addrow">
+          <button type="button" className="add-row-btn" onClick={() => addObject(0, 10)}>+ Object</button>
+        </div>
       </section>
 
       <section className="item-section">
-        <h3>Map areas — {draft.areas.length}</h3>
+        <h3>Map — {areaBlocks ? `${areaBlocks.length} region block${areaBlocks.length === 1 ? '' : 's'}` : `${draft.areas.length} rows`}</h3>
+        {areaBlocks ? (
+          <>
+            <p className="cutscene-note cutscene-editor-help">
+              Regions copied into the scene’s own map. Each block is one region placed at a destination
+              chunk; the four per-plane rows the format stores are generated from it.
+            </p>
+            <CutsceneAreaBlocks
+              blocks={areaBlocks}
+              onChange={(blocks) => edit({ ...draft, areas: areasForBlocks(blocks) })}
+              onNavigate={onNavigate}
+            />
+          </>
+        ) : (
+        <>
         <p className="cutscene-note cutscene-editor-help">
           Chunks copied out of a live region into the scene. One row per plane is the usual shape — the
           source tile is the region’s base corner, and the destination is measured in 8-tile chunks.
+        </p>
+        <p className="cutscene-note cutscene-editor-note">
+          These rows don’t fit the region-block grid — a source that isn’t a whole region, or a row
+          whose destination plane differs from its source plane — so they’re shown raw rather than
+          rewritten into something the grid can express.
         </p>
         <div className="quest-table-wrap">
           <table className="quest-table">
@@ -818,6 +901,8 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
         >
           + Add area
         </button>
+        </>
+        )}
       </section>
 
       <section className="item-section">
@@ -841,6 +926,30 @@ export default function CutsceneEditor({ data, cacheRoot, onSave, onDirtyChange,
           </table>
         </div>
       </section>
+
+      {addAtCycle != null && (
+        <CutsceneAddActionModal
+          cycle={addAtCycle}
+          unit={unit}
+          refOptions={refOptions}
+          onAdd={(type, fields) => addActionAt(addAtCycle, type, fields)}
+          onClose={() => setAddAtCycle(null)}
+        />
+      )}
+
+      {cameraAtCycle != null && (
+        <CutsceneCameraModal
+          def={draft}
+          cycle={cameraAtCycle}
+          unit={unit}
+          shots={shots}
+          freeCam={freeCam}
+          onNewShot={newShot}
+          onAddKeyframe={addShotKeyframe}
+          onGoToShot={previewShot}
+          onClose={() => setCameraAtCycle(null)}
+        />
+      )}
 
       {dirty && (
         <div className="save-bar">
