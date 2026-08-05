@@ -11,9 +11,13 @@ Open work only — completed passes live in git history and README.
 - **Hand-item override round-trip (2026-08-05):** darkan treats an EXPLICIT
   replacementShield/Weapon of 65535 as “empty the hand” and a missing opcode as
   “no override”, but the dump stores 65535 for both (15,773/17,186 sequences).
-  Check whether cryogen’s encoder skips the opcode at 65535 — if it always
-  writes it, every repacked animation empties hands; if it always skips it,
-  true empty-hands animations are lost in round-trip. One of the two is wrong.
+  CHECKED (2026-08-05): cryogen’s AnimationDefinitions defaults the fields to
+  65535 AND skips opcodes 6/7 on encode when the value is 65535 — so an
+  explicit empty-hands 65535 is conflated with “absent” at dump time and
+  dropped at repack. Fix: default to −1 like darkan, treat decoded 65535 as a
+  real value, emit the opcode whenever ≠ −1; then re-dump animations and
+  update the studio’s hand-item hints/defaults to offer 65535 as a real
+  “empty the hand” option.
 
 - **Keyframe tweening is PORTED (2026-07-28)** — `applyAnimationFrame` takes an
   optional next frame + elapsed/duration and blends per the client's
