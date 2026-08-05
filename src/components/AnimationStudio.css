@@ -415,6 +415,14 @@
   gap: 12px 20px;
 }
 
+/* Each option is a card, not floating prose. */
+.anim-studio-opt {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #14161d;
+}
+
 .anim-studio-opt > span {
   display: inline-block;
   min-width: 150px;

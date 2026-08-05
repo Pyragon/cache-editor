@@ -171,20 +171,50 @@ export default function AnimationStudio({ data, onClose }: Props) {
     return out
   }, [frames, compatVersion])
 
+  const [showLeftItem, setShowLeftItem] = useState(false)
+  const [showRightItem, setShowRightItem] = useState(false)
+  const itemTogglesRef = useRef({ left: false, right: false })
+  itemTogglesRef.current = { left: showLeftItem, right: showRightItem }
+  /** Read at load time; assigned once `seq` exists below. */
+  const seqRef = useRef<AnimationDef>(def)
+  const hadItemsRef = useRef(false)
+
+  /** The models an item shows when HELD — its equip models, not its icon.
+   *  Male set; held items share ids across sexes for nearly everything. */
+  const heldModelIds = useCallback(async (itemId: number | undefined): Promise<number[]> => {
+    if (root == null || itemId == null || itemId < 0 || itemId >= 65535) return []
+    try {
+      const dir = await resolveEntryHandle(root, getEntryPath('items'))
+      if (!dir) return []
+      const def2 = JSON.parse(await (await (await dir.getFileHandle(`${itemId}.json`)).getFile()).text()) as Record<string, number>
+      return [def2.maleEquip1, def2.maleEquip2, def2.maleEquip3].filter((m) => typeof m === 'number' && m >= 0)
+    } catch {
+      return []
+    }
+  }, [root])
+
   const loadModel = useCallback(async (ids: number[]) => {
     if (!root) return
     const wanted = ids.filter((id) => id >= 0)
     if (wanted.length === 0) return
     setModelError(null)
     try {
-      const loaded = await loadModelComposite(root, { modelIds: wanted })
+      // held-item models ride along while the toggles are on, so the pose is
+      // seen with the weapon the sequence will actually show
+      const toggles = itemTogglesRef.current
+      const extras = [
+        ...(toggles.left ? await heldModelIds(seqRef.current.leftHandItem) : []),
+        ...(toggles.right ? await heldModelIds(seqRef.current.rightHandItem) : []),
+      ]
+      hadItemsRef.current = extras.length > 0
+      const loaded = await loadModelComposite(root, { modelIds: [...wanted, ...extras] })
       if (!loaded.vertexSkins) { setModel(null); setModelError(`Model ${wanted.join(', ')} has no vertex groups — nothing to pose.`); return }
       setModel(loaded)
     } catch {
       setModel(null)
       setModelError(`Couldn't load model ${wanted.join(', ')}.`)
     }
-  }, [root])
+  }, [root, heldModelIds])
 
   const autoTried = useRef(false)
   useEffect(() => {
@@ -429,6 +459,16 @@ export default function AnimationStudio({ data, onClose }: Props) {
   /** The sequence as it will be written: last-saved def + pending edits. */
   const seq: AnimationDef = { ...savedDefRef.current, ...defEdits }
   const editSeq = (patch: Partial<AnimationDef>) => { setDefEdits((prev) => ({ ...prev, ...patch })); touch() }
+  seqRef.current = seq
+
+  // Re-fit the composite when the item toggles (or the items themselves)
+  // change; skipped while nothing held is or was in the mesh.
+  useEffect(() => {
+    if (!model || modelIds.length === 0) return
+    if (!showLeftItem && !showRightItem && !hadItemsRef.current) return
+    void loadModel(modelIds)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showLeftItem, showRightItem, seq.leftHandItem, seq.rightHandItem])
 
   /**
    * Add a frame after the current one, carrying its pose over.
@@ -829,6 +869,30 @@ export default function AnimationStudio({ data, onClose }: Props) {
               placeholder="model ids"
             />
             <button type="button" className="replace-btn" onClick={() => void loadModel(modelIds)}>Load</button>
+            <span className="btn-pill">
+              <button
+                type="button"
+                className={`zoom-btn${showLeftItem ? ' active' : ''}`}
+                disabled={seq.leftHandItem == null || seq.leftHandItem >= 65535}
+                title={seq.leftHandItem != null && seq.leftHandItem < 65535
+                  ? `Merge item ${seq.leftHandItem}’s held model into the preview`
+                  : 'No left hand item set on this sequence'}
+                onClick={() => setShowLeftItem((v) => !v)}
+              >
+                Left hand item
+              </button>
+              <button
+                type="button"
+                className={`zoom-btn${showRightItem ? ' active' : ''}`}
+                disabled={seq.rightHandItem == null || seq.rightHandItem >= 65535}
+                title={seq.rightHandItem != null && seq.rightHandItem < 65535
+                  ? `Merge item ${seq.rightHandItem}’s held model into the preview`
+                  : 'No right hand item set on this sequence'}
+                onClick={() => setShowRightItem((v) => !v)}
+              >
+                Right hand item
+              </button>
+            </span>
             {candidates.map((c, i) => (
               <button
                 key={i}
