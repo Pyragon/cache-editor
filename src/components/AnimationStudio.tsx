@@ -869,30 +869,9 @@ export default function AnimationStudio({ data, onClose }: Props) {
               placeholder="model ids"
             />
             <button type="button" className="replace-btn" onClick={() => void loadModel(modelIds)}>Load</button>
-            <span className="btn-pill">
-              <button
-                type="button"
-                className={`zoom-btn${showLeftItem ? ' active' : ''}`}
-                disabled={seq.leftHandItem == null || seq.leftHandItem >= 65535}
-                title={seq.leftHandItem != null && seq.leftHandItem < 65535
-                  ? `Merge item ${seq.leftHandItem}’s held model into the preview`
-                  : 'No left hand item set on this sequence'}
-                onClick={() => setShowLeftItem((v) => !v)}
-              >
-                Left hand item
-              </button>
-              <button
-                type="button"
-                className={`zoom-btn${showRightItem ? ' active' : ''}`}
-                disabled={seq.rightHandItem == null || seq.rightHandItem >= 65535}
-                title={seq.rightHandItem != null && seq.rightHandItem < 65535
-                  ? `Merge item ${seq.rightHandItem}’s held model into the preview`
-                  : 'No right hand item set on this sequence'}
-                onClick={() => setShowRightItem((v) => !v)}
-              >
-                Right hand item
-              </button>
-            </span>
+          </div>
+
+          <div className="anim-frame-candidates">
             {candidates.map((c, i) => (
               <button
                 key={i}
@@ -984,6 +963,34 @@ export default function AnimationStudio({ data, onClose }: Props) {
               gizmo={gizmoMode && gizmoPos ? { mode: gizmoMode, position: gizmoPos } : null}
               onGizmoTransform={onGizmoTransform}
               onGizmoDragging={onGizmoDragging}
+              toolbarExtra={<>
+                <button
+                  type="button"
+                  className={`model-toolbar-btn${showLeftItem ? ' active' : ''}`}
+                  disabled={!(seq.leftHandItem >= 0 && seq.leftHandItem < 65535)}
+                  title={seq.leftHandItem >= 0 && seq.leftHandItem < 65535
+                    ? `Show item ${seq.leftHandItem}’s held model on the pose`
+                    : seq.leftHandItem === 65535
+                    ? 'This animation EMPTIES the left hand — nothing to show'
+                    : 'No left-hand override on this sequence'}
+                  onClick={() => setShowLeftItem((v) => !v)}
+                >
+                  Left hand item
+                </button>
+                <button
+                  type="button"
+                  className={`model-toolbar-btn${showRightItem ? ' active' : ''}`}
+                  disabled={!(seq.rightHandItem >= 0 && seq.rightHandItem < 65535)}
+                  title={seq.rightHandItem >= 0 && seq.rightHandItem < 65535
+                    ? `Show item ${seq.rightHandItem}’s held model on the pose`
+                    : seq.rightHandItem === 65535
+                    ? 'This animation EMPTIES the right hand — nothing to show'
+                    : 'No right-hand override on this sequence'}
+                  onClick={() => setShowRightItem((v) => !v)}
+                >
+                  Right hand item
+                </button>
+              </>}
               hideHeader
             />
           ) : (
@@ -1226,7 +1233,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
         <div className="anim-studio-optgrid">
           <label className="anim-studio-opt">
             <span>Loop delay</span>
-            <NumberInput className="cell-input" value={seq.loopDelay} min={-1} onChange={(v) => editSeq({ loopDelay: v })} />
+            <NumberInput className="item-field-input" value={seq.loopDelay} min={-1} onChange={(v) => editSeq({ loopDelay: v })} />
             <button
               type="button"
               className="field-link-btn"
@@ -1244,16 +1251,23 @@ export default function AnimationStudio({ data, onClose }: Props) {
           </label>
           <label className="anim-studio-opt">
             <span>Max loops</span>
-            <NumberInput className="cell-input" value={seq.maxLoops} min={0} onChange={(v) => editSeq({ maxLoops: v })} />
+            <NumberInput className="item-field-input" value={seq.maxLoops} min={0} onChange={(v) => editSeq({ maxLoops: v })} />
             <em>Times the loop runs before the animation ends. 99 is the near-universal value; 1 plays through once.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Tweened</span>
-            <input
-              type="checkbox"
-              checked={seq.tweened === true}
-              onChange={(e) => { editSeq({ tweened: e.target.checked }); setTweened(e.target.checked) }}
-            />
+            <span className="btn-pill">
+              <button
+                type="button"
+                className={`zoom-btn${seq.tweened ? ' active' : ''}`}
+                onClick={() => { editSeq({ tweened: true }); setTweened(true) }}
+              >On</button>
+              <button
+                type="button"
+                className={`zoom-btn${seq.tweened ? '' : ' active'}`}
+                onClick={() => { editSeq({ tweened: false }); setTweened(false) }}
+              >Off</button>
+            </span>
             <em>
               Blend between keyframes instead of stepping — the transport’s preview toggle follows
               this. 8,211 of 17,186 sequences set it; a deliberately snappy animation should not.
@@ -1261,33 +1275,42 @@ export default function AnimationStudio({ data, onClose }: Props) {
           </label>
           <label className="anim-studio-opt">
             <span>Priority</span>
-            <NumberInput className="cell-input" value={seq.priority} min={-1} onChange={(v) => editSeq({ priority: v })} />
+            <NumberInput className="item-field-input" value={seq.priority} min={-1} onChange={(v) => editSeq({ priority: v })} />
             <em>Which animation wins when two want the same entity — higher beats lower. −1 is the common default.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Animating precedence</span>
-            <NumberInput className="cell-input" value={seq.animatingPrecedence} min={-1} onChange={(v) => editSeq({ animatingPrecedence: v })} />
+            <NumberInput className="item-field-input" value={seq.animatingPrecedence} min={-1} onChange={(v) => editSeq({ animatingPrecedence: v })} />
             <em>What shows when another animation is already playing. Darkan’s name; exact semantics untraced — −1 default.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Walking precedence</span>
-            <NumberInput className="cell-input" value={seq.walkingPrecedence} min={-1} onChange={(v) => editSeq({ walkingPrecedence: v })} />
+            <NumberInput className="item-field-input" value={seq.walkingPrecedence} min={-1} onChange={(v) => editSeq({ walkingPrecedence: v })} />
             <em>What shows while the entity is moving — whether the walk or this animation wins. Untraced beyond the name; −1 default.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Replay mode</span>
-            <NumberInput className="cell-input" value={seq.replayMode} min={0} max={2} onChange={(v) => editSeq({ replayMode: v })} />
+            <NumberInput className="item-field-input" value={seq.replayMode} min={0} max={2} onChange={(v) => editSeq({ replayMode: v })} />
             <em>Untraced beyond its values: 16,695 of 17,186 sequences store 2 (0 and 1 are rare). Change with care.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Left hand item</span>
-            <NumberInput className="cell-input" value={seq.leftHandItem} min={0} max={65535} onChange={(v) => editSeq({ leftHandItem: v })} />
-            <em>Item shown in the left hand while this plays (weapon/shield substitution). 65535 = no override.</em>
+            <NumberInput className="item-field-input" value={seq.leftHandItem} min={-1} max={65535} onChange={(v) => editSeq({ leftHandItem: v })} />
+            <em>
+              Darkan’s replacementShield — the LEFT hand. In the client an explicit 65535 EMPTIES
+              the hand and a missing value leaves it as equipped; the dump stores 65535 for both
+              (15,773 of 17,186 sequences have it — it is the dumped default). Any other value =
+              that item id shown instead.
+            </em>
           </label>
           <label className="anim-studio-opt">
             <span>Right hand item</span>
-            <NumberInput className="cell-input" value={seq.rightHandItem} min={0} max={65535} onChange={(v) => editSeq({ rightHandItem: v })} />
-            <em>Item shown in the right hand while this plays. 65535 = no override.</em>
+            <NumberInput className="item-field-input" value={seq.rightHandItem} min={-1} max={65535} onChange={(v) => editSeq({ rightHandItem: v })} />
+            <em>
+              Darkan’s replacementWeapon — the RIGHT hand. Same rule: explicit 65535 empties the
+              hand, absent leaves it alone, the dump writes 65535 for both. Any other value = that
+              item id shown instead.
+            </em>
           </label>
         </div>
       </section>

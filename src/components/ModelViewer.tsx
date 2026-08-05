@@ -124,6 +124,8 @@ type Props = {
   /** Click the mesh to report the model vertex nearest the hit — the studio
    *  turns that into "which part of the rig did they point at". */
   onPickVertex?: (vertexIndex: number) => void
+  /** Extra buttons for the viewer toolbar (rendered after Wireframe). */
+  toolbarExtra?: React.ReactNode
   /** Model vertex indices to mark with dots on top of the mesh — the frame
    *  editor uses it to answer "which part of the mesh does this transform
    *  slot actually move?". Follows the posed positions, and changing it never
@@ -315,7 +317,7 @@ function makeDotTexture(): THREE.Texture {
   return texture
 }
 
-export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds, highlightVertices, gizmo, onGizmoTransform, onGizmoDragging, onPickVertex }: Props) {
+export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds, highlightVertices, gizmo, onGizmoTransform, onGizmoDragging, onPickVertex, toolbarExtra }: Props) {
   // `world` is built inline by callers, so its identity churns every render —
   // the in-place apply effect keys off its VALUE instead.
   const worldKey = world ? JSON.stringify(world) : ''
@@ -1611,6 +1613,7 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
         >
           Wireframe
         </button>
+        {toolbarExtra}
         {display && (
           <button
             className={`model-toolbar-btn${applyPose ? ' active' : ''}`}

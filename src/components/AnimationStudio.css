@@ -440,3 +440,10 @@
   color: var(--text-dim);
   opacity: 0.75;
 }
+
+/* Option inputs: standalone size, beside their label. */
+.anim-studio-opt .num-input {
+  display: inline-block;
+  max-width: 150px;
+  vertical-align: middle;
+}

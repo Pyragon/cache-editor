@@ -8,6 +8,13 @@ Open work only — completed passes live in git history and README.
 
 ## Animations
 
+- **Hand-item override round-trip (2026-08-05):** darkan treats an EXPLICIT
+  replacementShield/Weapon of 65535 as “empty the hand” and a missing opcode as
+  “no override”, but the dump stores 65535 for both (15,773/17,186 sequences).
+  Check whether cryogen’s encoder skips the opcode at 65535 — if it always
+  writes it, every repacked animation empties hands; if it always skips it,
+  true empty-hands animations are lost in round-trip. One of the two is wrong.
+
 - **Keyframe tweening is PORTED (2026-07-28)** — `applyAnimationFrame` takes an
   optional next frame + elapsed/duration and blends per the client's
   `MeshRasterizer.method11266`: slot-ordered union of both keyframes, identity
