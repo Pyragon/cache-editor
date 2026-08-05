@@ -424,6 +424,12 @@ export default function AnimationStudio({ data, onClose }: Props) {
   /** Any edit: dirty, and whatever the last save said is stale. */
   const touch = () => { setDirty(true); setSaveNote('') }
 
+  /** Sequence-level edits (loop delay, hand items…) waiting for save. */
+  const [defEdits, setDefEdits] = useState<Partial<AnimationDef>>({})
+  /** The sequence as it will be written: last-saved def + pending edits. */
+  const seq: AnimationDef = { ...savedDefRef.current, ...defEdits }
+  const editSeq = (patch: Partial<AnimationDef>) => { setDefEdits((prev) => ({ ...prev, ...patch })); touch() }
+
   /**
    * Add a frame after the current one, carrying its pose over.
    *
@@ -526,8 +532,8 @@ export default function AnimationStudio({ data, onClose }: Props) {
     touch()
   }
 
-  const loopBackAt = def.loopDelay >= 0 && def.loopDelay <= frames.length
-    ? frames.length - def.loopDelay
+  const loopBackAt = seq.loopDelay >= 0 && seq.loopDelay <= frames.length
+    ? frames.length - seq.loopDelay
     : null
 
   // Frames can arrive without labels (state preserved across a hot reload from
@@ -616,6 +622,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
       const frameCount = src.frameDurations?.length ?? 0
       const def2: AnimationDef = {
         ...src,
+        ...defEdits,
         frameSetIds: updated.map((f) => f.setId),
         frameHashes: updated.map((f) => ((f.setId & 0xffff) << 16) | (f.fileId & 0xffff)),
         frameDurations: updated.map((f) => f.durationCycles),
@@ -635,6 +642,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
       // the written state is the new baseline: real file ids, positions as
       // source indices, and the session numbers compacted back to 1..n
       setFrames(updated.map((f, i) => ({ ...f, srcIndex: i, label: i + 1 })))
+      setDefEdits({})
       setDirty(false)
       setSaveNote(wrote > 0
         ? `Saved — ${wrote} frame file${wrote === 1 ? '' : 's'} written, sequence ${data.id} updated.`
@@ -647,6 +655,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
   }
 
   function discard() {
+    setDefEdits({})
     setDirty(false)
     setSaveNote('')
     setReloadNonce((n) => n + 1)
@@ -950,7 +959,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
             </button>
             <span className="map-sprite-hint">
               frame {frames[frameIndex]?.label ?? frameIndex + 1}/{frames.length} · {(totalCycles * 0.02).toFixed(2)}s
-              {def.tweened !== tweened && ` · the sequence says tweened: ${def.tweened ? 'on' : 'off'}`}
+              {seq.tweened !== tweened && ` · the sequence says tweened: ${seq.tweened ? 'on' : 'off'}`}
             </span>
           </div>
 
@@ -1117,7 +1126,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
 
           <p className="map-sprite-hint">
             {loopBackAt == null
-              ? `Plays once and stops (loop delay ${def.loopDelay}). To loop the whole thing, loop delay must equal the frame count — ${frames.length}.`
+              ? `Plays once and stops (loop delay ${seq.loopDelay}). To loop the whole thing, loop delay must equal the frame count — ${frames.length}.`
               : loopBackAt === 0
               ? 'Loops the whole animation — the last frame runs, then it starts again at frame 1.'
               : `Loops back to frame ${frames[loopBackAt]?.label ?? loopBackAt + 1}, so only the last ${frames.length - loopBackAt} frames repeat.`}
@@ -1143,6 +1152,81 @@ export default function AnimationStudio({ data, onClose }: Props) {
           )}
         </div>
       </div>
+
+      <section className="item-section">
+        <h3>Sequence options</h3>
+        <p className="map-sprite-hint">
+          How the client runs this animation — saved with it. Sounds, script hooks and the rest stay
+          on the raw animations page.
+        </p>
+        <div className="anim-studio-optgrid">
+          <label className="anim-studio-opt">
+            <span>Loop delay</span>
+            <NumberInput className="cell-input" value={seq.loopDelay} min={-1} onChange={(v) => editSeq({ loopDelay: v })} />
+            <button
+              type="button"
+              className="field-link-btn"
+              disabled={seq.loopDelay === frames.length}
+              title="Set the loop delay to the frame count, so the whole animation repeats"
+              onClick={() => editSeq({ loopDelay: frames.length })}
+            >
+              loop all
+            </button>
+            <em>
+              How much of the TAIL repeats: playback restarts at frame count − loop delay, not at
+              frame 1. −1 never loops (73% of sequences); {frames.length} loops this whole animation.
+              The amber region on the timeline follows this.
+            </em>
+          </label>
+          <label className="anim-studio-opt">
+            <span>Max loops</span>
+            <NumberInput className="cell-input" value={seq.maxLoops} min={0} onChange={(v) => editSeq({ maxLoops: v })} />
+            <em>Times the loop runs before the animation ends. 99 is the near-universal value; 1 plays through once.</em>
+          </label>
+          <label className="anim-studio-opt">
+            <span>Tweened</span>
+            <input
+              type="checkbox"
+              checked={seq.tweened === true}
+              onChange={(e) => { editSeq({ tweened: e.target.checked }); setTweened(e.target.checked) }}
+            />
+            <em>
+              Blend between keyframes instead of stepping — the transport’s preview toggle follows
+              this. 8,211 of 17,186 sequences set it; a deliberately snappy animation should not.
+            </em>
+          </label>
+          <label className="anim-studio-opt">
+            <span>Priority</span>
+            <NumberInput className="cell-input" value={seq.priority} min={-1} onChange={(v) => editSeq({ priority: v })} />
+            <em>Which animation wins when two want the same entity — higher beats lower. −1 is the common default.</em>
+          </label>
+          <label className="anim-studio-opt">
+            <span>Animating precedence</span>
+            <NumberInput className="cell-input" value={seq.animatingPrecedence} min={-1} onChange={(v) => editSeq({ animatingPrecedence: v })} />
+            <em>What shows when another animation is already playing. Darkan’s name; exact semantics untraced — −1 default.</em>
+          </label>
+          <label className="anim-studio-opt">
+            <span>Walking precedence</span>
+            <NumberInput className="cell-input" value={seq.walkingPrecedence} min={-1} onChange={(v) => editSeq({ walkingPrecedence: v })} />
+            <em>What shows while the entity is moving — whether the walk or this animation wins. Untraced beyond the name; −1 default.</em>
+          </label>
+          <label className="anim-studio-opt">
+            <span>Replay mode</span>
+            <NumberInput className="cell-input" value={seq.replayMode} min={0} max={2} onChange={(v) => editSeq({ replayMode: v })} />
+            <em>Untraced beyond its values: 16,695 of 17,186 sequences store 2 (0 and 1 are rare). Change with care.</em>
+          </label>
+          <label className="anim-studio-opt">
+            <span>Left hand item</span>
+            <NumberInput className="cell-input" value={seq.leftHandItem} min={0} max={65535} onChange={(v) => editSeq({ leftHandItem: v })} />
+            <em>Item shown in the left hand while this plays (weapon/shield substitution). 65535 = no override.</em>
+          </label>
+          <label className="anim-studio-opt">
+            <span>Right hand item</span>
+            <NumberInput className="cell-input" value={seq.rightHandItem} min={0} max={65535} onChange={(v) => editSeq({ rightHandItem: v })} />
+            <em>Item shown in the right hand while this plays. 65535 = no override.</em>
+          </label>
+        </div>
+      </section>
 
       {saveNote && <p className="map-sprite-hint anim-studio-savenote">{saveNote}</p>}
 

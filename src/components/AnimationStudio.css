@@ -407,3 +407,28 @@
 .anim-studio-savenote {
   margin: 10px 0 0;
 }
+
+/* Sequence options: name + input on one line, the explanation under them. */
+.anim-studio-optgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px 20px;
+}
+
+.anim-studio-opt > span {
+  display: inline-block;
+  min-width: 150px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.anim-studio-opt > em {
+  display: block;
+  margin-top: 3px;
+  max-width: 52ch;
+  font-style: normal;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
