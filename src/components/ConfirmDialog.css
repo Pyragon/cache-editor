@@ -35,6 +35,15 @@
   color: var(--text-dim);
 }
 
+/* multi-paragraph messages (e.g. a removal that also renumbers) */
+.confirm-dialog-message p {
+  margin: 0 0 10px;
+}
+
+.confirm-dialog-message p:last-child {
+  margin-bottom: 0;
+}
+
 .confirm-dialog-actions {
   display: flex;
   justify-content: flex-end;

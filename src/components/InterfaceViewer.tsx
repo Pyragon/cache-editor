@@ -301,6 +301,18 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
 
   const list = useMemo(() => components.filter((c): c is IComponentDefinition => c != null), [components])
   const byId = useMemo(() => new Map(list.map((c) => [c.componentId, c])), [list])
+
+  /** Missing component ids below the highest used one. The client walks
+   *  components 0..n and dereferences every slot, so a gap crashes it on load.
+   *  Surfaced even with no pending edit, because an interface saved before
+   *  removal learned to renumber is already holed on disk and needs a way out. */
+  const idGaps = useMemo(() => {
+    let lastUsed = -1
+    for (let i = 0; i < components.length; i++) if (components[i] != null) lastUsed = i
+    const out: number[] = []
+    for (let i = 0; i < lastUsed; i++) if (components[i] == null) out.push(i)
+    return out
+  }, [components])
   // The sidebar tree: a depth-first walk so every component sits directly
   // under its parent (sibling order = components-array order, which is the
   // client's draw order). Orphans whose parent id doesn't resolve are
@@ -551,34 +563,18 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
    * Add a component as a child of the selected one (or at the top level when
    * nothing is selected).
    *
-   * The id is the first FREE index, not `length` — the components array is
-   * indexed BY componentId and may have holes, and reusing a hole keeps ids
-   * dense. Holes matter on save: the loader writes one file per non-null
-   * index and deletes the file for every null one, so an id is the filename.
+   * The id is always `length` — the array is dense and stays that way. There
+   * is no such thing as a free index to reuse: the client walks components
+   * 0..n and dereferences every slot, so removal renumbers rather than leaving
+   * a hole. A new component therefore lands last in its parent's draw order;
+   * drag it into place if that matters.
    */
   function addComponent(parentId: number | null) {
-    const id = freeIds(1)[0]
     const parentHash = parentId == null ? -1 : (data.id << 16) | parentId
-    setComponents((prev) => {
-      const next = [...prev]
-      while (next.length <= id) next.push(null)
-      next[id] = blankComponent(data.id, id, parentHash, 0)
-      return next
-    })
+    const id = components.length
+    setComponents((prev) => [...prev, blankComponent(data.id, prev.length, parentHash, 0)])
     setSelectedId(id)
     setIsDirty(true)
-  }
-
-  /** `count` unused component ids, filling holes before extending. The array
-   *  is indexed BY id and the index is the filename on save, so a hole is a
-   *  genuinely free id rather than something to skip past. */
-  function freeIds(count: number): number[] {
-    const out: number[] = []
-    for (let i = 0; i < components.length && out.length < count; i++) {
-      if (components[i] == null) out.push(i)
-    }
-    for (let i = components.length; out.length < count; i++) out.push(i)
-    return out
   }
 
   /**
@@ -593,10 +589,14 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
    * that exist.
    */
   function cloneComponent(id: number, withChildren: boolean) {
-    const subtree = withChildren ? subtreeOf(id) : [id] // deepest first
-    const ids = freeIds(subtree.length)
+    // deepest first, and only ids that actually resolve — the copies are
+    // appended in this order, so skipping a missing one mid-loop would leave
+    // the gap that removal now goes out of its way to prevent
+    const subtree = (withChildren ? subtreeOf(id) : [id]).filter((old) => components[old] != null)
+    if (subtree.length === 0) return
+    const base = components.length
     const remap = new Map<number, number>()
-    subtree.forEach((old, i) => remap.set(old, ids[i]))
+    subtree.forEach((old, i) => remap.set(old, base + i))
     const hashOf = (n: number) => (data.id << 16) | n
     const remapHash = (v: number | string) => {
       if (typeof v !== 'number' || v < 0 || (v >>> 16) !== data.id) return v
@@ -701,14 +701,20 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   /**
    * Rewrite ids across the interface: the components themselves, every
    * `parent` hash, every hook argument that names one, and drag/target
-   * settings.
+   * settings. Returns a fresh array indexed BY the new componentId.
    *
    * Interface-LOCAL only. A component's id is the low half of the hash any
    * script uses to reach it, and hooks in other interfaces hold those hashes
    * too — 548 references 746's components today. Nothing here can see those,
-   * which is why saving after a reorder warns.
+   * which is why saving after a renumber warns.
    */
-  function applyRenumber(remap: Map<number, number>, movedId: number, movedParentId: number) {
+  function rewriteIds(
+    source: (IComponentDefinition | null)[],
+    remap: Map<number, number>,
+    /** Force one component (named by its OLD id) onto a new parent — for a
+     *  drag that reparents as well as reorders. */
+    parentOverride?: { oldId: number; parentId: number },
+  ): (IComponentDefinition | null)[] {
     const hashOf = (id: number) => (data.id << 16) | id
     const remapHash = (v: number | string) => {
       if (typeof v !== 'number' || v < 0) return v
@@ -717,38 +723,53 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
       return to === undefined ? v : hashOf(to)
     }
 
-    setComponents((prev) => {
-      const moved: (IComponentDefinition | null)[] = []
-      for (const c of prev) {
-        if (!c) continue
-        const id = remap.get(c.componentId) ?? c.componentId
-        const parent = c.componentId === movedId
-          ? (movedParentId === -1 ? -1 : hashOf(movedParentId))
-          : (c.parent === -1 ? -1 : remapHash(c.parent) as number)
-        const next: IComponentDefinition = { ...c, componentId: id, parent }
-        for (const [key] of SCRIPT_FIELDS) {
-          const hook = c[key] as CS2Script | null
-          if (hook) (next[key] as CS2Script) = hook.map(remapHash)
-        }
-        if (c.targetParams && c.targetParams.interfaceId === data.id) {
-          const to = remap.get(c.targetParams.componentId)
-          if (to !== undefined) next.targetParams = { ...c.targetParams, componentId: to }
-        }
-        moved.push(next)
+    const moved: IComponentDefinition[] = []
+    for (const c of source) {
+      if (!c) continue
+      const id = remap.get(c.componentId) ?? c.componentId
+      const parent = parentOverride && c.componentId === parentOverride.oldId
+        ? (parentOverride.parentId === -1 ? -1 : hashOf(parentOverride.parentId))
+        : (c.parent === -1 ? -1 : remapHash(c.parent) as number)
+      const next: IComponentDefinition = { ...c, componentId: id, parent }
+      for (const [key] of SCRIPT_FIELDS) {
+        const hook = c[key] as CS2Script | null
+        if (hook) (next[key] as CS2Script) = hook.map(remapHash)
       }
-      // index must equal componentId — that index is the filename on save
-      const out: (IComponentDefinition | null)[] = []
-      for (const c of moved) {
-        if (!c) continue
-        while (out.length <= c.componentId) out.push(null)
-        out[c.componentId] = c
+      if (c.targetParams && c.targetParams.interfaceId === data.id) {
+        const to = remap.get(c.targetParams.componentId)
+        if (to !== undefined) next.targetParams = { ...c.targetParams, componentId: to }
       }
-      return out
-    })
+      moved.push(next)
+    }
+    // index must equal componentId — that index is the filename on save
+    const out: (IComponentDefinition | null)[] = []
+    for (const c of moved) {
+      while (out.length <= c.componentId) out.push(null)
+      out[c.componentId] = c
+    }
+    return out
+  }
+
+  function applyRenumber(remap: Map<number, number>, movedId: number, movedParentId: number) {
+    setComponents((prev) => rewriteIds(prev, remap, { oldId: movedId, parentId: movedParentId }))
     // follow the component the user actually dragged
     setSelectedId(remap.get(movedId) ?? movedId)
     setRenumbered(true)
     setIsDirty(true)
+  }
+
+  /** Does this component's hooks or drag target name any of `ids`? */
+  function referencesAny(c: IComponentDefinition, ids: ReadonlySet<number>): boolean {
+    for (const [key] of SCRIPT_FIELDS) {
+      const hook = c[key] as CS2Script | null
+      if (!hook) continue
+      for (const v of hook) {
+        if (typeof v === 'number' && v >= 0 && (v >>> 16) === data.id && ids.has(v & 0xffff)) return true
+      }
+    }
+    return c.targetParams != null
+      && c.targetParams.interfaceId === data.id
+      && ids.has(c.targetParams.componentId)
   }
 
   /** Would this drop be legal? Rejected up front so an impossible target
@@ -784,42 +805,116 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
   async function removeComponent(id: number) {
     const doomed = subtreeOf(id)
     const kids = doomed.length - 1
+    const doomedSet = new Set(doomed)
+
+    // Component ids must stay CONTIGUOUS. The client builds its draw list by
+    // walking the array with a plain `for (i = 0; i < components.length; i++)`
+    // and dereferencing every slot, so a gap is a crash on load, not untidiness
+    // — and 1,321 of the 1,322 interfaces in the cache are contiguous 0..n-1.
+    // So removal closes the gap: survivors keep their relative order and are
+    // renumbered down onto 0..n-1, with every hash rewritten to match.
+    const survivors = list.filter((c) => !doomedSet.has(c.componentId))
+    const remap = new Map<number, number>()
+    survivors.forEach((c, i) => { if (c.componentId !== i) remap.set(c.componentId, i) })
+
+    // Hooks aimed at something being removed can't be repointed anywhere
+    // sensible, and after the renumber those ids belong to a DIFFERENT
+    // component — so they don't dangle, they silently retarget. Name them.
+    const stale = survivors.filter((c) => referencesAny(c, doomedSet)).map((c) => c.componentId)
+
     // Always ask. Removal is the one edit here with no undo short of
     // discarding every other change too.
     if (!(await confirm({
       title: 'Remove component',
-      message: kids > 0
-        ? `Remove component ${id} and the ${kids} component${kids === 1 ? '' : 's'} inside it? Everything nested under it goes as well — left behind, they would point at a parent that no longer exists.`
-        : `Remove component ${id}?`,
+      message: (
+        <>
+          <p>
+            {kids > 0
+              ? `Remove component ${id} and the ${kids} component${kids === 1 ? '' : 's'} inside it? Everything nested under it goes as well — left behind, they would point at a parent that no longer exists.`
+              : `Remove component ${id}?`}
+          </p>
+          {remap.size > 0 && (
+            <p>
+              {remap.size} component{remap.size === 1 ? '' : 's'} will be renumbered to keep ids
+              contiguous — a gap crashes the client on load. References inside this interface are
+              rewritten; anything outside it still points at the old numbers.
+            </p>
+          )}
+          {stale.length > 0 && (
+            <p>
+              <strong>Warning:</strong> component{stale.length === 1 ? '' : 's'} {stale.join(', ')}
+              {stale.length === 1 ? ' references' : ' reference'} something being removed. Those
+              references will end up pointing at a different component — fix them after removing.
+            </p>
+          )}
+        </>
+      ),
       confirmLabel: kids > 0 ? `Remove all ${doomed.length}` : 'Remove',
       danger: true,
     }))) return
-    setComponents((prev) => {
-      const next = [...prev]
-      for (const id of doomed) if (id < next.length) next[id] = null
-      // trailing holes would keep the array long for no reason; the loader
-      // deletes their files either way, this just keeps ids tidy
-      while (next.length > 0 && next[next.length - 1] == null) next.pop()
-      return next
-    })
+
+    setComponents(() => rewriteIds(survivors, remap))
     setSelectedId(null)
+    if (remap.size > 0) setRenumbered(true)
     setIsDirty(true)
   }
 
   async function handleSave() {
-    // A reorder changed component IDS, and an id is the low half of every hash
-    // that reaches the component. References inside this interface were
-    // rewritten; references from ANYWHERE ELSE cannot be — not other
-    // interfaces' hooks, not hardcoded hashes in CS2 scripts, not server code.
-    // Worth a stop, because nothing about it fails loudly.
-    if (renumbered && !(await confirm({
-      title: 'Component ids changed',
-      message: `Reordering changed component ids in interface ${data.id}. Hashes inside this interface were updated, but anything OUTSIDE it that names those components — hooks on other interfaces, ids baked into CS2 scripts, server code — still points at the old numbers and will now reach the wrong component. Check before saving.`,
-      confirmLabel: 'Save anyway',
-      danger: true,
-    }))) return
+    let toSave = components
+
+    // Contiguity backstop. The client walks components with a plain
+    // `for (i = 0; i < components.length; i++)` and dereferences every slot, so
+    // a missing id crashes it on load — and the loader turns a null slot into a
+    // deleted file, which is exactly how that reaches disk. Removal renumbers
+    // to prevent it; this catches an interface that is ALREADY holed (one
+    // written before that fix) and offers to close the gaps on the way out.
+    const gaps = idGaps
+    if (gaps.length > 0) {
+      if (!(await confirm({
+        title: 'Component ids are not contiguous',
+        message: (
+          <>
+            <p>
+              Interface {data.id} is missing component{gaps.length === 1 ? '' : 's'} {gaps.join(', ')}{' '}
+              while higher ids exist. The client walks components 0..n and dereferences every slot,
+              so it would crash loading this.
+            </p>
+            <p>
+              Saving can close the gap{gaps.length === 1 ? '' : 's'} by renumbering the{' '}
+              {list.length} remaining components onto 0..{list.length - 1}, rewriting every parent
+              hash, hook argument and drag target inside this interface to match.
+            </p>
+            <p>
+              Anything OUTSIDE this interface that names these components — hooks on other
+              interfaces, ids baked into CS2 scripts, server code — still points at the old numbers
+              and will now reach the wrong component. Check before saving.
+            </p>
+          </>
+        ),
+        confirmLabel: 'Renumber and save',
+        danger: true,
+      }))) return
+      const remap = new Map<number, number>()
+      list.forEach((c, i) => { if (c.componentId !== i) remap.set(c.componentId, i) })
+      toSave = rewriteIds(list, remap)
+      setComponents(toSave)
+      setSelectedId(null)
+    } else if (renumbered) {
+      // A reorder changed component IDS, and an id is the low half of every hash
+      // that reaches the component. References inside this interface were
+      // rewritten; references from ANYWHERE ELSE cannot be — not other
+      // interfaces' hooks, not hardcoded hashes in CS2 scripts, not server code.
+      // Worth a stop, because nothing about it fails loudly.
+      if (!(await confirm({
+        title: 'Component ids changed',
+        message: `Reordering changed component ids in interface ${data.id}. Hashes inside this interface were updated, but anything OUTSIDE it that names those components — hooks on other interfaces, ids baked into CS2 scripts, server code — still points at the old numbers and will now reach the wrong component. Check before saving.`,
+        confirmLabel: 'Save anyway',
+        danger: true,
+      }))) return
+    }
+
     setIsSaving(true)
-    await onSave({ ...data, components })
+    await onSave({ ...data, components: toSave })
     setIsSaving(false)
     setIsDirty(false)
     setRenumbered(false)
@@ -1409,10 +1504,18 @@ export default function InterfaceViewer({ data, onSave, onDirtyChange, onNavigat
         />
       )}
 
-      {isDirty && (
+      {(isDirty || idGaps.length > 0) && (
         <div className="save-bar">
           <span className="save-bar-label">
-            Unsaved changes
+            {isDirty ? 'Unsaved changes' : 'Interface needs repair'}
+            {idGaps.length > 0 && (
+              <span
+                className="save-bar-warn"
+                title={`The client walks components 0..n and dereferences every slot, so a missing id crashes it on load. Saving offers to renumber the remaining components onto 0..${list.length - 1}.`}
+              >
+                missing component{idGaps.length === 1 ? '' : 's'} {idGaps.join(', ')}
+              </span>
+            )}
             {renumbered && (
               <span
                 className="save-bar-warn"
