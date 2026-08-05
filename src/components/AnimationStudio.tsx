@@ -4,16 +4,18 @@ import { frameFileId } from '../loaders/animations'
 import type { AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
 import type { AnimationFrameDef, AnimationFrameSetData } from '../loaders/animation_frame_sets'
 import type { ModelData } from '../loaders/models'
-import { buildRig, partForVertex, partLabel, partVertices } from '../loaders/animRig'
+import { buildRig, defaultPivotSlot, partForVertex, partLabel, partVertices, partsInTreeOrder, pivotParts } from '../loaders/animRig'
 import type { Rig } from '../loaders/animRig'
 import { applyAnimationFrame } from '../loaders/skeletalAnimation'
+import { applyGizmoDelta, ensureEntry, gizmoModeFor } from '../loaders/animPose'
+import type { GizmoDelta } from '../loaders/animPose'
 import { loadModelComposite } from '../loaders/npcComposite'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getLoader } from '../loaders'
 import { buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
 import { scanLabel } from '../loaders/scan'
 import type { ScanProgress } from '../loaders/scan'
-import { IntListInput } from './defFields'
+import { IntListInput, NumberInput } from './defFields'
 import ModelViewer from './ModelViewer'
 import type { CameraState } from './ModelViewer'
 import './AnimationStudio.css'
@@ -41,6 +43,13 @@ type StudioFrame = {
   fileId: number
   frame: AnimationFrameDef
   durationCycles: number
+  /**
+   * The number shown on the timeline. Assigned once and KEPT through
+   * reordering — if position renamed the cells, dragging #6 between 3 and 4
+   * instantly renumbered everything and you couldn't see that the drag worked.
+   * Save gets to compact them back to 1..n.
+   */
+  label: number
 }
 
 export default function AnimationStudio({ data, onClose }: Props) {
@@ -57,6 +66,24 @@ export default function AnimationStudio({ data, onClose }: Props) {
   const [modelError, setModelError] = useState<string | null>(null)
   const [selectedPart, setSelectedPart] = useState<number | null>(null)
   const [hoverPart, setHoverPart] = useState<number | null>(null)
+  /** Which channel of the selected part the handle drives. A part can carry
+   *  turn, move and scale at once, where a raw slot only ever had one. */
+  const [channelType, setChannelType] = useState(2)
+  const dragBase = useRef<{ index: number; x: number; y: number; z: number } | null>(null)
+  /** Pivot the user chose for the current selection, overriding the guess. */
+  const [pivotOverride, setPivotOverride] = useState<number | null>(null)
+  /** Tree order is the default because it's the only order in which the indent
+   *  means anything; ascending is for when you know a part number. */
+  const [sortMode, setSortMode] = useState<'tree' | 'id'>('tree')
+  const [playing, setPlaying] = useState(false)
+  /** Blend between frames instead of stepping. Seeded from the sequence's own
+   *  flag, because that is what the client will do when it plays this. */
+  const [tweened, setTweened] = useState(false)
+  /** Cycles into the CURRENT frame, for the blend and the playhead. */
+  const [elapsed, setElapsed] = useState(0)
+  /** Frame being dragged along the timeline, and where the pointer is. */
+  const [dragFrame, setDragFrame] = useState<{ from: number; grabX: number; x: number; target: number; cycle: number } | null>(null)
+  const trackRef = useRef<HTMLDivElement>(null)
   const [compatVersion, setCompatVersion] = useState(0)
   const [scanning, setScanning] = useState<ScanProgress | null>(null)
   const cameraStateRef = useRef<CameraState | null>(null)
@@ -92,7 +119,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
           const fileId = frameFileId(def, i)
           const frame = sets.get(setId)?.frames.get(fileId)
           if (!frame || frame.rawFallbackBytes) return
-          out.push({ setId, fileId, frame, durationCycles: durations[i] ?? 1 })
+          out.push({ setId, fileId, frame, durationCycles: durations[i] ?? 1, label: out.length + 1 })
         })
         if (out.length === 0) { setStatus('This animation names no readable frames.'); return }
 
@@ -101,6 +128,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
         if (cancelled) return
         setBase(loaded.def)
         setFrames(out)
+        setTweened(def.tweened === true)
         setStatus('')
       } catch (err) {
         if (!cancelled) setStatus(err instanceof Error ? err.message : 'Could not load this animation.')
@@ -158,10 +186,190 @@ export default function AnimationStudio({ data, onClose }: Props) {
   }
 
   // ----------------------------------------------------------------- posing
+  /** The part's channels, so the toolbar only offers handles it really has. */
+  const channels = useMemo(() => {
+    if (selectedPart == null || !rig) return []
+    return rig.parts[selectedPart].channels.filter((c) => gizmoModeFor(c.type) != null)
+  }, [selectedPart, rig])
+
+  // Keep the chosen channel on something the part actually has — rotate first,
+  // since that is what nearly every pose adjustment is.
+  useEffect(() => {
+    if (channels.length === 0) return
+    if (channels.some((c) => c.type === channelType)) return
+    setChannelType((channels.find((c) => c.type === 2) ?? channels[0]).type)
+  }, [channels, channelType])
+
+  const activeSlot = channels.find((c) => c.type === channelType)?.slot ?? null
+  const gizmoMode = gizmoModeFor(channelType)
+
   const posed = useMemo(() => {
     if (!model || !base || !current) return null
-    return applyAnimationFrame(model, base, current.frame)
-  }, [model, base, current])
+    // Tweening blends toward the NEXT frame by how far through this one we are.
+    // Only while playing: a still frame must show what it really stores, or you
+    // would be posing against a blend rather than the frame.
+    const next = tweened && playing && frames.length > 1
+      ? frames[(frameIndex + 1) % frames.length].frame
+      : null
+    return applyAnimationFrame(
+      model, base, current.frame, next,
+      next ? elapsed : 0, next ? Math.max(1, current.durationCycles) : 1,
+      undefined, activeSlot ?? undefined,
+    )
+  }, [model, base, current, activeSlot, tweened, playing, elapsed, frames, frameIndex])
+
+  // Playback: frames are held for their own duration (20ms cycles). Tweened
+  // sequences re-pose every rendered frame at the sub-cycle fraction, because
+  // stepping alone at 5 cycles a frame reads as a stutter however fast the
+  // scene draws.
+  useEffect(() => {
+    if (!playing || frames.length === 0) return
+    let raf = 0
+    let last = performance.now()
+    let index = frameIndex
+    let within = 0
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick)
+      within += (now - last) / 20
+      last = now
+      let guard = 0
+      while (within >= Math.max(1, frames[index].durationCycles) && guard++ < 64) {
+        within -= Math.max(1, frames[index].durationCycles)
+        index = (index + 1) % frames.length
+      }
+      setFrameIndex(index)
+      setElapsed(within)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+    // frameIndex seeds the loop; re-running on every advance would restart it
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, frames])
+
+  /**
+   * The pivot this rotation turns about. An entry that already exists carries
+   * its own — the animation's author chose it — so that wins; otherwise the
+   * user's pick, otherwise the guess.
+   */
+  const existingSkip = useMemo(() => {
+    if (!current || activeSlot == null) return -1
+    const i = current.frame.transformationIndices.indexOf(activeSlot)
+    return i >= 0 ? current.frame.skippedReferences[i] ?? -1 : -1
+  }, [current, activeSlot])
+
+  const pivotSlot = pivotOverride
+    ?? (existingSkip >= 0 ? existingSkip : null)
+    ?? (rig && selectedPart != null ? defaultPivotSlot(rig, selectedPart) : -1)
+
+  const pivotChoices = useMemo(() => (rig ? pivotParts(rig) : []), [rig])
+
+  /**
+   * Which parts actually turn about each pivot, read out of the animation's own
+   * frames. A pivot on its own tells you nothing — the useful question is "what
+   * moves around this?", and only the entries answer it, since the base records
+   * no link between a rotation and its joint.
+   */
+  const pivotUsers = useMemo(() => {
+    const out = new Map<number, Set<number>>()
+    if (!rig) return out
+    const partOfSlot = new Map<number, number>()
+    for (const part of rig.parts) for (const c of part.channels) partOfSlot.set(c.slot, part.id)
+    for (const f of frames) {
+      f.frame.transformationIndices.forEach((slot, i) => {
+        const skip = f.frame.skippedReferences[i] ?? -1
+        if (skip < 0) return
+        const part = partOfSlot.get(slot)
+        if (part == null) return
+        let set = out.get(skip)
+        if (!set) out.set(skip, set = new Set())
+        set.add(part)
+      })
+    }
+    return out
+  }, [frames, rig])
+
+  /** The parts turning about the pivot currently selected, if it is one. */
+  const usersOfSelected = useMemo(() => {
+    if (!rig || selectedPart == null) return []
+    const part = rig.parts[selectedPart]
+    if (part.poseable) return []
+    const slot = part.channels.find((c) => c.type === 0)?.slot
+    if (slot == null) return []
+    return [...(pivotUsers.get(slot) ?? [])]
+  }, [rig, selectedPart, pivotUsers])
+
+  // A different part means a different joint; don't carry the pick across.
+  useEffect(() => { setPivotOverride(null) }, [selectedPart, frameIndex])
+
+  /** Repoint the current transform at another joint, creating the entry if the
+   *  frame doesn't have one yet. */
+  function setPivot(slot: number) {
+    setPivotOverride(slot)
+    if (activeSlot == null || !current) return
+    const { frame: withEntry, index } = ensureEntry(current.frame, activeSlot, channelType, slot)
+    const skips = withEntry.skippedReferences.slice()
+    skips[index] = slot
+    setFrames((prev) => prev.map((f, i) => (
+      i === frameIndex ? { ...f, frame: { ...withEntry, skippedReferences: skips } } : f
+    )))
+  }
+
+  /** Pinned when the handle attaches — see the frame editor for why following
+   *  the live pivot makes the handle jump. */
+  const posedRef = useRef(posed)
+  posedRef.current = posed
+  const gizmoPos = useMemo((): [number, number, number] | null => {
+    if (activeSlot == null || gizmoMode == null || !model || !rig || selectedPart == null) return null
+    const at = posedRef.current
+    if ((channelType === 2 || channelType === 3) && at?.pivot) return at.pivot
+    const verts = partVertices(rig, model, selectedPart)
+    if (verts.size === 0) return at?.pivot ?? [0, 0, 0]
+    const X = at?.x ?? model.vertexX, Y = at?.y ?? model.vertexY, Z = at?.z ?? model.vertexZ
+    let sx = 0, sy = 0, sz = 0
+    for (const v of verts) { sx += X[v]; sy += Y[v]; sz += Z[v] }
+    return [Math.round(sx / verts.size), Math.round(sy / verts.size), Math.round(sz / verts.size)]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSlot, gizmoMode, model, rig, selectedPart, channelType, frameIndex, pivotSlot])
+
+  /** Grab: make sure the frame HAS an entry for this slot — posing a part the
+   *  frame never touched is the normal case when building an animation — and
+   *  remember its values to apply the drag against. */
+  function onGizmoDragging(dragging: boolean) {
+    if (!dragging) { dragBase.current = null; return }
+    if (activeSlot == null || !current) return
+    // A fresh rotate entry with no pivot turns about the origin — the model's
+    // feet — which is not what "raise the arm" means. Name the joint.
+    const pivot = channelType === 2 || channelType === 3 ? pivotSlot : -1
+    const { frame: withEntry, index } = ensureEntry(current.frame, activeSlot, channelType, pivot)
+    if (withEntry !== current.frame) {
+      setFrames((prev) => prev.map((f, i) => (i === frameIndex ? { ...f, frame: withEntry } : f)))
+    }
+    dragBase.current = {
+      index,
+      x: withEntry.transformationX[index],
+      y: withEntry.transformationY[index],
+      z: withEntry.transformationZ[index],
+    }
+  }
+
+  function onGizmoTransform(t: GizmoDelta) {
+    const b = dragBase.current
+    if (!b || !current) return
+    const next = applyGizmoDelta(channelType, { x: b.x, y: b.y, z: b.z }, t)
+    setFrames((prev) => prev.map((f, i) => {
+      if (i !== frameIndex) return f
+      const set = (arr: number[], v: number) => { const a = arr.slice(); a[b.index] = v; return a }
+      return {
+        ...f,
+        frame: {
+          ...f.frame,
+          transformationX: set(f.frame.transformationX, next.x),
+          transformationY: set(f.frame.transformationY, next.y),
+          transformationZ: set(f.frame.transformationZ, next.z),
+        },
+      }
+    }))
+  }
 
   const highlight = useMemo(() => {
     const part = hoverPart ?? selectedPart
@@ -177,12 +385,195 @@ export default function AnimationStudio({ data, onClose }: Props) {
     if (part != null) setSelectedPart(part)
   }, [rig, model])
 
-  const poseable = useMemo(
-    () => (rig ? rig.parts.filter((p) => p.poseable) : []),
-    [rig],
-  )
+  // Pivot-only parts are the JOINTS — they're what a rotation turns about, so
+  // hiding them was wrong. Shown alongside, marked, and not selectable as a
+  // thing to drag.
+  const listed = useMemo(() => {
+    if (!rig) return []
+    return sortMode === 'tree' ? partsInTreeOrder(rig) : [...rig.parts].sort((a, b) => a.id - b.id)
+  }, [rig, sortMode])
+  const poseable = useMemo(() => listed.filter((p) => p.poseable), [listed])
+
+
+  /** How many parts turn about this pivot marker in this animation. */
+  const pivotUsedBy = (p: { channels: { slot: number; type: number }[] }) => {
+    const slot = p.channels.find((c) => c.type === 0)?.slot
+    return slot == null ? 0 : (pivotUsers.get(slot)?.size ?? 0)
+  }
+
+  /**
+   * Add a frame after the current one, carrying its pose over.
+   *
+   * Duplicating is the point: an animation is a pose changing slightly, so
+   * starting each frame from the last one is the loop — a blank frame would
+   * snap the model back to its rest pose and you'd rebuild it every time.
+   * `fileId` is left at -1 to mark it as not yet on disk; save assigns real ones.
+   */
+  function addFrameAfter(i: number) {
+    setFrames((prev) => {
+      const src = prev[i]
+      if (!src) return prev
+      const copy: StudioFrame = {
+        setId: src.setId,
+        fileId: -1,
+        label: prev.reduce((m, f) => Math.max(m, f.label ?? 0), 0) + 1,
+        durationCycles: src.durationCycles,
+        // deep enough: every array a pose edit touches is replaced wholesale
+        frame: {
+          ...src.frame,
+          transformationIndices: [...src.frame.transformationIndices],
+          transformationX: [...src.frame.transformationX],
+          transformationY: [...src.frame.transformationY],
+          transformationZ: [...src.frame.transformationZ],
+          transformationFlags: [...src.frame.transformationFlags],
+          skippedReferences: [...src.frame.skippedReferences],
+        },
+      }
+      return [...prev.slice(0, i + 1), copy, ...prev.slice(i + 1)]
+    })
+    setFrameIndex(i + 1)
+  }
+
+  function removeFrame(i: number) {
+    setFrames((prev) => (prev.length <= 1 ? prev : prev.filter((_, j) => j !== i)))
+    setFrameIndex((cur) => Math.max(0, Math.min(cur, frames.length - 2)))
+  }
+
+  function setDuration(i: number, cycles: number) {
+    setFrames((prev) => prev.map((f, j) => (j === i ? { ...f, durationCycles: Math.max(1, cycles) } : f)))
+  }
+
+  /**
+   * Where playback returns to after the last frame, or null when it doesn't.
+   *
+   * The client restarts at `frameCount - loopDelay`, NOT at frame 0, so only
+   * the tail repeats. 73% of sequences use -1, which loops nothing — they play
+   * through once. Looping a whole walk cycle means loopDelay === frameCount.
+   */
+  /**
+   * How far apart two poses are, in transforms that don't match.
+   *
+   * The reason it matters: when an animation ends the entity snaps back to its
+   * stance, so a last frame that doesn't resemble the first produces a visible
+   * jump. Nothing in the format warns about it — it's an authoring concern —
+   * so the studio measures it instead of leaving you to spot it by eye.
+   */
+  function poseDifference(a: StudioFrame, b: StudioFrame): number {
+    const read = (f: StudioFrame) => {
+      const m = new Map<number, string>()
+      f.frame.transformationIndices.forEach((slot, i) => {
+        m.set(slot, `${f.frame.transformationX[i]},${f.frame.transformationY[i]},${f.frame.transformationZ[i]}`)
+      })
+      return m
+    }
+    const ma = read(a), mb = read(b)
+    let differ = 0
+    for (const [slot, v] of ma) if (mb.get(slot) !== v) differ++
+    for (const slot of mb.keys()) if (!ma.has(slot)) differ++
+    return differ
+  }
+
+  const endSnap = frames.length > 1 ? poseDifference(frames[0], frames[frames.length - 1]) : 0
+
+  /** Replace one frame's pose with another's, keeping its own timing. */
+  function copyPose(from: number, to: number) {
+    setFrames((prev) => {
+      const src = prev[from]
+      if (!src || !prev[to]) return prev
+      return prev.map((f, i) => (i !== to ? f : {
+        ...f,
+        frame: {
+          ...f.frame,
+          count: src.frame.count,
+          transformationCount: src.frame.transformationCount,
+          transformationIndices: [...src.frame.transformationIndices],
+          transformationX: [...src.frame.transformationX],
+          transformationY: [...src.frame.transformationY],
+          transformationZ: [...src.frame.transformationZ],
+          transformationFlags: [...src.frame.transformationFlags],
+          skippedReferences: [...src.frame.skippedReferences],
+        },
+      }))
+    })
+  }
+
+  const loopBackAt = def.loopDelay >= 0 && def.loopDelay <= frames.length
+    ? frames.length - def.loopDelay
+    : null
+
+  // Frames can arrive without labels (state preserved across a hot reload from
+  // before labels existed). Backfill instead of falling back at render time —
+  // a positional fallback shows 1,2,3 in every order, which is exactly the
+  // "did my drag even work" problem labels exist to solve.
+  useEffect(() => {
+    if (frames.length > 0 && frames.some((f) => f.label == null)) {
+      setFrames((prev) => prev.map((f, i) => (f.label == null ? { ...f, label: i + 1 } : f)))
+    }
+  }, [frames])
 
   const totalCycles = frames.reduce((n, f) => n + f.durationCycles, 0)
+
+  /** Ruler marks: labelled majors, with unlabelled minor stubs between them so
+   *  timing is readable anywhere on the track without counting. */
+  const ticks = useMemo(() => {
+    const step = [1, 2, 5, 10, 25, 50, 100, 250].find((v) => v * TIMELINE_PX >= 44) ?? 250
+    const majors: number[] = []
+    for (let c = 0; c <= totalCycles; c += step) majors.push(c)
+    const minorStep = step >= 5 ? step / 5 : 0
+    const minors: number[] = []
+    if (minorStep) for (let c = 0; c <= totalCycles; c += minorStep) if (c % step !== 0) minors.push(c)
+    return { majors, minors }
+  }, [totalCycles])
+
+  function cycleAt(clientX: number): number {
+    const el = trackRef.current
+    if (!el) return 0
+    const rect = el.getBoundingClientRect()
+    return Math.max(0, (clientX - rect.left + el.scrollLeft) / TIMELINE_PX)
+  }
+
+  /** Put the playhead where the pointer is — which is also how you restart, so
+   *  there is no separate button for it. */
+  function scrubTo(clientX: number) {
+    const cycle = cycleAt(clientX)
+    let at = 0
+    for (let i = 0; i < frames.length; i++) {
+      const end = at + frames[i].durationCycles
+      if (cycle < end || i === frames.length - 1) {
+        setFrameIndex(i)
+        setElapsed(Math.max(0, Math.min(cycle - at, frames[i].durationCycles)))
+        return
+      }
+      at = end
+    }
+  }
+
+  /** The frame under a pointer x. */
+  function frameAtX(clientX: number): number {
+    const cycle = cycleAt(clientX)
+    let at = 0
+    for (let i = 0; i < frames.length; i++) {
+      const end = at + frames[i].durationCycles
+      if (cycle < end) return i
+      at = end
+    }
+    return frames.length - 1
+  }
+
+  /** Drop a dragged frame where the pointer is. Everything after it shifts by
+   *  this frame's own duration on its own, because the layout is cumulative. */
+  function dropFrame(clientX: number) {
+    if (!dragFrame) return
+    const target = frameAtX(clientX)
+    if (target === dragFrame.from) return
+    setFrames((prev) => {
+      const next = [...prev]
+      const [moved] = next.splice(dragFrame.from, 1)
+      next.splice(target, 0, moved)
+      return next
+    })
+    setFrameIndex(target)
+  }
 
   if (status) {
     return (
@@ -221,21 +612,47 @@ export default function AnimationStudio({ data, onClose }: Props) {
 
       <div className="anim-studio-body">
         <div className="anim-studio-rig">
-          <h3>Rig</h3>
+          <div className="anim-studio-righead">
+            <h3>Rig</h3>
+            <span className="btn-pill">
+              <button
+                type="button"
+                className={`zoom-btn${sortMode === 'tree' ? ' active' : ''}`}
+                title="Each part followed by its children, indented by depth"
+                onClick={() => setSortMode('tree')}
+              >
+                Tree
+              </button>
+              <button
+                type="button"
+                className={`zoom-btn${sortMode === 'id' ? ' active' : ''}`}
+                title="By part number, flat — the indent would mean nothing in this order"
+                onClick={() => setSortMode('id')}
+              >
+                Ascending
+              </button>
+            </span>
+          </div>
           {rig == null ? <p className="anim-preview-status">No skeleton.</p> : (
             <ul className="anim-studio-parts">
-              {poseable.map((p) => (
+              {listed.map((p) => (
                 <li key={p.id}>
                   <button
                     type="button"
-                    className={`anim-studio-part${selectedPart === p.id ? ' active' : ''}`}
-                    style={{ paddingLeft: 8 + p.depth * 12 }}
+                    className={`anim-studio-part${selectedPart === p.id ? ' active' : ''}${p.poseable ? '' : ' pivot'}`}
+                    style={{ paddingLeft: sortMode === 'tree' ? 8 + Math.min(p.depth, 10) * 10 : 8 }}
                     title={`${p.channels.map((c) => TYPE_WORD[c.type] ?? c.type).join(', ')} · groups ${p.labels.join(', ')}`}
                     onMouseEnter={() => setHoverPart(p.id)}
+                    onDoubleClick={() => {
+                      const slot = p.channels.find((c) => c.type === 0)?.slot
+                      if (slot != null && !p.poseable) setPivot(slot)
+                    }}
                     onMouseLeave={() => setHoverPart((cur) => (cur === p.id ? null : cur))}
                     onClick={() => setSelectedPart(p.id)}
                   >
-                    {partLabel(rig, p.id)}
+                    {p.poseable
+                      ? partLabel(rig, p.id)
+                      : `${partLabel(rig, p.id)} · pivot${pivotUsedBy(p) > 0 ? ` · used by ${pivotUsedBy(p)}` : ' · unused here'}`}
                   </button>
                 </li>
               ))}
@@ -269,6 +686,70 @@ export default function AnimationStudio({ data, onClose }: Props) {
             )}
           </div>
           {modelError && <p className="anim-preview-status">{modelError}</p>}
+
+          {selectedPart != null && rig && (
+            <div className="anim-preview-toolbar">
+              <span className="sprite-zoom-label">{partLabel(rig, selectedPart)}</span>
+              {channels.length === 0 ? (
+                usersOfSelected.length > 0 ? (
+                  <>
+                    <span className="map-sprite-hint">a pivot — turned about by</span>
+                    {usersOfSelected.map((id) => (
+                      <button key={id} type="button" className="field-link-btn" onClick={() => setSelectedPart(id)}>
+                        {partLabel(rig, id)}
+                      </button>
+                    ))}
+                  </>
+                ) : (
+                  <span className="map-sprite-hint">
+                    a pivot, and nothing in this animation turns about it — select a part and choose it
+                    from “turns about” to use it
+                  </span>
+                )
+              ) : (
+                <span className="btn-pill">
+                  {channels.map((c) => (
+                    <button
+                      key={c.slot}
+                      type="button"
+                      className={`zoom-btn${channelType === c.type ? ' active' : ''}`}
+                      onClick={() => setChannelType(c.type)}
+                    >
+                      {TYPE_WORD[c.type] ?? c.type}
+                    </button>
+                  ))}
+                </span>
+              )}
+              {(channelType === 2 || channelType === 3) && (
+                <label className="anim-studio-pivot">
+                  <span>turns about</span>
+                  <select
+                    className="item-stackable-select"
+                    value={String(pivotSlot)}
+                    title="The joint this rotation pivots on. Pick the one nearest the part — a hand turning about the shoulder is what stretches the arm."
+                    onChange={(e) => setPivot(Number(e.target.value))}
+                  >
+                    <option value="-1">model origin (no pivot)</option>
+                    {/* Labelled by PART, the same number the rig list shows.
+                        The option's value is still the slot, because that is
+                        what an entry's `skip` names — but nobody should have to
+                        know both numbering systems to find a joint. */}
+                    {pivotChoices.map((p) => {
+                      const slot = p.channels.find((c) => c.type === 0)!.slot
+                      const used = pivotUsers.get(slot)?.size ?? 0
+                      return (
+                        <option key={slot} value={slot}>
+                          part {p.id} · {p.labels.length} group{p.labels.length === 1 ? '' : 's'}
+                          {used > 0 ? ` · used by ${used}` : ''}
+                        </option>
+                      )
+                    })}
+                  </select>
+                </label>
+              )}
+              <button type="button" className="field-link-btn" onClick={() => setSelectedPart(null)}>Deselect</button>
+            </div>
+          )}
           {model ? (
             <ModelViewer
               data={model}
@@ -276,29 +757,246 @@ export default function AnimationStudio({ data, onClose }: Props) {
               highlightVertices={highlight}
               cameraStateRef={cameraStateRef}
               onPickVertex={onPickVertex}
+              gizmo={gizmoMode && gizmoPos ? { mode: gizmoMode, position: gizmoPos } : null}
+              onGizmoTransform={onGizmoTransform}
+              onGizmoDragging={onGizmoDragging}
               hideHeader
             />
           ) : (
             <p className="anim-preview-status">Load a model rigged to this skeleton to start posing.</p>
           )}
 
-          <div className="anim-studio-frames">
-            {frames.map((f, i) => (
+          {/* A timeline, not a strip: cells are laid out ON a time axis, so
+              their width and position are when they happen, and the playhead
+              sweeps across it as the animation runs. */}
+          <div className="anim-studio-transport">
+            <span className="btn-pill">
               <button
-                key={i}
                 type="button"
-                className={`anim-frame-chip${i === frameIndex ? ' active' : ''}`}
-                title={`Frame ${i + 1} — set ${f.setId} file ${f.fileId}, ${f.durationCycles} cycles`}
-                onClick={() => setFrameIndex(i)}
-              >
-                {i + 1}
-              </button>
-            ))}
+                className="zoom-btn"
+                disabled={frameIndex === 0}
+                onClick={() => { setPlaying(false); setFrameIndex(frameIndex - 1); setElapsed(0) }}
+              ><span className="anim-studio-glyph">◀</span> Prev</button>
+              <button
+                type="button"
+                className={`zoom-btn anim-preview-play${playing ? ' active' : ''}`}
+                onClick={() => setPlaying((p) => !p)}
+              >{playing ? <><span className="anim-studio-glyph">⏸</span> Pause</> : <><span className="anim-studio-glyph">▶</span> Play</>}</button>
+              <button
+                type="button"
+                className="zoom-btn"
+                disabled={frameIndex >= frames.length - 1}
+                onClick={() => { setPlaying(false); setFrameIndex(frameIndex + 1); setElapsed(0) }}
+              >Next <span className="anim-studio-glyph">▶</span></button>
+            </span>
+            <button
+              type="button"
+              className={`zoom-btn${tweened ? ' active' : ''}`}
+              title="Blend between frames while playing, the way the client does for sequences with the tweened flag"
+              onClick={() => setTweened((t) => !t)}
+            >
+              Tweening {tweened ? 'on' : 'off'}
+            </button>
+            <span className="map-sprite-hint">
+              frame {frames[frameIndex]?.label ?? frameIndex + 1}/{frames.length} · {(totalCycles * 0.02).toFixed(2)}s
+              {def.tweened !== tweened && ` · the sequence says tweened: ${def.tweened ? 'on' : 'off'}`}
+            </span>
           </div>
+
+          <div className="anim-preview-toolbar">
+            <button
+              type="button"
+              className="add-row-btn"
+              title="Insert a new frame after this one, starting from the current pose"
+              onClick={() => addFrameAfter(frameIndex)}
+            >
+              + Add Frame
+            </button>
+            <button
+              type="button"
+              className="remove-btn"
+              disabled={frames.length <= 1}
+              title="Remove this frame — the frames after it close the gap"
+              onClick={() => removeFrame(frameIndex)}
+            >
+              × Remove Frame
+            </button>
+            <button
+              type="button"
+              className="field-link-btn"
+              disabled={frameIndex === 0}
+              title="Replace this frame's pose with frame 1's, keeping its timing"
+              onClick={() => copyPose(0, frameIndex)}
+            >
+              Reset to frame 1's pose
+            </button>
+            <label className="anim-studio-pivot">
+              <span>holds for</span>
+              <NumberInput
+                className="cell-input"
+                value={frames[frameIndex]?.durationCycles ?? 1}
+                min={1}
+                title="Cycles this frame is held — 20ms each, so 5 is a tenth of a second"
+                onChange={(v) => setDuration(frameIndex, v)}
+              />
+            </label>
+            <span className="map-sprite-hint">
+              {((frames[frameIndex]?.durationCycles ?? 0) * 0.02).toFixed(2)}s · {frames.length} frames
+            </span>
+          </div>
+
+          {/* Time runs left to right and a cell's width IS how long it's held.
+              Drag a cell to reorder — the frames after it shift by that frame's
+              duration on their own, because the layout is cumulative. Drag the
+              track to scrub, which is also how you restart. */}
+          <div className="anim-studio-timeline">
+            <div
+              ref={trackRef}
+              className="anim-studio-track"
+              style={{ width: Math.max(240, totalCycles * TIMELINE_PX + 24) }}
+              onPointerDown={(e) => {
+                if ((e.target as HTMLElement).closest('.anim-studio-cell')) return
+                e.currentTarget.setPointerCapture(e.pointerId)
+                setPlaying(false)
+                scrubTo(e.clientX)
+              }}
+              onPointerMove={(e) => {
+                if (dragFrame) setDragFrame({ ...dragFrame, x: e.clientX, target: frameAtX(e.clientX), cycle: cycleAt(e.clientX) })
+                else if (e.buttons === 1) scrubTo(e.clientX)
+              }}
+              onPointerUp={() => { if (dragFrame) dropFrame(dragFrame.x); setDragFrame(null) }}
+              onPointerCancel={() => setDragFrame(null)}
+            >
+              <div className="anim-studio-ruler">
+                {ticks.minors.map((c) => (
+                  <span key={`m${c}`} className="anim-studio-tick minor" style={{ left: c * TIMELINE_PX }} />
+                ))}
+                {ticks.majors.map((c) => (
+                  <span key={c} className="anim-studio-tick" style={{ left: c * TIMELINE_PX }}>
+                    {(c * 0.02).toFixed(2)}s
+                  </span>
+                ))}
+              </div>
+
+              {/* Major ticks continue down through the lane as faint gridlines,
+                  so a pose can be read against the ruler without a straightedge. */}
+              {ticks.majors.map((c) => (
+                <span key={`g${c}`} className="anim-studio-grid" style={{ left: c * TIMELINE_PX }} />
+              ))}
+
+              <div className="anim-studio-lane">
+                {loopBackAt != null && (
+                  <div
+                    className="anim-studio-looprgn"
+                    style={{
+                      left: frames.slice(0, loopBackAt).reduce((n, f) => n + f.durationCycles, 0) * TIMELINE_PX,
+                      width: frames.slice(loopBackAt).reduce((n, f) => n + f.durationCycles, 0) * TIMELINE_PX,
+                    }}
+                    title="The loop returns here — this stretch repeats"
+                  />
+                )}
+                {(() => {
+                  let at = 0
+                  return frames.map((f, i) => {
+                    const left = at * TIMELINE_PX
+                    at += f.durationCycles
+                    return (
+                      <button
+                        key={i}
+                        type="button"
+                        className={`anim-studio-cell${i === frameIndex ? ' active' : ''}${f.fileId < 0 ? ' fresh' : ''}${i === loopBackAt ? ' loopstart' : ''}${dragFrame?.from === i ? ' dragging' : ''}`}
+                        style={{ left, width: Math.max(10, f.durationCycles * TIMELINE_PX - 2) }}
+                        title={`Frame ${f.label ?? i + 1} · ${f.durationCycles} cycles (${(f.durationCycles * 0.02).toFixed(2)}s)${f.fileId < 0 ? ' · new' : ''} — drag to reorder`}
+                        onPointerDown={(e) => {
+                          e.stopPropagation()
+                          // capture on the TRACK: its move/up handlers keep
+                          // firing even when the pointer leaves it, so a drag
+                          // can't be cancelled by drifting a few pixels up
+                          trackRef.current?.setPointerCapture(e.pointerId)
+                          setPlaying(false)
+                          setFrameIndex(i)
+                          setElapsed(0)
+                          setDragFrame({ from: i, grabX: e.clientX, x: e.clientX, target: i, cycle: cycleAt(e.clientX) })
+                        }}
+                      >
+                        <span className="anim-studio-key" />
+                        <span className="anim-studio-hold" />
+                        <span className="anim-studio-cellbody">
+                          {f.durationCycles * TIMELINE_PX > 12 && <span className="anim-studio-cellno">{f.label ?? i + 1}</span>}
+                          {f.durationCycles * TIMELINE_PX > 64 && (
+                            <span className="anim-studio-cellms">{(f.durationCycles * 0.02).toFixed(2)}s</span>
+                          )}
+                        </span>
+                      </button>
+                    )
+                  })
+                })()}
+                <span className="anim-studio-end" style={{ left: totalCycles * TIMELINE_PX }} />
+                {dragFrame && dragFrame.target !== dragFrame.from && (
+                  <span
+                    className="anim-studio-dropind"
+                    style={{ left: frames.slice(0, dragFrame.target).reduce((n, f) => n + f.durationCycles, 0) * TIMELINE_PX }}
+                  />
+                )}
+                {/* The picked-up frame itself, riding under the pointer. Only
+                    once the pointer has really moved, or every click flashes it. */}
+                {dragFrame && Math.abs(dragFrame.x - dragFrame.grabX) > 4 && frames[dragFrame.from] && (
+                  <div
+                    className="anim-studio-ghost"
+                    style={{
+                      left: dragFrame.cycle * TIMELINE_PX - (frames[dragFrame.from].durationCycles * TIMELINE_PX) / 2,
+                      width: Math.max(14, frames[dragFrame.from].durationCycles * TIMELINE_PX),
+                    }}
+                  >
+                    <span className="anim-studio-key" />
+                    <span className="anim-studio-hold" />
+                    <span className="anim-studio-cellbody">
+                      <span className="anim-studio-cellno">{frames[dragFrame.from].label ?? dragFrame.from + 1}</span>
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div
+                className="anim-studio-playhead"
+                style={{ left: (frames.slice(0, frameIndex).reduce((n, f) => n + f.durationCycles, 0) + elapsed) * TIMELINE_PX }}
+              />
+            </div>
+          </div>
+
+          <p className="map-sprite-hint">
+            {loopBackAt == null
+              ? `Plays once and stops (loop delay ${def.loopDelay}). To loop the whole thing, loop delay must equal the frame count — ${frames.length}.`
+              : loopBackAt === 0
+              ? 'Loops the whole animation — the last frame runs, then it starts again at frame 1.'
+              : `Loops back to frame ${frames[loopBackAt]?.label ?? loopBackAt + 1}, so only the last ${frames.length - loopBackAt} frames repeat.`}
+          </p>
+          {frames.length > 1 && (
+            <p className={endSnap > 0 ? 'varbit-problem' : 'map-sprite-hint'}>
+              {endSnap === 0
+                ? 'The last frame matches the first, so the animation ends where it began — no snap when it hands back to the stance.'
+                : `The last frame differs from the first in ${endSnap} transform${endSnap === 1 ? '' : 's'}, so the model will jump when the animation ends and the stance takes over.`}
+            </p>
+          )}
+          {frames.length > 1 && endSnap > 0 && (
+            <div className="anim-studio-fixrow">
+              <button
+                type="button"
+                className="add-row-btn"
+                title="Copy frame 1's pose onto the last frame, so it lands where it started"
+                onClick={() => copyPose(0, frames.length - 1)}
+              >
+                Match the first frame
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
   )
 }
 
-const TYPE_WORD: Record<number, string> = { 0: 'pivot', 1: 'move', 2: 'turn', 3: 'scale' }
+/** Pixels per 20ms cycle on the timeline. */
+const TIMELINE_PX = 10
+
+const TYPE_WORD: Record<number, string> = { 0: 'pivot', 1: 'move', 2: 'rotate', 3: 'scale' }

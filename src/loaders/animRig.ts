@@ -156,12 +156,72 @@ export function partVertices(rig: Rig, model: ModelData, partId: number): Set<nu
   return out
 }
 
+/**
+ * The pivot a rotation of `partId` should turn about.
+ *
+ * A rotate entry names a type-0 slot in its `skip`, and the evaluator sets the
+ * origin to the centroid of THAT slot's groups before the turn runs. 93.9% of
+ * the 466,906 real rotate entries sampled do exactly this, and always to a
+ * type-0 slot; the pivot group is usually a DIFFERENT, smaller group than the
+ * one being rotated (419,597 vs 18,823) — you rotate the arm and pivot at the
+ * shoulder.
+ *
+ * So the best guess is the smallest pivot marker contained in the part: the
+ * joint at its base. Without one the origin stays wherever it was, which for a
+ * fresh entry is (0,0,0) — the model's feet.
+ */
+export function defaultPivotSlot(rig: Rig, partId: number): number {
+  const part = rig.parts[partId]
+  if (!part) return -1
+  const want = new Set(part.labels)
+  let best = -1
+  let bestSize = Infinity
+  for (const p of rig.parts) {
+    const pivot = p.channels.find((c) => c.type === 0)
+    if (!pivot) continue
+    let inside = true
+    for (const l of p.labels) if (!want.has(l)) { inside = false; break }
+    if (!inside) continue
+    if (p.labels.length < bestSize) { bestSize = p.labels.length; best = pivot.slot }
+  }
+  if (best >= 0) return best
+  return part.channels.find((c) => c.type === 0)?.slot ?? -1
+}
+
+/** Every pivot marker in the rig, for letting the user pick one. */
+export function pivotParts(rig: Rig): RigPart[] {
+  return rig.parts.filter((p) => p.channels.some((c) => c.type === 0))
+}
+
+/**
+ * The parts in TREE order — each followed by its descendants — which is the
+ * only order in which indenting by depth means anything. Stored order is slot
+ * order, so a depth-5 part can sit above its own parent and the indentation
+ * reads as noise.
+ *
+ * Roots come in stored order, and a base whose label sets partially overlap
+ * can't form a clean tree, so anything not reached by the walk is appended
+ * rather than dropped.
+ */
+export function partsInTreeOrder(rig: Rig): RigPart[] {
+  const out: RigPart[] = []
+  const seen = new Set<number>()
+  const walk = (id: number) => {
+    if (seen.has(id)) return
+    seen.add(id)
+    out.push(rig.parts[id])
+    for (const child of rig.parts[id].children) walk(child)
+  }
+  for (const p of rig.parts) if (p.parent === -1) walk(p.id)
+  for (const p of rig.parts) if (!seen.has(p.id)) out.push(p)
+  return out
+}
+
 /** A stable, readable name for a part. The cache stores none, so this describes
  *  it by what it is: how deep it sits and how much it moves. Good enough to tell
  *  parts apart in a list; the studio lets you rename them for a session. */
 export function partLabel(rig: Rig, partId: number): string {
   const part = rig.parts[partId]
   if (!part) return `part ${partId}`
-  const kind = part.depth === 0 ? 'root' : `depth ${part.depth}`
-  return `part ${partId} · ${kind} · ${part.labels.length} group${part.labels.length === 1 ? '' : 's'}`
+  return `part ${partId} · ${part.labels.length} group${part.labels.length === 1 ? '' : 's'}`
 }

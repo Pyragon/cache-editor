@@ -5,6 +5,7 @@ import { TRANSFORM_TYPE_HELP, TRANSFORM_TYPE_NAMES } from '../loaders/animation_
 import type { ModelData } from '../loaders/models'
 import { loadModelComposite } from '../loaders/npcComposite'
 import { applyAnimationFrame } from '../loaders/skeletalAnimation'
+import { applyGizmoDelta } from '../loaders/animPose'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getLoader } from '../loaders'
 import { buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
@@ -107,27 +108,6 @@ function describeDelta(type: number, x: number, y: number, z: number): string {
  */
 function slotsScanned(indices: number[]): number {
   return indices.length === 0 ? 0 : Math.max(...indices) + 1
-}
-
-/**
- * Gizmo drags arrive in THREE space; the frame stores RS deltas. The mesh is
- * mapped (x, -y, -z), which is a 180-degree turn about X, so conjugating each
- * rotation through it leaves X alone and negates Y and Z. Combined with the
- * evaluator's own conventions — X and Y are standard right-handed rotations
- * while Z is negated (checked against its trig, not assumed) — a three-space
- * rotation of phi about each axis lands as:
- *     three X -> RS x = +phi     three Y -> RS y = -phi     three Z -> RS z = +phi
- * Verified numerically to under a unit of fixed-point rounding.
- */
-const RS_PER_RADIAN = 16384 / (2 * Math.PI)
-
-/** Rotation deltas are stored PRE-shift: the client promotes them `<<2 & 0x3fff`
- *  at the point of use, so only the low 12 bits survive and the resolution is a
- *  quarter of a 14-bit step (about 0.09 degrees). */
-function packAngle(baseStored: number, deltaRadians: number): number {
-  const baseAngle = (baseStored << 2) & 0x3fff
-  const next = Math.round(baseAngle + deltaRadians * RS_PER_RADIAN)
-  return ((next % 16384) + 16384) % 16384 >> 2
 }
 
 /** Insert into a parallel array at `at`, without mutating the original. */
@@ -388,22 +368,7 @@ export default function AnimationFrameSetViewer({ data, onSave, onDirtyChange, o
     const base = dragBase.current
     if (base == null || gizmoEntry == null || selectedFileId == null || !frameBase || gizmoSlot == null) return
     const type = frameBase.transformationTypes[gizmoSlot]
-    let x = base.x, y = base.y, z = base.z
-    if (type === 0 || type === 1) {
-      // scene space is (x, -y, -z), so two axes come back negated
-      x = base.x + Math.round(t.dx)
-      y = base.y - Math.round(t.dy)
-      z = base.z - Math.round(t.dz)
-    } else if (type === 2) {
-      x = packAngle(base.x, t.rx)
-      y = packAngle(base.y, -t.ry)
-      z = packAngle(base.z, t.rz)
-    } else if (type === 3) {
-      // the stored value IS the multiplier in 128ths, so the handle scales it
-      x = Math.max(0, Math.round(base.x * t.sx))
-      y = Math.max(0, Math.round(base.y * t.sy))
-      z = Math.max(0, Math.round(base.z * t.sz))
-    }
+    const { x, y, z } = applyGizmoDelta(type, base, t)
     const target = draft.get(selectedFileId)
     if (!target) return
     const set = (arr: number[], v: number) => { const a = arr.slice(); a[gizmoEntry] = v; return a }

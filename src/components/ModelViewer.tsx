@@ -1172,6 +1172,7 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
           // orbiting while dragging a handle fights it
           controls.enabled = !e.value
           gizmoDragging = e.value as boolean
+          if (gizmoDragging) gestureUsedGizmo = true
           gizmoCbRef.current.onGizmoDragging?.(e.value as boolean)
           if (!e.value) {
             // Back to a clean slate so the next drag is measured from scratch —
@@ -1397,9 +1398,18 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     // drag, or orbiting would select something every time you let go.
     const pickRay = new THREE.Raycaster()
     let downAt = { x: 0, y: 0 }
-    const onPointerDown = (e: PointerEvent) => { downAt = { x: e.clientX, y: e.clientY } }
+    // A rotation drag swings out and back, so it can release within a few
+    // pixels of where it started — distance alone let a finished drag read as a
+    // click and select whatever was under the pointer. This is the reliable
+    // signal: the handle either took the gesture or it didn't.
+    let gestureUsedGizmo = false
+    const onPointerDown = (e: PointerEvent) => {
+      downAt = { x: e.clientX, y: e.clientY }
+      gestureUsedGizmo = false
+    }
     const onPointerUp = (e: PointerEvent) => {
       if (!pickRef.current) return
+      if (gestureUsedGizmo) return
       if (Math.abs(e.clientX - downAt.x) + Math.abs(e.clientY - downAt.y) > 4) return
       const rect = renderer.domElement.getBoundingClientRect()
       pickRay.setFromCamera(new THREE.Vector2(
