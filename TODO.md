@@ -28,6 +28,26 @@ Open work only — completed passes live in git history and README.
   - **Submesh gating** (`verticesSubmeshes`, restricting a transform to specific equipment pieces in a composite) — not built into `mergeModels()`'s output yet, so multi-part composites (identikit/equipment stacks) can't be animated with full correctness.
 - **Type-5 reveal limitation in ModelViewer's in-place path**: it can hide faces (collapse to a degenerate triangle) but can't REVEAL faces that were alpha-hidden at rest (they're never built into the buffer). The chathead preview rebuilds geometry per frame and handles both directions.
 - **Transform math not verified against the live client** — a careful line-by-line port of darkan source, but treat it as unverified until someone compares stepped poses against real client rendering on a rigged model.
+- **Frame-set editing, remaining stages.** Stage 1 (the visual frame editor —
+  live posed preview, frame stepping, hover-to-highlight the vertices a slot
+  moves, per-type delta units, add/remove transform entries) landed 2026-08-04.
+  See EDITOR.md's "Animation frame bases and frame sets" census for the numbers
+  behind the plan. Open:
+  - **Gizmos.** Select a slot → `TransformControls` at the current pivot →
+    dragging writes the 14-bit rotation / integer translation / ×128 scale back
+    into the frame. This is what makes animations authorable rather than typed.
+  - **glTF export (one-way).** Bake mode always works: one bone per vertex
+    group, flat, composed affine matrix per frame. A real bone tree is possible
+    for the 74.6% of bases whose slot label sets nest cleanly; the other 25.4%
+    partially overlap and can only be flat-baked.
+  - **Constrained glTF import.** Same model, same frame base, poses only — the
+    base is shared across many sets, so Blender must not restructure it. Alpha /
+    colour / billboard channels have no glTF representation and must be carried
+    over from the original frames; values requantize (no byte-identical repack
+    for edited frames); warn on shear, out-of-range and new-slot cases.
+  - **Slot add/remove in `AnimationFrameBaseViewer`** — the frame editor can add
+    an entry for an existing slot, but the base's slot list itself is fixed-length.
+    Note a base is shared by many frame sets, so growing one affects all of them.
 
 ## Identikits / Player Preview
 

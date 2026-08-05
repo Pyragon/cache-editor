@@ -107,6 +107,11 @@ type Props = {
   /** Hides the id/vertex-count header — for embeds where the surrounding panel
    *  already says what is being shown. */
   hideHeader?: boolean
+  /** Model vertex indices to mark with dots on top of the mesh — the frame
+   *  editor uses it to answer "which part of the mesh does this transform
+   *  slot actually move?". Follows the posed positions, and changing it never
+   *  rebuilds the scene. */
+  highlightVertices?: ReadonlySet<number> | null
 }
 
 // Per-particle size, tint and alpha need a shader — THREE.Points only supports a
@@ -293,7 +298,7 @@ function makeDotTexture(): THREE.Texture {
   return texture
 }
 
-export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds }: Props) {
+export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds, highlightVertices }: Props) {
   // `world` is built inline by callers, so its identity churns every render —
   // the in-place apply effect keys off its VALUE instead.
   const worldKey = world ? JSON.stringify(world) : ''
@@ -325,6 +330,11 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
   const applyWorldFnRef = useRef<((next: WorldRenderParams | null | undefined) => void) | null>(null)
   // Same again for pose bounds, which arrive after the scene is already built.
   const applyFramingFnRef = useRef<((next: PoseBounds | null | undefined) => void) | null>(null)
+  // And for the highlight overlay, which changes on every hover — read
+  // imperatively from a ref so a hover can't rebuild the scene either.
+  const applyHighlightFnRef = useRef<(() => void) | null>(null)
+  const highlightRef = useRef<ReadonlySet<number> | null>(null)
+  highlightRef.current = highlightVertices ?? null
   // Has the user driven the camera themselves? Auto-framing must not fight an
   // orbit someone set deliberately. This can't key off `cameraStateRef`, which
   // is written on EVERY scene teardown (so it's non-null after the first
@@ -1061,6 +1071,47 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     camera.updateProjectionMatrix()
     updateParticleScale(h)
 
+    // --- Highlight overlay: a dot per marked vertex, drawn over the mesh with
+    // depth testing off so it reads through the geometry. Packed into the front
+    // of a full-size buffer and bounded by the draw range, so a hover is one
+    // buffer write and no allocation. Added to `mesh` to inherit its centring.
+    const highlightPositions = new Float32Array(vertexCount * 3)
+    const highlightGeo = new THREE.BufferGeometry()
+    highlightGeo.setAttribute('position', new THREE.BufferAttribute(highlightPositions, 3))
+    highlightGeo.setDrawRange(0, 0)
+    const highlightMat = new THREE.PointsMaterial({
+      color: 0x7ee8ff, size: 7, sizeAttenuation: false,
+      depthTest: false, transparent: true, opacity: 0.9,
+    })
+    const highlightPoints = new THREE.Points(highlightGeo, highlightMat)
+    highlightPoints.frustumCulled = false
+    highlightPoints.renderOrder = 4
+    mesh.add(highlightPoints)
+
+    // The vertex arrays currently on screen (rest pose until something poses it).
+    let curX: ArrayLike<number> = vertexX
+    let curY: ArrayLike<number> = vertexY
+    let curZ: ArrayLike<number> = vertexZ
+
+    function writeHighlight() {
+      const marked = highlightRef.current
+      if (!marked || marked.size === 0) {
+        highlightGeo.setDrawRange(0, 0)
+        return
+      }
+      let n = 0
+      for (const v of marked) {
+        if (v < 0 || v >= vertexCount) continue
+        highlightPositions[n * 3]     = curX[v]
+        highlightPositions[n * 3 + 1] = -curY[v]
+        highlightPositions[n * 3 + 2] = -curZ[v]
+        n++
+      }
+      highlightGeo.setDrawRange(0, n)
+      highlightGeo.attributes.position.needsUpdate = true
+    }
+    applyHighlightFnRef.current = writeHighlight
+
     // --- Animated pose: rewrites the live position buffer in place (plus
     // billboard centres and particle-emitter/effector anchors) — no scene
     // rebuild. Colours, UVs and the centring offset stay at rest pose: UVs
@@ -1083,6 +1134,7 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
       const X = valid ? valid.x : vertexX
       const Y = valid ? valid.y : vertexY
       const Z = valid ? valid.z : vertexZ
+      curX = X; curY = Y; curZ = Z
       for (let i = 0; i < cornerVertex.length; i++) {
         const v = cornerVertex[i]
         positions[i * 3]     = X[v]
@@ -1167,6 +1219,8 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
         effector.y = Y[vertex]
         effector.z = Z[vertex]
       }
+      // marked vertices ride the pose, so the dots track the moving limb
+      writeHighlight()
     }
     applyPosedFnRef.current = applyPosed
 
@@ -1236,6 +1290,7 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     // A rebuild mid-animation (this render's closure has the current prop)
     // starts from the active pose instead of flashing the rest pose.
     if (posedVertices) applyPosed(posedVertices)
+    else writeHighlight()
 
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
@@ -1310,6 +1365,7 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
       applyPosedFnRef.current = null
       applyWorldFnRef.current = null
       applyFramingFnRef.current = null
+      applyHighlightFnRef.current = null
       if (cameraStateRef) {
         cameraStateRef.current = {
           position: [camera.position.x, camera.position.y, camera.position.z],
@@ -1321,6 +1377,8 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
       controls.dispose()
       renderer.dispose()
       geo.dispose()
+      highlightGeo.dispose()
+      highlightMat.dispose()
       // mesh textures live in textureCacheRef, not disposed per-rebuild — see its declaration
       for (const material of materials) material.dispose()
       for (const texture of spriteTextures) disposeTexture(texture)
@@ -1362,6 +1420,12 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
   useEffect(() => {
     applyFramingFnRef.current?.(poseBounds)
   }, [poseBounds])
+
+  // Nor does hovering a transform slot — highlightRef is already current by the
+  // time this runs (it's written during render).
+  useEffect(() => {
+    applyHighlightFnRef.current?.()
+  }, [highlightVertices])
 
   useEffect(() => {
     for (const material of matsRef.current) material.wireframe = wireframe

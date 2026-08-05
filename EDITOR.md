@@ -1924,3 +1924,78 @@ if_setonmouseover(get_comp(762, 19), script_38, "IIsii", [-2147483645, 49938553,
 arguments bind by type**: four `I`s and one `s`, matching `script_38`'s
 `(int0, int1, int2, int3, string0)` while the value array interleaves the
 string third. See "CS2 arguments bind by TYPE, not position".
+
+## Animation frame bases and frame sets — a census, and why Blender can't hold all of it (measured 2026-08-04)
+
+`skeletalAnimation.ts` already plays these client-exactly. This is what the
+data actually contains, measured over the whole dump — a full scan of all
+3,535 frame bases in `animations/bases`, and 86,609 frames sampled from
+`animations/frame_sets` (4,085 sets, ~500k frames total).
+
+**The mental model.** A frame base is not a bone tree. It's a numbered list of
+transform **slots**, executed in order against **one running pivot register**:
+
+- **type 0 (origin marker)** sets the pivot to the *centroid of its labelled
+  groups' currently-posed vertices*, plus a delta. It never moves geometry.
+- **1 / 2 / 3** translate / rotate / scale their groups about the current pivot.
+- Hierarchy is *emergent*, not declared: the torso slot runs earlier and its
+  `labels` list happens to contain the arm's groups.
+- Each entry may carry a **skip reference** re-establishing the pivot from a
+  *different* slot's live vertices before it runs.
+
+What `labels` means depends entirely on the slot type — vertex groups
+(`vertexSkins`) for 0/1/2/3, **face** groups (`faceSkins`) for 5/7, and
+**billboard** groups (the attachment's `depth` byte) for 8/9/10.
+
+**Slot-type census** (slots across all bases / share of bases using it):
+
+| type | slots | bases | in frames (86,609 sampled) |
+|---|---|---|---|
+| 0 origin | 69,428 | 99.7% | 62,736 entries |
+| 1 translate | 35,816 | 87.6% | 339,858 |
+| 2 rotate | 51,349 | 87.5% | 1,014,357 |
+| 3 scale | 25,212 | 79.4% | 148,675 — **38.4% non-uniform**, touched by 49.2% of frames |
+| 4 *unknown* | 3 | 0.1% | — |
+| 5 alpha | 26,279 | 76.4% | 153,584 — touched by **30.4% of frames** |
+| 7 colour | 1,096 | 6.1% | 14,993 |
+| 8/9/10 billboard | 1,715 | ~6% | 10,110 |
+
+**Type 4 exists** (3 slots, 3 bases) and is decoded by neither cryogen nor
+darkan, nor implemented in `applyTransform`. Preserved on save, inert in preview.
+
+**Verified frame invariants** (0 violations in 86,609 frames):
+- `transformationIndices` is **strictly ascending**. Both the decoder and
+  `resolveEntries`' tween walk advance through entries in slot order, so any
+  editor inserting an entry must insert *sorted*.
+- `count` is **exactly `maxSlot + 1`** — trailing all-zero flag bytes are
+  trimmed, not padded. `transformationCount` always equals the entry count.
+- `skippedReferences` is always parallel to the entries (max observed: 252).
+
+**What this means for a Blender / glTF round-trip.** Every vertex belongs to
+exactly one group (`vertexSkins[v]` is a single id) and every op is affine, so
+per frame each group undergoes one composed affine matrix — rigid, weight-1.0
+skinning models the system exactly, and one bone per vertex group with baked
+matrices always works for *viewing*. Three things do not survive:
+
+1. **Alpha (type 5) is in 30.4% of frames**, plus colour and billboard
+   channels. Blender skeletal animation cannot express any of them; they must
+   be preserved from the original frames and merged back on import, or edited
+   here.
+2. **Shear.** Non-uniform scale composed with rotation produces shear, and
+   that combination is common. glTF animation channels and Blender pose bones
+   are both TRS-only, so an export bakes a decomposition approximation.
+3. **897 of 3,535 bases (25.4%) are not tree-able** — their deforming slots'
+   label sets *partially overlap* rather than nesting, so no parent/child
+   chain reproduces them. Those can only be flat baked bones, not a poseable rig.
+
+A frame base is also **shared across many frame sets**, so any import contract
+has to treat the rig as read-only and accept poses only.
+
+**Editable today:** `AnimationFrameSetViewer` poses a chosen model live, steps
+frames, highlights the vertices a hovered slot moves, shows each delta in its
+real units (degrees / 128ths / HSL steps), and edits every field including
+adding and removing transform entries. `AnimationFrameBaseViewer` edits the
+slot table (type, shadowed, submeshes, labels).
+
+**Not editable:** no gizmo — deltas are typed, not dragged. And the base's
+`count`/slot list can't be grown from the base viewer.

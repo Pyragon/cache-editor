@@ -1,18 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AnimationFrameBaseData, AnimationFrameBaseDef } from '../loaders/animation_frame_bases'
+import { TRANSFORM_TYPE_NAMES } from '../loaders/animation_frame_bases'
 import { NumberInput, IntListInput } from './defFields'
-
-const TRANSFORM_TYPE_NAMES: Record<number, string> = {
-  0: 'origin marker',
-  1: 'translate',
-  2: 'rotate',
-  3: 'scale',
-  5: 'alpha',
-  7: 'colour',
-  8: 'billboard',
-  9: 'rotate (2D)',
-  10: 'scale (2D)',
-}
 
 type Props = {
   data: AnimationFrameBaseData

@@ -45,12 +45,16 @@ export type AnimationFrameSetData = {
   id: number
   /** Keyed by raw file id within the archive (sparse, not necessarily 0..n contiguous). */
   frames: Map<number, AnimationFrameDef>
+  /** So the viewer can fetch animation_frame_bases + models itself for the
+   *  posed 3D preview — a frame is meaningless without the base it indexes
+   *  into and a mesh carrying the matching vertex groups. */
+  rootHandle?: FileSystemDirectoryHandle
 }
 
 const loader: CacheLoader = {
   streamItems: streamDirItems,
 
-  async loadItem(dirHandle, item) {
+  async loadItem(dirHandle, item, rootHandle) {
     const setDir = await dirHandle.getDirectoryHandle(String(item.id))
     const frames = new Map<number, AnimationFrameDef>()
     for await (const handle of setDir.values()) {
@@ -60,7 +64,7 @@ const loader: CacheLoader = {
       const file = await handle.getFile()
       frames.set(fileId, JSON.parse(await file.text()) as AnimationFrameDef)
     }
-    return { id: item.id, frames } satisfies AnimationFrameSetData
+    return { id: item.id, frames, rootHandle } satisfies AnimationFrameSetData
   },
 
   async saveItem(dirHandle, item, data) {
