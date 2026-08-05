@@ -121,6 +121,9 @@ type Props = {
   /** True on grab, false on release — the caller snapshots a baseline on grab
    *  and the handle resets to identity on release. */
   onGizmoDragging?: (dragging: boolean) => void
+  /** Click the mesh to report the model vertex nearest the hit — the studio
+   *  turns that into "which part of the rig did they point at". */
+  onPickVertex?: (vertexIndex: number) => void
   /** Model vertex indices to mark with dots on top of the mesh — the frame
    *  editor uses it to answer "which part of the mesh does this transform
    *  slot actually move?". Follows the posed positions, and changing it never
@@ -312,7 +315,7 @@ function makeDotTexture(): THREE.Texture {
   return texture
 }
 
-export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds, highlightVertices, gizmo, onGizmoTransform, onGizmoDragging }: Props) {
+export default function ModelViewer({ data, display, world, posedVertices, cameraStateRef, statsExtra, fitScale = 2.5, hideHeader, poseBounds, highlightVertices, gizmo, onGizmoTransform, onGizmoDragging, onPickVertex }: Props) {
   // `world` is built inline by callers, so its identity churns every render —
   // the in-place apply effect keys off its VALUE instead.
   const worldKey = world ? JSON.stringify(world) : ''
@@ -354,6 +357,8 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
   gizmoCbRef.current = { onGizmoTransform, onGizmoDragging }
   const gizmoRef = useRef(gizmo)
   gizmoRef.current = gizmo
+  const pickRef = useRef(onPickVertex)
+  pickRef.current = onPickVertex
   const highlightRef = useRef<ReadonlySet<number> | null>(null)
   highlightRef.current = highlightVertices ?? null
   // Has the user driven the camera themselves? Auto-framing must not fight an
@@ -1386,6 +1391,38 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
     else writeHighlight()
     applyGizmo(gizmoRef.current)
 
+    // Click-to-pick. The geometry is non-indexed, so a hit's face corners ARE
+    // buffer corners and cornerVertex maps them straight back to model vertices;
+    // the nearest of the three is what the user was aiming at. Skipped after a
+    // drag, or orbiting would select something every time you let go.
+    const pickRay = new THREE.Raycaster()
+    let downAt = { x: 0, y: 0 }
+    const onPointerDown = (e: PointerEvent) => { downAt = { x: e.clientX, y: e.clientY } }
+    const onPointerUp = (e: PointerEvent) => {
+      if (!pickRef.current) return
+      if (Math.abs(e.clientX - downAt.x) + Math.abs(e.clientY - downAt.y) > 4) return
+      const rect = renderer.domElement.getBoundingClientRect()
+      pickRay.setFromCamera(new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      ), camera)
+      const hit = pickRay.intersectObject(mesh, false)[0]
+      if (!hit?.face) return
+      const corners = [hit.face.a, hit.face.b, hit.face.c]
+      let best = corners[0]
+      let bestDist = Infinity
+      for (const c of corners) {
+        const dx = positions[c * 3] - hit.point.x - mesh.position.x
+        const dy = positions[c * 3 + 1] - hit.point.y - mesh.position.y
+        const dz = positions[c * 3 + 2] - hit.point.z - mesh.position.z
+        const d = dx * dx + dy * dy + dz * dz
+        if (d < bestDist) { bestDist = d; best = c }
+      }
+      pickRef.current(cornerVertex[best])
+    }
+    renderer.domElement.addEventListener('pointerdown', onPointerDown)
+    renderer.domElement.addEventListener('pointerup', onPointerUp)
+
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -1470,6 +1507,8 @@ export default function ModelViewer({ data, display, world, posedVertices, camer
           target: [controls.target.x, controls.target.y, controls.target.z],
         }
       }
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown)
+      renderer.domElement.removeEventListener('pointerup', onPointerUp)
       cancelAnimationFrame(animId)
       ro.disconnect()
       controls.dispose()

@@ -11,6 +11,7 @@ import { InstrumentPlayerCell } from './InstrumentPlayerCell'
 import type { NumFieldDef } from './defFields'
 import { NpcFitTable, SpotFitTable } from './AnimCompatTables'
 import AnimationPlaybackViewer from './AnimationPlaybackViewer'
+import AnimationStudio from './AnimationStudio'
 import './AnimationViewer.css'
 
 const GENERAL_FIELDS: NumFieldDef[] = [
@@ -35,6 +36,7 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [showPlayback, setShowPlayback] = useState(false)
+  const [studio, setStudio] = useState(false)
   // model the playback modal opens preloaded with (from a fit-table row)
   const [previewModelIds, setPreviewModelIds] = useState<number[] | null>(null)
   // null = still resolving, -1 = no frames / unresolvable
@@ -193,11 +195,23 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
   // shifts the rows — clear it whenever the frame list changes underneath it.
   useEffect(() => { setHoveredFrame(null) }, [data.id, frameCount, setHoveredFrame])
 
+  // The studio takes the whole page: it is a different way of working on the
+  // same animation, not a panel within the field editor.
+  if (studio) return <AnimationStudio data={data} onClose={() => setStudio(false)} />
+
   return (
     <div className="item-viewer">
       <div className="item-header">
         <div className="item-badges">
           <span className="enum-title">Animation {data.id}</span>
+          <button
+            type="button"
+            className="anim-skeleton-chip"
+            title="Pose this animation on a model instead of editing its fields"
+            onClick={() => setStudio(true)}
+          >
+            Open in studio
+          </button>
           <span className="item-stack-index">{frameCount} frames · {totalMs}ms</span>
           {skeleton != null && skeleton >= 0 && (
             <button

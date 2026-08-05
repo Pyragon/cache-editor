@@ -1,0 +1,74 @@
+/* Animation studio: rig on the left, model and frames on the right. */
+
+.anim-studio-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.anim-studio-rig {
+  flex: none;
+  width: 260px;
+  max-height: 70vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #14161d;
+}
+
+.anim-studio-rig h3 {
+  margin: 0 0 6px;
+}
+
+.anim-studio-parts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Indented by rig depth, so the containment nesting reads as a tree without
+   drawing one. */
+.anim-studio-part {
+  display: block;
+  width: 100%;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.anim-studio-part:hover {
+  background: rgba(126, 184, 255, 0.14);
+  color: var(--text);
+}
+
+.anim-studio-part.active {
+  background: rgba(126, 184, 255, 0.4);
+  color: #fff;
+}
+
+.anim-studio-stage {
+  flex: 1;
+  min-width: 0;
+}
+
+.anim-studio-stage .model-canvas {
+  height: 52vh;
+  min-height: 320px;
+}
+
+.anim-studio-frames {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  margin-top: 10px;
+  padding-bottom: 4px;
+}
