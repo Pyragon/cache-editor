@@ -5,6 +5,7 @@ import type { DecorationSet, ViewUpdate } from '@codemirror/view'
 import { javascript } from '@codemirror/lang-javascript'
 import { indentUnit } from '@codemirror/language'
 import { autocompletion, acceptCompletion } from '@codemirror/autocomplete'
+import { insertTab, indentLess } from '@codemirror/commands'
 import { linter, lintGutter } from '@codemirror/lint'
 import type { Diagnostic } from '@codemirror/lint'
 import { lintCS2 } from './cs2Lint'
@@ -274,7 +275,21 @@ export function CS2Viewer({ script, onSave, onDirtyChange, resolveScript }: CS2V
         javascript({ typescript: true }),
         oneDark,
         autocompletion({ override: [cs2Completions] }),
-        Prec.highest(keymap.of([{ key: 'Tab', run: acceptCompletion }])),
+        // CodeMirror deliberately leaves Tab unbound (it would trap keyboard
+        // focus), so without this it fell through to the browser and moved
+        // focus to the save bar mid-edit. Bindings for one key run in order
+        // until one returns true: accept an open completion first, otherwise
+        // insert an indent at the cursor (or indent the selected lines).
+        Prec.highest(keymap.of([
+          { key: 'Tab', run: acceptCompletion },
+          { key: 'Tab', run: insertTab, shift: indentLess },
+        ])),
+        // The escape hatch that binding costs us: Escape blurs the editor, so
+        // Tab can still reach the rest of the page. Lowest precedence, so
+        // Escape keeps closing the completion popup / tooltips first.
+        Prec.lowest(keymap.of([
+          { key: 'Escape', run: (view) => { view.contentDOM.blur(); return true } },
+        ])),
         // the dumped source is tab-indented — make Enter's auto-indent match
         indentUnit.of('	'),
         EditorState.tabSize.of(4),
