@@ -1999,3 +1999,79 @@ slot table (type, shadowed, submeshes, labels).
 
 **Not editable:** no gizmo — deltas are typed, not dragged. And the base's
 `count`/slot list can't be grown from the base viewer.
+
+## Varbits and varps — what makes a NEW one actually work (traced 2026-08-04)
+
+Sources: darkan-bot-refactor `config/varp/VarpbitType.kt`, `VarpTypeList.kt`,
+`vardomain/PlayerVarDomain.kt`, `config/SharedConfigsType.kt`.
+
+**A varp is one 32-bit int; a varbit is a named slice of it.** Decode is opcode
+1 only: `configIndex` (u16 — dumped as `baseVar`), `startBit` (u8), `endBit`
+(u8). Read is
+
+```kotlin
+val mask = BIT_MASKS[end - start]           // BIT_MASKS[i] = 2^(i+1) − 1
+return activeVars[varId] shr start and mask
+```
+
+- **`endBit` is INCLUSIVE.** Bits 0–5 is six bits holding 0–63. To store 0–47
+  you need 6 bits, so five such fields are bits 0–5, 6–11, 12–17, 18–23, 24–29
+  — 30 of the 32 bits of a single varp, with bits 30–31 left over.
+- **`BIT_MASKS` has 32 entries**, so `endBit − startBit ≤ 31` and `endBit ≥
+  startBit`. A negative width is an immediate array-index throw, not a
+  no-op.
+- **Out-of-range writes become 0, not clamped**:
+  `setVarBitValueFromServer` does `if (value < 0 || value > mask) value = 0`.
+
+**The varp must EXIST as a config file.** This is the part that isn't guessable:
+
+```kotlin
+activeVars = IntArray(TypeLists.VAR!!.size)          // PlayerVarDomain
+size = resourceProvider.getArchiveFileCount(VARS.id) // VarpTypeList
+```
+
+`getArchiveFileCount` returns `masterIndex.fileCounts[archive]` — **the number
+of varp FILES**, not highest-id-plus-one. So:
+
+- A varbit whose `baseVar` is ≥ the varp count indexes past the end of
+  `activeVars`. Pointing a new varbit at an unused id does *not* work; you must
+  create `config/vars/<id>.json` first.
+- **Varps must stay contiguous**, for the same reason: a gap makes the count
+  smaller than max-id + 1 and the top varps fall off the array. Same class of
+  bug as interface component ids. As dumped they are contiguous 0–2715
+  (2,716 varps), and varbits are contiguous 0–12290 (12,291).
+- A varp config can be empty — `VarpType` has only opcode 1 (a cp1252 char,
+  dumped as `paramType`) and opcode 5 (`clientCode`, u16), both optional. A
+  blank varp exists purely to extend the count.
+
+**Archive layout** (`SharedConfigsType`): `VARS(16)` with bit 0 — varps are
+files of config archive 16. `VARPBIT(14, 10)` — varbits live in their own index
+in archives of 1024 (`archiveId = id ushr 10`, `fileId = id and 1023`).
+
+**Editable today:** `VarbitViewer` edits baseVar/startBit/endBit, derives the
+width and value range, validates all of the above against a scanned index
+(`loaders/varbitUsage.ts`), draws a 32-bit occupancy map of the base varp
+showing which varbit owns each bit, and has a planner that takes a list of
+"field → largest value", computes the bit widths, packs them into free bits,
+and writes the varp + varbits itself.
+
+**Not editable:** nothing here sets varp VALUES — that's the server's job. The
+planner won't create a varp at an arbitrary id (it would break contiguity); it
+only appends the next one.
+
+**Repack gotcha (found + fixed 2026-08-04).** cryogen's
+`VarDefinitions.encode()` wrote BOTH opcodes unconditionally and omitted the
+opcode-0 terminator. Both opcodes are optional, and opcode 1 decodes through
+`cp1252ToChar`, which throws on a 0 byte — so every var with an unset
+paramType (2,715 of 2,716) repacked into a file the client rejects with
+`IllegalArgumentException: 0` at `VarDefinitions.decode`, crashing on the first
+var it read. The proof those vars have no opcode 1 originally: cryogen's own
+dumper decodes through the same throwing check, so a dump that succeeded can't
+have contained one. Fixed to omit each opcode at its default and to write the
+terminator — it was the only opcode-loop encoder in the repo missing it
+(28 others have it; `AnimationFrame`, `GameTips`, `Huffman`, `MidiInstrument`
+and `WorldMapArea` are fixed-layout formats that correctly have none).
+
+After changing an encoder, the dump manifest (`<dump dir>/.manifest`,
+size+mtime per entry) will consider untouched JSON unchanged and skip
+re-encoding it. Delete that file to force the folder to repack.

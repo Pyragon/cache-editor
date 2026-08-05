@@ -539,8 +539,13 @@ objects, particles, quick_chat_menus, quick_chat_messages, spot_animations,
 sprites, texture_definitions.
 
 **Add + Remove but no Clone (4):** animation_frame_bases, cs2,
-sound_effects_midi, varbits. These get Add/Remove free from
-`makeJsonDefLoader`; only `cloneItem` is missing, so they are the cheap ones.
+sound_effects_midi, varbits.
+
+`varbits` is the deliberate one: a clone would copy baseVar/startBit/endBit
+verbatim, so the copy claims exactly the same bits of the same var as its
+original and the two silently corrupt each other. Its loader omits `cloneItem`
+on purpose (see the comment there) — adding one goes through the planner on the
+Add button, which picks free bits. Don't "fix" it by restoring the clone.
 
 **None of the three (15):** animation_frame_sets, cutscenes, defaults, enums,
 font_metrics, huffman, interfaces, maps, midi_instruments, models, music,

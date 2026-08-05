@@ -44,6 +44,7 @@ import type { NpcData } from './loaders/npcs'
 import CutsceneViewer from './components/CutsceneViewer'
 import type { CutsceneData } from './loaders/cutscenes'
 import VarbitViewer from './components/VarbitViewer'
+import VarbitPlanner from './components/VarbitPlanner'
 import type { VarbitData } from './loaders/varbits'
 import StructViewer from './components/StructViewer'
 import type { StructData } from './loaders/config/structs'
@@ -352,6 +353,8 @@ function App() {
   const pendingNewRef = useRef<{ entryName: string; item: LoadedItem; content?: unknown } | null>(null)
   // State mirror of pendingNewRef, so the "not saved yet" banner re-renders.
   const [pendingNew, setPendingNew] = useState<{ entry: string; id: number } | null>(null)
+  /** Add on the varbits entry opens the bit-layout planner instead of creating one. */
+  const [varbitPlannerOpen, setVarbitPlannerOpen] = useState(false)
 
   // Ctrl/Cmd+S saves whatever is being edited, app-wide: every editable viewer renders the
   // shared "Unsaved changes" bar (.save-bar) when dirty, so clicking its Save button is a
@@ -849,6 +852,25 @@ function App() {
     const loader = selectedEntry ? getLoader(selectedEntry.name) : null
     const entryHandle = await currentEntryHandle()
     if (!loader?.createItem || !entryHandle) return
+    // A varbit is rarely useful on its own — it's a slice of a var's bits, and
+    // the bit layout is the actual decision. Offer the planner first; it also
+    // has "just add one on the end" for when it really is a single one.
+    if (selectedEntry?.name === 'varbits' && cacheHandle) {
+      setVarbitPlannerOpen(true)
+      return
+    }
+    if (!(await confirmLeaveItem())) return
+    await discardPendingNew()
+    const item = await loader.createItem(entryHandle)
+    await stagePendingItem(loader, entryHandle, item)
+  }
+
+  /** The planner's "just add one on the end" — the normal create path. */
+  async function handleAddVarbitSingle() {
+    setVarbitPlannerOpen(false)
+    const loader = selectedEntry ? getLoader(selectedEntry.name) : null
+    const entryHandle = await currentEntryHandle()
+    if (!loader?.createItem || !entryHandle) return
     if (!(await confirmLeaveItem())) return
     await discardPendingNew()
     const item = await loader.createItem(entryHandle)
@@ -881,6 +903,39 @@ function App() {
     if (!(await confirmLeaveItem())) return
     void discardPendingNew()
     setSelectedItemId(id)
+  }
+
+  // The varbit planner wrote its own files (and possibly a new var) — surface
+  // the new ids in the sidebar without a reopen, same as the texture case, then
+  // land on the first one and say what was written. The files are already on
+  // disk at this point, so the summary reports rather than asks.
+  async function handleVarbitsCreated(ids: number[], varpId: number | null) {
+    setActiveItems((prev) => {
+      const have = new Set(prev.map((i) => i.id))
+      const added = ids.filter((id) => !have.has(id)).map((id) => ({ id, name: String(id) }))
+      if (added.length === 0) return prev
+      return [...prev, ...added].sort((a, b) => a.id - b.id || a.name.localeCompare(b.name))
+    })
+    if (ids.length > 0) await handleNavigateToItem('varbits', ids[0])
+    await confirmDialog(
+      <>
+        <p>
+          Created varbit{ids.length === 1 ? '' : 's'} <strong>{ids.join(', ')}</strong>
+          {varpId != null && <> and var <strong>{varpId}</strong></>}.
+        </p>
+        {varpId != null && (
+          <p>
+            Var {varpId} is empty on purpose — it exists so the client's value array is big enough
+            to index it. Give it a clientCode only if it should drive a built-in client setting.
+          </p>
+        )}
+        <p>
+          Nothing outside the cache knows about these yet: the server still has to set the var for
+          them to hold anything.
+        </p>
+      </>,
+      { title: 'Varbits created', acknowledge: true, confirmLabel: 'Close' },
+    )
   }
 
   async function handleRemoveItem() {
@@ -1755,7 +1810,7 @@ function App() {
                 : cutsceneContent
                 ? <CutsceneViewer data={cutsceneContent} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} cacheRoot={cacheHandle} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : varbitContent != null
-                ? <VarbitViewer data={varbitContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <VarbitViewer data={varbitContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : structContent != null
                 ? <StructViewer data={structContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : paramContent != null
@@ -1831,6 +1886,14 @@ function App() {
         </main>
       </div>
       {confirmDialogElement}
+      {varbitPlannerOpen && cacheHandle && (
+        <VarbitPlanner
+          rootHandle={cacheHandle}
+          onCreated={handleVarbitsCreated}
+          onAddSingle={handleAddVarbitSingle}
+          onClose={() => setVarbitPlannerOpen(false)}
+        />
+      )}
       {itemModelPreview && cacheHandle && (
         <ModelPreviewModal
           title={`Model ${itemModelPreview.modelId}${itemModelPreview.display ? ` — ${itemModelPreview.display.label}` : ''}`}
