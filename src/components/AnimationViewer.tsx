@@ -197,7 +197,10 @@ export default function AnimationViewer({ data, onSave, onDirtyChange, onNavigat
 
   // The studio takes the whole page: it is a different way of working on the
   // same animation, not a panel within the field editor.
-  if (studio) return <AnimationStudio data={data} onClose={() => setStudio(false)} />
+  // Keyed by id: the studio holds its load baseline in a ref, so switching to
+  // a different animation must REMOUNT it — carrying state across would let a
+  // save write animation A's frames under animation B's id.
+  if (studio) return <AnimationStudio key={data.id} data={data} onClose={() => setStudio(false)} />
 
   return (
     <div className="item-viewer">

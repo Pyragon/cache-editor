@@ -402,3 +402,8 @@
 .anim-studio-fixrow {
   margin: 8px 0 4px;
 }
+
+/* Save confirmation under the stage. */
+.anim-studio-savenote {
+  margin: 10px 0 0;
+}

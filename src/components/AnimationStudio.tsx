@@ -12,7 +12,8 @@ import type { GizmoDelta } from '../loaders/animPose'
 import { loadModelComposite } from '../loaders/npcComposite'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getLoader } from '../loaders'
-import { buildAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
+import { writeJsonItem } from '../loaders/common'
+import { buildAnimCompatIndex, invalidateAnimCompatIndex, peekAnimCompatIndex } from '../loaders/animCompat'
 import { scanLabel } from '../loaders/scan'
 import type { ScanProgress } from '../loaders/scan'
 import { IntListInput, NumberInput } from './defFields'
@@ -43,6 +44,11 @@ type StudioFrame = {
   fileId: number
   frame: AnimationFrameDef
   durationCycles: number
+  /** Position in the SAVED sequence, or -1 for a frame added since. The
+   *  sequence carries several other per-frame parallel arrays (sounds,
+   *  interleave order) that save has to permute identically — this is the
+   *  index it permutes them by. */
+  srcIndex: number
   /**
    * The number shown on the timeline. Assigned once and KEPT through
    * reordering — if position renamed the cells, dragging #6 between 3 and 4
@@ -60,6 +66,14 @@ export default function AnimationStudio({ data, onClose }: Props) {
   const [frameIndex, setFrameIndex] = useState(0)
   const [base, setBase] = useState<AnimationFrameBaseDef | null>(null)
   const [status, setStatus] = useState('Loading…')
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveNote, setSaveNote] = useState('')
+  /** Bumped by Discard to re-run the load from disk. */
+  const [reloadNonce, setReloadNonce] = useState(0)
+  /** The def as last WRITTEN — the baseline the next save permutes from. The
+   *  prop goes stale the moment the first save lands. */
+  const savedDefRef = useRef<AnimationDef>(def)
 
   const [modelIds, setModelIds] = useState<number[]>([])
   const [model, setModel] = useState<ModelData | null>(null)
@@ -106,7 +120,8 @@ export default function AnimationStudio({ data, onClose }: Props) {
         const baseLoader = getLoader('animation_frame_bases')
         if (!setsDir || !basesDir || !setLoader || !baseLoader) throw new Error('animation entries not available')
 
-        const setIds = [...new Set((def.frameSetIds ?? []).filter((id) => id >= 0))]
+        const live = savedDefRef.current
+        const setIds = [...new Set((live.frameSetIds ?? []).filter((id) => id >= 0))]
         const sets = new Map<number, AnimationFrameSetData>()
         for (const id of setIds) {
           sets.set(id, await setLoader.loadItem(setsDir, { id, name: String(id) }, root) as AnimationFrameSetData)
@@ -114,12 +129,12 @@ export default function AnimationStudio({ data, onClose }: Props) {
         if (cancelled) return
 
         const out: StudioFrame[] = []
-        const durations = def.frameDurations ?? []
-        ;(def.frameSetIds ?? []).forEach((setId, i) => {
-          const fileId = frameFileId(def, i)
+        const durations = live.frameDurations ?? []
+        ;(live.frameSetIds ?? []).forEach((setId, i) => {
+          const fileId = frameFileId(live, i)
           const frame = sets.get(setId)?.frames.get(fileId)
           if (!frame || frame.rawFallbackBytes) return
-          out.push({ setId, fileId, frame, durationCycles: durations[i] ?? 1, label: out.length + 1 })
+          out.push({ setId, fileId, frame, durationCycles: durations[i] ?? 1, label: out.length + 1, srcIndex: i })
         })
         if (out.length === 0) { setStatus('This animation names no readable frames.'); return }
 
@@ -128,14 +143,17 @@ export default function AnimationStudio({ data, onClose }: Props) {
         if (cancelled) return
         setBase(loaded.def)
         setFrames(out)
-        setTweened(def.tweened === true)
+        setTweened(live.tweened === true)
+        setDirty(false)
         setStatus('')
       } catch (err) {
         if (!cancelled) setStatus(err instanceof Error ? err.message : 'Could not load this animation.')
       }
     })()
     return () => { cancelled = true }
-  }, [root, def])
+    // def prop never changes identity; reloadNonce is Discard's re-read
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root, reloadNonce])
 
   // Models rigged to this skeleton, from the compat index.
   const candidates = useMemo(() => {
@@ -343,6 +361,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
     const { frame: withEntry, index } = ensureEntry(current.frame, activeSlot, channelType, pivot)
     if (withEntry !== current.frame) {
       setFrames((prev) => prev.map((f, i) => (i === frameIndex ? { ...f, frame: withEntry } : f)))
+      touch()
     }
     dragBase.current = {
       index,
@@ -369,6 +388,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
         },
       }
     }))
+    touch()
   }
 
   const highlight = useMemo(() => {
@@ -401,6 +421,9 @@ export default function AnimationStudio({ data, onClose }: Props) {
     return slot == null ? 0 : (pivotUsers.get(slot)?.size ?? 0)
   }
 
+  /** Any edit: dirty, and whatever the last save said is stale. */
+  const touch = () => { setDirty(true); setSaveNote('') }
+
   /**
    * Add a frame after the current one, carrying its pose over.
    *
@@ -416,6 +439,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
       const copy: StudioFrame = {
         setId: src.setId,
         fileId: -1,
+        srcIndex: -1,
         label: prev.reduce((m, f) => Math.max(m, f.label ?? 0), 0) + 1,
         durationCycles: src.durationCycles,
         // deep enough: every array a pose edit touches is replaced wholesale
@@ -432,15 +456,19 @@ export default function AnimationStudio({ data, onClose }: Props) {
       return [...prev.slice(0, i + 1), copy, ...prev.slice(i + 1)]
     })
     setFrameIndex(i + 1)
+    touch()
   }
 
   function removeFrame(i: number) {
-    setFrames((prev) => (prev.length <= 1 ? prev : prev.filter((_, j) => j !== i)))
+    if (frames.length <= 1) return
+    setFrames((prev) => prev.filter((_, j) => j !== i))
     setFrameIndex((cur) => Math.max(0, Math.min(cur, frames.length - 2)))
+    touch()
   }
 
   function setDuration(i: number, cycles: number) {
     setFrames((prev) => prev.map((f, j) => (j === i ? { ...f, durationCycles: Math.max(1, cycles) } : f)))
+    touch()
   }
 
   /**
@@ -495,6 +523,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
         },
       }))
     })
+    touch()
   }
 
   const loopBackAt = def.loopDelay >= 0 && def.loopDelay <= frames.length
@@ -510,6 +539,118 @@ export default function AnimationStudio({ data, onClose }: Props) {
       setFrames((prev) => prev.map((f, i) => (f.label == null ? { ...f, label: i + 1 } : f)))
     }
   }, [frames])
+
+  /** Field-wise: a frame parsed from disk and one built here can stringify
+   *  with different key orders, so JSON comparison would false-positive. */
+  function sameFrame(a: AnimationFrameDef, b: AnimationFrameDef): boolean {
+    const eq = (x: number[], y: number[]) => x.length === y.length && x.every((v, i) => v === y[i])
+    return a.frameBaseId === b.frameBaseId && a.count === b.count
+      && a.transformationCount === b.transformationCount
+      && a.unknownByte0 === b.unknownByte0
+      && a.modifiesAlpha === b.modifiesAlpha && a.modifiesColor === b.modifiesColor && a.aBool988 === b.aBool988
+      && eq(a.transformationIndices, b.transformationIndices)
+      && eq(a.transformationX, b.transformationX)
+      && eq(a.transformationY, b.transformationY)
+      && eq(a.transformationZ, b.transformationZ)
+      && eq(a.transformationFlags, b.transformationFlags)
+      && eq(a.skippedReferences, b.skippedReferences)
+  }
+
+  /**
+   * Write everything the animation needs, in the only order that is safe.
+   *
+   * Frame sets are SHARED — 363 of them serve 10+ sequences — so an edited
+   * pose is never written over the file it came from: it goes to a FRESH file
+   * id in the same set (copy-on-write) and only this sequence is repointed.
+   * Unedited frames keep their original files untouched. Re-saving the same
+   * edit writes nothing new, because the comparison then matches the copy.
+   *
+   * The sequence is rewritten with the parallel arrays the client expects:
+   * frameSetIds, packed frameHashes ((setId << 16) | fileId), frameDurations —
+   * and every OTHER per-frame array it carries (sounds, interleave order)
+   * permuted by the same reorder, defaults for added frames, so a reordered
+   * animation cannot end up with frame 3's footstep sound on frame 7.
+   */
+  async function save() {
+    if (!root || frames.length === 0 || saving) return
+    setSaving(true)
+    setSaveNote('')
+    try {
+      const setsDir = await resolveEntryHandle(root, getEntryPath('animation_frame_sets'))
+      const animsDir = await resolveEntryHandle(root, getEntryPath('animations'))
+      const setLoader = getLoader('animation_frame_sets')
+      if (!setsDir || !animsDir || !setLoader) throw new Error('animation entries not available')
+
+      const setCache = new Map<number, AnimationFrameSetData>()
+      const loadSet = async (id: number): Promise<AnimationFrameSetData> => {
+        let cached = setCache.get(id)
+        if (!cached) {
+          cached = await setLoader.loadItem(setsDir, { id, name: String(id) }, root) as AnimationFrameSetData
+          setCache.set(id, cached)
+        }
+        return cached
+      }
+
+      const updated: StudioFrame[] = []
+      let wrote = 0
+      for (const f of frames) {
+        const set = await loadSet(f.setId)
+        if (f.fileId >= 0) {
+          const disk = set.frames.get(f.fileId)
+          if (disk && sameFrame(disk, f.frame)) { updated.push(f); continue }
+        }
+        let nid = 0
+        for (const k of set.frames.keys()) if (k >= nid) nid = k + 1
+        if (nid > 0xffff) throw new Error(`Frame set ${f.setId} is full — no free file id`)
+        set.frames.set(nid, f.frame)
+        const setDirHandle = await setsDir.getDirectoryHandle(String(f.setId))
+        const fileHandle = await setDirHandle.getFileHandle(`${nid}.json`, { create: true })
+        const writable = await fileHandle.createWritable()
+        await writable.write(JSON.stringify(f.frame))
+        await writable.close()
+        wrote++
+        updated.push({ ...f, fileId: nid })
+      }
+
+      const src = savedDefRef.current
+      const frameCount = src.frameDurations?.length ?? 0
+      const def2: AnimationDef = {
+        ...src,
+        frameSetIds: updated.map((f) => f.setId),
+        frameHashes: updated.map((f) => ((f.setId & 0xffff) << 16) | (f.fileId & 0xffff)),
+        frameDurations: updated.map((f) => f.durationCycles),
+      }
+      const PER_FRAME = ['interLeaveOrder', 'interfaceFrames', 'soundSettings', 'frameSoundVolume', 'soundMinDelay', 'soundMaxDelay'] as const
+      for (const key of PER_FRAME) {
+        const arr = src[key] as unknown[] | undefined
+        if (!Array.isArray(arr) || arr.length !== frameCount) continue
+        const fallback = key === 'soundSettings' ? null : typeof arr[0] === 'boolean' ? false : 0
+        ;(def2 as unknown as Record<string, unknown>)[key] =
+          updated.map((f) => (f.srcIndex >= 0 && f.srcIndex < arr.length ? arr[f.srcIndex] : fallback))
+      }
+      await writeJsonItem(animsDir, data.id, def2)
+      savedDefRef.current = def2
+
+      invalidateAnimCompatIndex()
+      // the written state is the new baseline: real file ids, positions as
+      // source indices, and the session numbers compacted back to 1..n
+      setFrames(updated.map((f, i) => ({ ...f, srcIndex: i, label: i + 1 })))
+      setDirty(false)
+      setSaveNote(wrote > 0
+        ? `Saved — ${wrote} frame file${wrote === 1 ? '' : 's'} written, sequence ${data.id} updated.`
+        : `Saved — sequence ${data.id} updated.`)
+    } catch (err) {
+      setSaveNote(err instanceof Error ? `Save failed: ${err.message}` : 'Save failed.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function discard() {
+    setDirty(false)
+    setSaveNote('')
+    setReloadNonce((n) => n + 1)
+  }
 
   const totalCycles = frames.reduce((n, f) => n + f.durationCycles, 0)
 
@@ -573,6 +714,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
       return next
     })
     setFrameIndex(target)
+    touch()
   }
 
   if (status) {
@@ -594,7 +736,16 @@ export default function AnimationStudio({ data, onClose }: Props) {
       <div className="item-header">
         <div className="item-title-row">
           <span className="enum-title">Animation studio — {data.id}</span>
-          <button type="button" className="field-link-btn" onClick={onClose}>Back to the sequence</button>
+          <button
+            type="button"
+            className="field-link-btn"
+            onClick={() => {
+              if (dirty && !window.confirm('Leave the studio? Unsaved changes are lost.')) return
+              onClose()
+            }}
+          >
+            Back to the sequence
+          </button>
         </div>
         <div className="item-badges">
           <span className="item-id-badge">{frames.length} frames</span>
@@ -606,8 +757,8 @@ export default function AnimationStudio({ data, onClose }: Props) {
 
       <p className="tex-op-note">
         Pose the model, and each frame of the animation is that pose. Click a part of the model to
-        select it, then drag its handle. <strong>Nothing saves yet</strong> — this pass is the shell;
-        writing the frames and the sequence back comes next.
+        select it, then drag its handle. Saving writes edited poses as NEW frame files and repoints
+        this sequence at them — other animations sharing the same frames are never touched.
       </p>
 
       <div className="anim-studio-body">
@@ -992,6 +1143,24 @@ export default function AnimationStudio({ data, onClose }: Props) {
           )}
         </div>
       </div>
+
+      {saveNote && <p className="map-sprite-hint anim-studio-savenote">{saveNote}</p>}
+
+      {dirty && (
+        <div className="save-bar">
+          <span className="save-bar-label">Unsaved changes</span>
+          <button type="button" className="save-bar-discard" onClick={discard}>Discard</button>
+          <button
+            type="button"
+            className="save-bar-save"
+            disabled={saving}
+            title="Edited poses become new frame files (copy-on-write); unedited frames and other sequences are untouched"
+            onClick={() => void save()}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
