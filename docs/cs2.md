@@ -234,3 +234,34 @@ Everything below is verified by `CS2Tail` (decompile → recompile → compare b
   with `function `).
 - cache-editor side (later): swap the cs2 loader from binary to text, IDE-style page, and keep
   the asm form editable too.
+
+## The `+` operator is type-directed (fixed 2026-08-04)
+
+`+` is overloaded in CS2: `MERGE_STRINGS` (531) on the string stack, `ADD` on
+the int stack. The parser used to pick between them by **parenthesisation** —
+unparenthesised meant string concatenation, on the grounds that the printer
+always wraps arithmetic in parens. That invariant does hold for decompiled
+sources, so the round-trip was safe, but it made hand-written scripts a trap:
+
+```ts
+if_setgraphic(12071 + varpbit_12291, get_comp(1321, 2));   // compiled to MERGE_STRINGS 2
+```
+
+Both operands land on the *int* stack, then `mergeStrings` does
+`stringStackPtr -= 2` against an empty string stack and passes −2 as a start
+index into the join helper. The client dies with
+`ArrayIndexOutOfBoundsException: -2` at `VarDefinitionLoader.method6398`
+(an obfuscated static string-join helper — nothing to do with vars), with the
+crash suffix `<scriptId> 531`. Nothing failed at compile time.
+
+`Parser.expression()` now decides by operand type, using the `valueType()`
+helper that was already there:
+
+- all pieces non-string → left-associative `BinaryExpr("+")`, i.e. `ADD`
+- all pieces string → `MergeStringsExpr` as before
+- mixed → a compile error naming `to_string`, because CS2 has no implicit
+  conversion (the client's own scripts spell it `"Level " + to_string(n)`)
+
+Verified: `CS2VerifyAll` still reports **6565/6565 byte-identical** (+3 asm
+fallback), and `12071 + varpbit_12291` now emits the same
+`PUSH_INT / LOAD_VARPBIT / ADD` as the parenthesised spelling.
