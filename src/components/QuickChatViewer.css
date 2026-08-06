@@ -112,6 +112,20 @@
   cursor: help;
 }
 
+/* A chip that reads an enum is a real button: hover previews the enum's
+   entries, click opens it. font: inherit resets the button UA styles the
+   span variant never had. */
+.qc-chip-link {
+  font: inherit;
+  font-size: 12px;
+  line-height: inherit;
+  cursor: pointer;
+}
+
+.qc-chip-link:hover {
+  background: rgba(126, 184, 255, 0.3);
+}
+
 .qc-resolved {
   font-size: 12px;
   color: var(--text-dim, #9aa);

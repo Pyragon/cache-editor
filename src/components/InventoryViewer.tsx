@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react'
 import type { InventoryData, InventoryDef } from '../loaders/config/inventories'
-import { ItemIcon, NumberInput, PairTable } from './defFields'
+import { NumberInput, PairTable } from './defFields'
+import { RenderedItemIcon } from './spriteCards'
 
 type Props = {
   data: InventoryData
   onSave: (data: InventoryData) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
+  /** For rendering item icons live from their defs. */
+  cacheRoot?: FileSystemDirectoryHandle | null
 }
 
-export default function InventoryViewer({ data, onSave, onDirtyChange }: Props) {
+export default function InventoryViewer({ data, onSave, onDirtyChange, cacheRoot }: Props) {
   const [draft, setDraft] = useState<InventoryDef>(data.def)
   const [isDirty, setIsDirty] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -89,7 +92,7 @@ export default function InventoryViewer({ data, onSave, onDirtyChange }: Props) 
         title="Default Stock" srcLabel="Item ID" dstLabel="Amount"
         src={ids} dst={amounts}
         onSet={setPair} onAdd={addPair} onRemove={removePair}
-        srcIcon={(id) => <ItemIcon id={id} />}
+        srcIcon={(id) => <RenderedItemIcon cacheRoot={cacheRoot ?? null} itemId={id} />}
       />
 
       {isDirty && (

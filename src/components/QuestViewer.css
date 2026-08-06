@@ -671,3 +671,17 @@
   font-size: 12px;
   color: var(--text-dim);
 }
+
+/* Native colour input dressed as a pair-table swatch — clicking opens the
+   OS picker; the committed value is the nearest HSL16. */
+.pair-colour-pick {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+.pair-colour-pick::-webkit-color-swatch-wrapper { padding: 1px; }
+.pair-colour-pick::-webkit-color-swatch { border: none; border-radius: 3px; }

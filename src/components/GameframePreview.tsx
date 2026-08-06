@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { InterfaceData } from '../loaders/interfaces'
+import type { InterfaceData, IComponentDefinition } from '../loaders/interfaces'
 import { InterfaceAssets } from './interfacePreview'
 import type { PreviewOptions } from './interfacePreview'
 import {
@@ -111,6 +111,8 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
   /** `client_clock()` — advanced by the hover ticker below */
   const cycleRef = useRef(0)
   const tickRef = useRef<number | null>(null)
+  /** Non-edited interfaces of the composed frame — see loadGameframeScene. */
+  const depCacheRef = useRef(new Map<number, (IComponentDefinition | null)[]>())
 
   const viewport = mode === 'fixed' ? FIXED_SIZE : size
 
@@ -145,7 +147,7 @@ export default function GameframePreview({ data, assets, opts, selectedId, onSel
     let cancelled = false
     ;(async () => {
       try {
-        const scene = await loadGameframeScene(data.rootHandle!, sceneKey.mode, { id: sceneKey.id, components: sceneKey.components }, sceneKey.slotKey)
+        const scene = await loadGameframeScene(data.rootHandle!, sceneKey.mode, { id: sceneKey.id, components: sceneKey.components }, sceneKey.slotKey, depCacheRef.current)
         if (cancelled) return
         sceneRef.current = scene
         sceneGen.current++

@@ -3,15 +3,15 @@ import type { IdentikitData, IdentikitDef } from '../loaders/config/identikit'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { getLoader } from '../loaders'
 import type { ModelData } from '../loaders/models'
-import { mergeModels, applyRecolor } from '../loaders/models'
+import { mergeModels, applyRecolor, hslToRgb } from '../loaders/models'
 import ModelViewer from './ModelViewer'
 import PlayerLookModal from './PlayerLookModal'
 import { LOOK_COLOUR_LABELS, LOOK_PART_LABELS, lookSlotFromCategory } from '../loaders/playerLook'
 import type { PaletteToneUse, RecolorPalette } from '../loaders/playerAppearance'
 import { loadRecolorPalette, paletteTonesUsed, toneIsItsOwnDefault } from '../loaders/playerAppearance'
-import { hslToRgb } from '../loaders/models'
 import { invalidateIdentikitIcon } from './npcSnapshot'
 import { NumberInput, PairTable } from './defFields'
+import { rgbToHsl16 } from './rsColor'
 import { LOOK_PART_COUNT } from '../loaders/playerLook'
 
 const HEAD_SLOT_COUNT = 5
@@ -366,6 +366,25 @@ export default function IdentikitViewer({ data, onSave, onDirtyChange }: {
         onSet={setRecolorPair}
         onAdd={addRecolorPair}
         onRemove={removeRecolorPair}
+        // A real PICKER, not just a swatch: choosing a colour writes back the
+        // nearest HSL16. The 16-bit palette can't hold every sRGB value, so
+        // the committed number is the closest packed colour, and the swatch
+        // re-reads it — what you see is what the cache will actually store.
+        cellExtra={(value, i, which) => (
+          <input
+            type="color"
+            className="pair-colour-pick"
+            value={`#${hslToRgb(value & 0xffff).toString(16).padStart(6, '0')}`}
+            title={`HSL16 ${value & 0xffff} — pick a colour to set the nearest palette value`}
+            onChange={(e) => {
+              const hex = e.target.value
+              const r = parseInt(hex.slice(1, 3), 16)
+              const g = parseInt(hex.slice(3, 5), 16)
+              const b = parseInt(hex.slice(5, 7), 16)
+              setRecolorPair(i, which, rgbToHsl16(r, g, b))
+            }}
+          />
+        )}
       />
 
       <PairTable

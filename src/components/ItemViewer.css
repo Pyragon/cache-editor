@@ -560,6 +560,18 @@
   visibility: hidden;
 }
 
+/* A failed icon render is shown AS failed — there's deliberately no static
+   fallback to hide it behind. */
+.item-icon-missing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #b25c5c;
+  font-size: 11px;
+  border: 1px dashed rgba(178, 92, 92, 0.5);
+  border-radius: 4px;
+}
+
 .item-title-row {
   display: flex;
   align-items: center;

@@ -3,6 +3,7 @@ import type { ModelData } from '../loaders/models'
 import { loadModelComposite, npcCompositeSpec, objectCompositeSpec } from '../loaders/npcComposite'
 import { applyLookPalette, buildIdentikitPart, loadRecolorPalette } from '../loaders/playerAppearance'
 import { buildTexturedModelMesh } from './modelMesh'
+import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 
 // ---------------------------------------------------------------------------
 // NPC thumbnail icons: when an NPC page opens, its full composite model
@@ -239,5 +240,110 @@ export function getModelIcon(
     modelCache.set(modelId, url)
     modelInFlight.delete(modelId)
   })
+  return task
+}
+
+// ---------------------------------------------------------------------------
+// Inventory item icons, rendered with the item's OWN icon pose (zoom and
+// 2048ths rotations from the def) instead of the generic 3/4 NPC view — a
+// coin lies flat and a sword angles exactly as the client draws them. The
+// recolours/retextures the def carries are baked in via the composite spec.
+// Replaces the static public/icons PNGs wherever a live render is wanted.
+// ---------------------------------------------------------------------------
+
+const itemCache = new Map<number, string | null>()
+const itemInFlight = new Map<number, Promise<string | null>>()
+
+export function peekInventoryItemIcon(id: number): string | null | undefined {
+  return itemCache.get(id)
+}
+
+/** Call after saving an item so its icon regenerates from the new def. */
+export function invalidateInventoryItemIcon(id: number): void {
+  itemCache.delete(id)
+  itemInFlight.delete(id)
+}
+
+const ICON_FOV = 2 * Math.atan(16 / 512) * (180 / Math.PI)
+
+export function getInventoryItemIcon(
+  cacheRoot: FileSystemDirectoryHandle,
+  itemId: number,
+): Promise<string | null> {
+  const cached = itemCache.get(itemId)
+  if (cached !== undefined) return Promise.resolve(cached)
+  const pending = itemInFlight.get(itemId)
+  if (pending) return pending
+
+  const task = (async (): Promise<string | null> => {
+    try {
+      const dir = await resolveEntryHandle(cacheRoot, getEntryPath('items'))
+      if (!dir) return null
+      const def = JSON.parse(await (await (await dir.getFileHandle(`${itemId}.json`)).getFile()).text()) as Record<string, unknown>
+      const modelId = typeof def.modelId === 'number' ? def.modelId : -1
+      if (modelId < 0) return null
+      const composite = await loadModelComposite(cacheRoot, {
+        modelIds: [modelId],
+        // dump spelling per itemIconDisplayParams: British "Colours"
+        recolor: {
+          from: def.originalModelColours as number[] | undefined,
+          to: def.modifiedModelColours as number[] | undefined,
+          textureFrom: def.originalTextureIds as number[] | undefined,
+          textureTo: def.modifiedTextureIds as number[] | undefined,
+        },
+      })
+      const built = await buildTexturedModelMesh(composite)
+      if (!built) return null
+
+      // The client's icon transform (ItemDefinitions.getSprite), conjugated
+      // through the (x, -y, -z) render mapping — same maths as ModelViewer's
+      // item pose: roll and yaw negate, pitch survives, camera a straight
+      // zoom away with the narrow 512-focal viewport FOV.
+      const scene = new THREE.Scene()
+      const group = new THREE.Group()
+      group.add(built.mesh)
+      scene.add(group)
+
+      built.mesh.geometry.computeBoundingBox()
+      const bb = built.mesh.geometry.boundingBox!
+      built.mesh.position.set(
+        -(bb.min.x + bb.max.x) / 2,
+        -(bb.min.y + bb.max.y) / 2,
+        -(bb.min.z + bb.max.z) / 2,
+      )
+      const span = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z, 1)
+
+      const num = (k: string) => (typeof def[k] === 'number' ? (def[k] as number) : 0)
+      const rad = (units: number) => (units * Math.PI) / 1024
+      const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rad(num('modelRotationX')))
+      const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -rad(num('modelRotationY')))
+      const qz = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), rad(num('modelRotationZ')))
+      group.quaternion.copy(qx).multiply(qy).multiply(qz)
+      group.scale.set(
+        (typeof def.resizeX === 'number' && def.resizeX > 0 ? def.resizeX : 128) / 128,
+        (typeof def.resizeY === 'number' && def.resizeY > 0 ? def.resizeY : 128) / 128,
+        (typeof def.resizeZ === 'number' && def.resizeZ > 0 ? def.resizeZ : 128) / 128,
+      )
+      group.position.copy(new THREE.Vector3(num('modelOffsetX'), -num('modelOffsetY'), -num('modelOffsetY')).applyQuaternion(qx))
+
+      const zoom = num('modelZoom') > 0 ? num('modelZoom') : span * 2.4
+      const camera = new THREE.PerspectiveCamera(ICON_FOV, 1, Math.max(zoom * 0.01, 0.1), zoom * 10 + span * 100)
+      camera.position.set(0, 0, zoom)
+      camera.updateProjectionMatrix()
+
+      const r3 = getRenderer()
+      r3.render(scene, camera)
+      const url = r3.domElement.toDataURL('image/png')
+      built.dispose()
+      return url
+    } catch {
+      return null
+    }
+  })().then((url) => {
+    itemCache.set(itemId, url)
+    itemInFlight.delete(itemId)
+    return url
+  })
+  itemInFlight.set(itemId, task)
   return task
 }

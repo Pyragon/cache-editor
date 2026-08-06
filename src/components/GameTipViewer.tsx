@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { GameTipData, GameTipDef, Stage, StageUpdate, TipComponent } from '../loaders/game_tips'
 import { NumberInput } from './defFields'
 import { loadSpriteMeta, renderFrameToCanvas } from './spriteRender'
@@ -389,7 +389,7 @@ function getTipThumb(
   return promise
 }
 
-function TipThumb({ data, tipId }: { data: GameTipData; tipId: number }) {
+const TipThumb = memo(function TipThumb({ data, tipId }: { data: GameTipData; tipId: number }) {
   const [url, setUrl] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -402,7 +402,7 @@ function TipThumb({ data, tipId }: { data: GameTipData; tipId: number }) {
   }, [data, tipId])
   if (!url) return <span className="tip-thumb tip-thumb-empty">{tipId}</span>
   return <img className="tip-thumb" src={url} alt="" />
-}
+})
 
 function fmtMs(ms: number): string {
   if (ms === 0) return '0'
@@ -642,11 +642,19 @@ function StageSimPreview({ data, intro, cycle, loadSeconds, simKey }: {
 // Small rendered thumbnail for a sprite-id field, reusing the preview's
 // already-loaded+cached sprite canvases (loadResources) instead of a
 // separate fetch per field.
-function SpriteFieldThumb({ id, resources }: { id: number; resources: Resources | null }) {
+/** toDataURL is a synchronous PNG encode — costly enough that running it for
+ *  every sprite field on every keystroke was THE typing lag on this page.
+ *  Cache per canvas (resources reload swaps the canvases, invalidating
+ *  naturally), and memo so typing doesn't even re-render the thumbs. */
+const spriteThumbUrls = new WeakMap<HTMLCanvasElement, string>()
+
+const SpriteFieldThumb = memo(function SpriteFieldThumb({ id, resources }: { id: number; resources: Resources | null }) {
   const canvas = id >= 0 ? resources?.sprites.get(id) : undefined
   if (!canvas) return <span className="tip-sprite-thumb tip-sprite-thumb-empty">?</span>
-  return <img className="tip-sprite-thumb" src={canvas.toDataURL()} alt="" />
-}
+  let url = spriteThumbUrls.get(canvas)
+  if (!url) spriteThumbUrls.set(canvas, url = canvas.toDataURL())
+  return <img className="tip-sprite-thumb" src={url} alt="" />
+})
 
 type Props = {
   data: GameTipData
@@ -673,6 +681,10 @@ export default function GameTipViewer({ data, onSave, onDirtyChange, onOpenTip }
   const [simKey, setSimKey] = useState(0)
   const draftRef = useRef(draft)
   draftRef.current = draft
+  const rotationModel = useMemo(
+    () => (draft.stageTable ? deriveRotationModel(draft.stageTable.definedStages) : null),
+    [draft.stageTable],
+  )
   const resourcesRef = useRef(resources)
   resourcesRef.current = resources
 
@@ -687,6 +699,45 @@ export default function GameTipViewer({ data, onSave, onDirtyChange, onOpenTip }
 
   const components = draft.components ?? []
   const isStageTable = draft.stageTable != null
+
+  /**
+   * ANCHORED_TEXT components sharing one string are a BAKED OUTLINE: the
+   * shipped tips draw the same text four times in a dark colour at 1px
+   * offsets, then once bright on top (tip 10: four of #333 around −207,238
+   * and one of #d0dd4b at the centre). Editing a single layer looks like
+   * nothing happened — the identical bright copy still covers it — so text
+   * edits apply to the whole group, and each card says which layer it is.
+   */
+  const textGroups = useMemo(() => {
+    const byText = new Map<string, number[]>()
+    components.forEach((c, i) => {
+      if (c.type !== 'ANCHORED_TEXT' || typeof c.tipText !== 'string') return
+      let list = byText.get(c.tipText)
+      if (!list) byText.set(c.tipText, list = [])
+      list.push(i)
+    })
+    const out = new Map<number, { layer: number; size: number }>()
+    for (const list of byText.values()) {
+      if (list.length < 2) continue
+      list.forEach((idx, n) => out.set(idx, { layer: n + 1, size: list.length }))
+    }
+    return out
+    // `components` is a per-render alias of this exact field
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.components])
+
+  /** Text edit on any layer of an outline group rewrites every layer. */
+  function setTipText(index: number, value: string) {
+    const group = textGroups.get(index)
+    if (!group) { setComponent(index, { tipText: value }); return }
+    const shared = components[index].tipText
+    markDirty({
+      ...draft,
+      components: components.map((c) => (
+        c.type === 'ANCHORED_TEXT' && c.tipText === shared ? { ...c, tipText: value } : c
+      )),
+    })
+  }
 
   function markDirty(next: GameTipDef) {
     setDraft(next)
@@ -779,7 +830,7 @@ export default function GameTipViewer({ data, onSave, onDirtyChange, onOpenTip }
 
   if (isStageTable) {
     const table = draft.stageTable!
-    const model = deriveRotationModel(table.definedStages)
+    const model = rotationModel!
     const introLen = model.intro ? 1 : 0
     const combined = [...(model.intro ? [model.intro] : []), ...model.cycle]
 
@@ -1082,7 +1133,17 @@ export default function GameTipViewer({ data, onSave, onDirtyChange, onOpenTip }
         {components.map((c, i) => (
           <div key={i} className="tip-component-card">
             <div className="tip-component-head">
-              <span className="tip-component-type">{i}: {c.type}</span>
+              <span className="tip-component-type">
+                {i}: {c.type}
+                {textGroups.has(i) && (
+                  <span
+                    className="item-stack-index"
+                    title="Several ANCHORED_TEXTs share this exact string — the shipped outline trick: dark copies offset by a pixel behind one bright copy. Text edits apply to all of them; move/colour edits stay per layer."
+                  >
+                    {' '}outline layer {textGroups.get(i)!.layer}/{textGroups.get(i)!.size}
+                  </span>
+                )}
+              </span>
               <span className="tip-component-actions">
                 <button type="button" className="cursor-pick-btn" disabled={i === 0} onClick={() => moveComponent(i, -1)}>↑</button>
                 <button type="button" className="cursor-pick-btn" disabled={i === components.length - 1} onClick={() => moveComponent(i, 1)}>↓</button>
@@ -1113,7 +1174,7 @@ export default function GameTipViewer({ data, onSave, onDirtyChange, onOpenTip }
                       className="item-field-input tip-text-input"
                       rows={2}
                       value={String(c[key] ?? '')}
-                      onChange={(e) => setComponent(i, { [key]: e.target.value })}
+                      onChange={(e) => (key === 'tipText' ? setTipText(i, e.target.value) : setComponent(i, { [key]: e.target.value }))}
                     />
                   )}
                   {kind === 'bool' && (

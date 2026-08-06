@@ -130,6 +130,11 @@ export async function loadGameframeScene(
   mode: GameframeMode,
   edited: InterfaceData | null,
   slotKey: string,
+  /** Cache for the NON-edited interfaces of the frame. In-editor edits can't
+   *  change them, and re-reading ~15 of them from disk per keystroke opened a
+   *  stale window where hovers ran against the old frame — which read exactly
+   *  like "hook params don't update". Fresh per preview mount. */
+  depCache?: Map<number, (IComponentDefinition | null)[]>,
 ): Promise<GameframeScene> {
   const rootId = mode === 'fixed' ? FIXED_ROOT : RESIZABLE_ROOT
   const attachments = new Map<number, number>()
@@ -159,9 +164,14 @@ export async function loadGameframeScene(
       interfaces.set(id, edited.components)
       return
     }
+    const cached = depCache?.get(id)
+    if (cached) { interfaces.set(id, cached); return }
     try {
       const data = await loadInterfaceById(rootHandle, id)
-      if (data) interfaces.set(id, data.components)
+      if (data) {
+        interfaces.set(id, data.components)
+        depCache?.set(id, data.components)
+      }
     } catch { /* missing from the dump — slot stays empty */ }
   }))
 

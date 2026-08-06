@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { NpcData, NpcDef } from '../loaders/npcs'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 import { hslToRgb } from '../loaders/models'
+import { rgbToHsl16 } from './rsColor'
 import { npcCompositeSpec } from '../loaders/npcComposite'
 import type { ModelCompositeSpec } from '../loaders/npcComposite'
 import { getNpcIcon, peekNpcIcon } from './npcSnapshot'
@@ -791,12 +792,22 @@ export default function NpcViewer({ data, onSave, onDirtyChange, onNavigate, cac
         onSet={(i, w, v) => setPair('originalColors', 'modifiedColors', i, w, v)}
         onAdd={() => addPair('originalColors', 'modifiedColors')}
         onRemove={(i) => removePair('originalColors', 'modifiedColors', i)}
-        // live swatch of the HSL16 the id encodes, tracking edits
-        cellExtra={(v) => (
-          <span
-            className="pair-swatch"
-            title={`HSL16 ${v & 0xffff}`}
-            style={{ background: `#${hslToRgb(v & 0xffff).toString(16).padStart(6, '0')}` }}
+        // A real PICKER, not just a swatch: choosing a colour writes back the
+        // nearest HSL16, and the swatch re-reads the committed value — what
+        // you see is what the cache will actually store.
+        cellExtra={(v, i, which) => (
+          <input
+            type="color"
+            className="pair-colour-pick"
+            value={`#${hslToRgb(v & 0xffff).toString(16).padStart(6, '0')}`}
+            title={`HSL16 ${v & 0xffff} — pick a colour to set the nearest palette value`}
+            onChange={(e) => {
+              const hex = e.target.value
+              const r = parseInt(hex.slice(1, 3), 16)
+              const g = parseInt(hex.slice(3, 5), 16)
+              const b = parseInt(hex.slice(5, 7), 16)
+              setPair('originalColors', 'modifiedColors', i, which, rgbToHsl16(r, g, b))
+            }}
           />
         )}
       />

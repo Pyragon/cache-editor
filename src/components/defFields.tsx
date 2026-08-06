@@ -459,14 +459,14 @@ export function PairTable({ title, srcLabel, dstLabel, src, dst, onSet, onAdd, o
   srcIcon?: (value: number) => ReactNode
   // Optional adornment rendered beside EVERY value input (both columns) —
   // e.g. an HSL16 colour swatch, or a View jump link for texture ids.
-  cellExtra?: (value: number) => ReactNode
+  cellExtra?: (value: number, index: number, which: 0 | 1) => ReactNode
 }) {
   const cell = (value: number, i: number, which: 0 | 1) => (
     <td>
       {cellExtra ? (
         <span className="pair-cell-inner">
           <NumberInput className="cell-input" value={value} onChange={(v) => onSet(i, which, v)} />
-          {cellExtra(value)}
+          {cellExtra(value, i, which)}
         </span>
       ) : (
         <NumberInput className="cell-input" value={value} onChange={(v) => onSet(i, which, v)} />

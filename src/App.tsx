@@ -25,7 +25,7 @@ import PlayerDefaultsModal from './components/PlayerDefaultsModal'
 import VarOverridesModal from './components/VarOverridesModal'
 import { resolveRetextureAssets } from './components/modelDisplay'
 import { invalidateAnimCompatIndex } from './loaders/animCompat'
-import { invalidateNpcIcon, invalidateObjectIcon } from './components/npcSnapshot'
+import { invalidateInventoryItemIcon, invalidateNpcIcon, invalidateObjectIcon } from './components/npcSnapshot'
 import type { ParticleData } from './loaders/particles'
 import NativeLibrariesViewer from './components/NativeLibrariesViewer'
 import type { NativeLibrariesData } from './loaders/native_libraries'
@@ -723,6 +723,7 @@ function App() {
     // The snapshot icons reflect the def — regenerate after a save.
     if (selectedEntry.name === 'npcs') invalidateNpcIcon(selectedItem.id)
     if (selectedEntry.name === 'objects') invalidateObjectIcon(selectedItem.id)
+    if (selectedEntry.name === 'items') invalidateInventoryItemIcon(selectedItem.id)
 
     // In a dropped (Firefox) session nothing reached disk — the shim collected the
     // bytes instead. Hand them over as a download; several files become one zip whose
@@ -1850,7 +1851,7 @@ function App() {
                 : varContent != null
                 ? <VarViewer data={varContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : inventoryContent != null
-                ? <InventoryViewer data={inventoryContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <InventoryViewer data={inventoryContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} cacheRoot={cacheHandle} />
                 : hitbarContent != null
                 ? <HitbarViewer data={hitbarContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : basContent != null
@@ -1906,7 +1907,7 @@ function App() {
                 : fontContent != null
                 ? <FontViewer data={fontContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
                 : quickChatContent != null
-                ? <QuickChatViewer data={quickChatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} />
+                ? <QuickChatViewer data={quickChatContent} onSave={(d) => handleSaveItem(d)} onDirtyChange={setIsContentDirty} cacheRoot={cacheHandle} onNavigate={(entryName, id) => handleNavigateToItem(entryName, id)} />
                 : <pre className="content-json">{JSON.stringify(selectedItemContent, null, 2)}</pre>}
               </>
             ) : selectedItem ? (

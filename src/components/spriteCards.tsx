@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { CursorDef } from '../loaders/config/cursors'
 import { loadSpriteMeta, renderFrameToCanvas } from './spriteRender'
-import { getModelIcon, peekModelIcon } from './npcSnapshot'
+import { getModelIcon, peekModelIcon, getInventoryItemIcon, peekInventoryItemIcon } from './npcSnapshot'
 
 // Small preview cards backed by the sprites entry, shared by the item and
 // NPC viewers. Both reuse the .item-cursor-* card styles (ItemViewer.css).
@@ -72,6 +72,42 @@ export function ModelSnapshotIcon({ cacheRoot, modelId }: {
   return url
     ? <img className="npc-model-row-icon" src={url} alt="" />
     : <span className="npc-model-row-icon" />
+}
+
+/** An item's inventory icon RENDERED from its def — the model in the item's
+ *  own icon pose, recolours applied — instead of the pre-baked public/icons
+ *  PNGs. Falls back to the static PNG while rendering (and permanently when
+ *  the item has no model). */
+export function RenderedItemIcon({ cacheRoot, itemId, className = 'item-icon' }: {
+  cacheRoot: FileSystemDirectoryHandle | null
+  itemId: number
+  className?: string
+}) {
+  const [url, setUrl] = useState<string | null>(peekInventoryItemIcon(itemId) ?? null)
+  // peek: undefined = not tried yet, null = tried and failed (cached failure)
+  const [failed, setFailed] = useState(peekInventoryItemIcon(itemId) === null)
+
+  useEffect(() => {
+    let cancelled = false
+    const peeked = peekInventoryItemIcon(itemId)
+    setUrl(peeked ?? null)
+    setFailed(peeked === null)
+    if (!cacheRoot || itemId < 0) return
+    getInventoryItemIcon(cacheRoot, itemId).then((u) => {
+      if (cancelled) return
+      if (u) setUrl(u)
+      else setFailed(true)
+    })
+    return () => { cancelled = true }
+  }, [cacheRoot, itemId])
+
+  if (url) return <img className={className} src={url} alt="" />
+  if (itemId < 0) return <span className={`${className} item-icon-empty`} />
+  // Deliberately NO static-PNG fallback: those were scraped from a later
+  // revision and quietly wrong, and a fallback hides render bugs. A failed
+  // render should look failed.
+  if (failed) return <span className={`${className} item-icon-missing`} title={`item ${itemId}: icon failed to render`}>?</span>
+  return <span className={`${className} item-icon-empty`} />
 }
 
 /** One frame of a sprite group, straight from the sprites entry (an NPC's
