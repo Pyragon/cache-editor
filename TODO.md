@@ -8,16 +8,15 @@ Open work only — completed passes live in git history and README.
 
 ## Animations
 
-- **Hand-item override round-trip (2026-08-05):** darkan treats an EXPLICIT
-  replacementShield/Weapon of 65535 as “empty the hand” and a missing opcode as
-  “no override”, but the dump stores 65535 for both (15,773/17,186 sequences).
-  CHECKED (2026-08-05): cryogen’s AnimationDefinitions defaults the fields to
-  65535 AND skips opcodes 6/7 on encode when the value is 65535 — so an
-  explicit empty-hands 65535 is conflated with “absent” at dump time and
-  dropped at repack. Fix: default to −1 like darkan, treat decoded 65535 as a
-  real value, emit the opcode whenever ≠ −1; then re-dump animations and
-  update the studio’s hand-item hints/defaults to offer 65535 as a real
-  “empty the hand” option.
+- **Studio has no per-frame sound editing (2026-08-05).** A sequence carries
+  per-frame sound cues in parallel arrays: `soundSettings` (one `number[] |
+  null` per frame), `frameSoundVolume`, `soundMinDelay`, `soundMaxDelay`. The
+  studio's save already permutes them correctly when frames are reordered, and
+  they're only reachable as raw JSON on the animations page. Wanted: a sound
+  lane in the studio dope sheet (see which frames cue a sound, edit/add/remove,
+  ideally audition via the sound_effects player). Before building it, diff the
+  packed `soundSettings` entry structure against darkan's SeqType decode —
+  what the ints pack (sound id / radius / volume?) hasn't been traced.
 
 - **Keyframe tweening is PORTED (2026-07-28)** — `applyAnimationFrame` takes an
   optional next frame + elapsed/duration and blends per the client's
@@ -29,10 +28,11 @@ Open work only — completed passes live in git history and README.
   cutscene loc idles) and the cutscene entity/object/gfx poser, which re-poses
   tweened holders every render frame with the sub-cycle fraction. CONFIRMED
   working in cutscenes (Cody, 2026-07-28). Still open: ModelViewer's sequence
-  preview and SpotAnimationViewer don't use it (exact-frame stepping); the
-  cutscene wrap tween targets frame 0 rather than the client's
-  `frames.length - loopDelay` loop-back point (our playback loops the whole
-  sequence).
+  preview and SpotAnimationViewer don't use it (exact-frame stepping). The
+  wrap tween is client-correct everywhere else as of 2026-08-05: the cutscene
+  player (`nextFrameIndex`), `LocAnimator` (tail-looping clock + loop-back
+  tween target) and the studio all target `frames.length - loopDelay`, and
+  non-looping sequences hold their last frame instead of tweening to 0.
 - **Not ported in `skeletalAnimation.ts`:**
   - **The BAS equipment-matrix branch inside `animateTransform`** (the `verticesData.isNotEmpty()` case, a full 3×3 rotation-matrix composition) — always empty/null in the base playback path (confirmed via every real call site), needed only for equipment-piece-specific pose adjustments.
   - **Submesh gating** (`verticesSubmeshes`, restricting a transform to specific equipment pieces in a composite) — not built into `mergeModels()`'s output yet, so multi-part composites (identikit/equipment stacks) can't be animated with full correctness.
@@ -171,6 +171,67 @@ page, where "all" means all 247 banks. Worth deciding whether the unreferenced
 
 
 ## Maps
+
+### Procedural region generation — design in `docs/procgen.md` (2026-08-05)
+
+Planned, not started. Read the doc before building: deterministic generator
+first (noise heights → flattened building PLOTS, no buildings → A* paths as
+grey overlay → biome underlay paint), working over any W×H created area;
+then single-region regenerate with fixed-border meshing into neighbours;
+then the optional BYOK Claude layer (user's own API key, structured-outputs
+spec — Claude sets the knobs, never the tiles). Prefab stamping is a separate
+future system — Cody keeps his own notes for it. Foundations landed
+2026-08-05: N×N build span in the 3D view, W×H bulk area creation (cap 64×64)
+in the region picker.
+
+### TEST: multi-region span + bulk creation + free zoom (2026-08-05)
+
+Typecheck/lint pass; untested in a real browser session. The 3D "Regions"
+selector (1×1–9×9): the CENTRE region builds under the loading screen and the
+rest of the span pops in silently afterwards, nearest ring first — check the
+load time at 3×3 matches 1×1, neighbours appear without flicker, their locs
+respect the current plane/Objects toggles when they land (bgBuildRev sweep),
+a 3×3 build looks seamless at the borders, editing still only touches the
+centre region, and changing span mid-background-build tears down cleanly.
+Bulk create: make a 2×2 and a bigger area over a partially-used spot —
+existing regions must be skipped, files appear on disk immediately, the
+picker shows them, and the confirm dialog's counts are right.
+
+FREE ZOOM replaced OrbitControls' dolly (which stalls asymptotically near
+the ground — Cody's long-standing frustration): the wheel now flies the
+camera along the ray under the cursor, orbit pivot travelling with it, with
+a minimum step so it never stalls and a ~120-unit standoff at the surface.
+Check: zooming lands you at the ground wherever the cursor points; orbiting
+after a deep zoom pivots sensibly; zoom-out feels right; trackpad speed is
+sane; Ctrl+wheel still page-zooms; POV Ctrl+wheel still rides planes. Knobs
+are the FREEZOOM_* constants in MapSceneViewer.tsx.
+
+SEAM FIXES (2026-08-05, verified in the headless rig at the 50,50/49,50
+border): four root causes, all single-region assumptions exposed by building
+neighbours. (1) rebuildCenterImpl wrote the centre draft into the hardcoded
+3×3 grid slot `[1][1]` — now decodeRadius-indexed. (2) computeOverlayPerimeter
+stopped corner blends at the region edge — now takes a `beyond` lookup fed by
+SceneMosaic.overlayPerimeterFor. (3) `hasFacesOn` neighbour consults gave up
+at the border, flipping border tiles into a different face family than the
+other side — now cross-region via SceneMosaic.overlayTileBeyondFor. (4) THE
+NEEDLE HOLES: averageHeight's out-of-range branch corner-SNAPPED the exact
+boundary coordinate 32768 that last-column edge vertices sit on, so a border
+tile's ring midpoints got the corner height (832) while the neighbour's edge
+interpolated (784) — mismatched edge profiles opened sliver gaps. Now
+clamp-then-interpolate: both sides compute bit-identical integer edges.
+Also matched the client's split-edge check order (method5850: 0,2,1,3), and
+region offsets are baked into terrain/riverbed GEOMETRY rather than
+mesh.position (float32 transform-path identity at seams; picking unaffected —
+it consumes world-space hit points). (5) CROSS-REGION SHADOWS
+(it visibly bit — Cody's screenshot showed the step): raw shadow grids are
+cached per cell (`cellRawShadows`), composition maxes shared border vertices
+and lets the blur kernel tap across the seam; ring cells compose against
+already-built neighbours, and a final background "relighting" pass (shown in
+the pill) recomposes every cell once all grids exist and rebuilds terrain
+only where the composition changed. Riverbeds are shadow-independent and
+never rebuilt; rebuildCenterImpl uses the same composition so edits don't
+regress the border. Rig-verified: the pixel diff localizes exactly to the
+building shadows at the seam corridor.
 
 ### Locs are merged into one mesh per plane — the client keeps them separate
 
@@ -338,8 +399,42 @@ real cache, in rough risk order:
 - **World map preview** — render a visual of the area's rects (game-world rectangles → their map placement) so you can see what region of the world an area covers instead of reading raw coordinates. Could start as a simple 2D canvas plotting the rects to scale, and eventually underlay actual map tiles.
 - **Revisit world-map icons (2026-07-25).** `map_areas/static_elements` pins were being drawn on the 3D view's minimap behind a "World-map icons" toggle; the toggle is now gone and they're simply not drawn, because the quest markers among them (icon sprite 1692 — every "Start of …"/"Route to …", all `displayedOnMinimap: false`) are 52×52 cyan crosses that bury the map. Lumbridge alone stacks ten around the castle. They still deserve a home, just not there — the natural one is the **world map preview** above, which is what they're actually indexed for. Note the set is mixed: of Lumbridge's 24 static elements, 14 *are* flagged `displayedOnMinimap: true` (bank/altar-style pins, several with `defaultIconArchive: -1` and so no icon at all), so whatever surfaces them should split the two rather than showing the lot. `MapSceneViewer.tsx`'s copy of the loader (`staticElements`/`staticBitmaps` — scanned `map_areas/static_elements`, filtered to the centre region, resolved each `areaId` to its icon) went with the draw; recover it from git history if it's useful. The `AreaViewer` page still loads the same data independently via `map_areas.ts`'s `staticElementsDir`, so nothing else regressed.
 
+## Lighting (paused 2026-08-06 — close, not exact)
+
+Read `docs/lighting.md` §§4-6 first; four traced bugs were fixed this session and
+the scene is much closer but **still reads slightly bright, and is unverified in
+the exact-match sense**. Open, in the order worth doing:
+
+- **Re-measure before touching anything.** The measurement method is the one that
+  actually worked: take a viewer/client screenshot pair of the same spot, compare
+  per-channel means and luminance percentiles. Flat percentile deltas ⇒ additive
+  (fog/bloom); proportional ⇒ a lighting scale; equal per-channel ratios ⇒ a
+  missing colour multiply. Three hours of client tracing produced less than one
+  measurement did. The last numbers left a residual of ~1.08× (castle) / ~1.14×
+  (kitchen) AFTER the sun-colour fix — get fresh ones, that residual predates it.
+- **Ground point lights are not implemented** — `Class329.method5834:234`
+  `if (aBool3780) sceneObjectManager.method3431()`, gated on the same lighting
+  detail flag. In-client the torches pool warm light on the FLOOR; we only light
+  locs, which is exactly Cody's "point lights don't change the ground colour".
+  Doing this properly wants the shader move below.
+- **Loc point lights read too bright** (Cody, 2026-08-06). Check the falloff
+  `radiusSq/d²` and the HSV→HSL colour conversion before retuning anything.
+- **Move point lights off the vertex bake into the loc shader** — the standing
+  plan in `docs/lighting.md`; unlocks flicker and live light editing, and is a
+  prerequisite for doing ground point lights sanely.
+- **`CutscenePlayer` still uses the old relative `sunTintFor`** — known-wrong
+  (see §6), left alone deliberately so the map view can be signed off first.
+- **Scenery shadows (Static/Dynamic/None) and character shadows** — never
+  started; character shadows do cover NPCs (`NPCEntity.java:426`).
+
 ## Textures / Texture Definitions
 
+- **`alpha` and `detailsOnly` are misnamed in the dump** — they are the client's
+  `shadowFactor` and `isGroundMesh` (decode order verified in three decoders; see
+  `EDITOR.md`). The data is correct, only the names are wrong, so this is a
+  cryogen rename + re-dump whenever the decoder gets an audit pass. Any editor UI
+  for them must show the `& 0xff` value: they are signed bytes, so `-1` means
+  **255** (shadowFactor) / a **2.0×** multiplier (brightness), not "none".
 - **No way to add/remove/reorder op nodes yet** — the editor edits existing nodes and rewires inputs, but can't grow the graph. Adding a node means appending to `textureOperations` *and* `operationIndices` together, and re-checking the three root indices.
 - **Replace an *existing* texture's image.** "New from image" covers creating a texture from an upload, but swapping the image of an existing material is still missing: for sprite-backed materials it can write a new sprite and repoint the sampler op; for procedural ones it would mean replacing the whole graph with a single sprite sampler (destructive — should be an explicit, warned action).
 

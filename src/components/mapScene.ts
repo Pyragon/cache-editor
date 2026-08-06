@@ -273,14 +273,16 @@ vec3 rsToLinear( vec3 c ) {
  *  colour's HSL lightness by `lightStrength/128` (ambient 74 minus static shadow,
  *  the source of the ground's shading), then (2) multiply the resulting RGB by
  *  the directional sun multiplier. Both clamped like the client. */
-function litColor(hsl: number, mul: number): [number, number, number] {
-  const rgb = hslToRgb(hsl)
+function litRgb(rgb: number, mul: number): [number, number, number] {
+  // clamped per channel at every lighting detail — Node_Sub6.method12145 clamps
+  // each channel to 0..255, and the D3D9 path saturates to [0,1] on top
   return [
     srgbToLinear(Math.min(1, (((rgb >> 16) & 0xff) / 255) * mul)),
     srgbToLinear(Math.min(1, (((rgb >> 8) & 0xff) / 255) * mul)),
     srgbToLinear(Math.min(1, ((rgb & 0xff) / 255) * mul)),
   ]
 }
+
 
 // ---------------------------------------------------------------------------
 // Terrain default-height noise (TileUtils / Class159 / Class430)
@@ -795,17 +797,26 @@ export function computeRiverbedHeights(surface: Int32Array[], depth: Int32Array[
   })
 }
 
-/** Ground.getAverageHeight — bilinear height at 512-scale scene coords. */
+/** Ground.getAverageHeight — bilinear height at 512-scale scene coords.
+ *
+ *  Clamp INTO the grid and then interpolate — never snap to a corner. The
+ *  old out-of-range branch returned the nearest vertex height whenever
+ *  `sceneX >> 9` reached the 65th column, which includes the EXACT boundary
+ *  coordinate 32768 that every last-column edge vertex sits on. A ring
+ *  midpoint on a region's border edge took the corner's height instead of
+ *  the edge-interpolated one, while the adjacent region's matching edge
+ *  (tileX 0, proper bilinear) ramped linearly — the mismatched profiles
+ *  opened sliver gaps along region seams once neighbours were built. With
+ *  the clamp-then-interpolate form, offX/offY reach 512 at the far edge and
+ *  both sides of a seam compute BIT-IDENTICAL integer edge profiles (the
+ *  client never split this: its grid spans the whole build area). */
 export function averageHeight(heights: Int32Array, sceneX: number, sceneY: number): number {
-  const tileX = sceneX >> 9
-  const tileY = sceneY >> 9
-  if (tileX < 0 || tileY < 0 || tileX > VERTS - 2 || tileY > VERTS - 2) {
-    const cx = Math.min(Math.max(tileX, 0), VERTS - 1)
-    const cy = Math.min(Math.max(tileY, 0), VERTS - 1)
-    return heights[cx * VERTS + cy]
-  }
-  const offX = sceneX & 511
-  const offY = sceneY & 511
+  const cx = Math.min(Math.max(sceneX, 0), (VERTS - 1) << 9)
+  const cy = Math.min(Math.max(sceneY, 0), (VERTS - 1) << 9)
+  const tileX = Math.min(cx >> 9, VERTS - 2)
+  const tileY = Math.min(cy >> 9, VERTS - 2)
+  const offX = cx - (tileX << 9)
+  const offY = cy - (tileY << 9)
   const h1 = (heights[tileX * VERTS + tileY] * (512 - offX) + offX * heights[(tileX + 1) * VERTS + tileY]) >> 9
   const h2 = (heights[tileX * VERTS + tileY + 1] * (512 - offX) + heights[(tileX + 1) * VERTS + tileY + 1] * offX) >> 9
   return (h2 * offY + h1 * (512 - offY)) >> 9
@@ -823,6 +834,12 @@ export type SunConfig = {
   z: number
   /** environment sunAmbient — client: intensity = (0.7 + brightness·0.1) · ambient · 65535 */
   ambient: number
+  /** Lighting detail HIGH only: environment sunLight / sunBacklight. When
+   *  `light` is present the ground grid uses the region's own sun instead of
+   *  the flat constants (which is exactly the client's lighting-detail switch,
+   *  Atmosphere.method11468). */
+  light?: number
+  backlight?: number
 }
 
 export const DEFAULT_SUN: SunConfig = { x: -50, y: -60, z: -50, ambient: 1.1523438 }
@@ -845,13 +862,18 @@ const GROUND_STRENGTH_BASE = 74
 const GROUND_AMBIENT = DEFAULT_MODEL_SUN.ambientColour[0] // 1.1523438
 const GROUND_SUN = DEFAULT_MODEL_SUN.sunColour[0] // 0.69921875
 const GROUND_BACKLIGHT = DEFAULT_MODEL_SUN.antiSunColour[0] // 1.2
-// display-space factor a full-strength lightness cut works out to through the
-// palette's pow-0.7 — the textured (neutral-tint) path has no lightness to
-// scale, so it takes the equivalent multiplier instead
-const GROUND_CUT_DISPLAY = Math.pow(GROUND_STRENGTH_BASE / 128, 0.7) // ≈0.681
-function computeVertexLightGrid(heights: Int32Array, verts: number, brightness = 1): Float32Array {
-  const sl = Math.hypot(DEFAULT_MODEL_SUN.dir[0], DEFAULT_MODEL_SUN.dir[1], DEFAULT_MODEL_SUN.dir[2]) || 1
-  const sdx = DEFAULT_MODEL_SUN.dir[0] / sl, sdy = DEFAULT_MODEL_SUN.dir[1] / sl, sdz = DEFAULT_MODEL_SUN.dir[2] / sl
+/** Scalar ground-sun terms. Absent = the client's LOW/flat constants; present
+ *  (lighting detail HIGH) = the region environment's own values. Colour stays
+ *  approximated by the scene-wide sunColour tint — the true HIGH ground is
+ *  shader-lit per channel, a later step of the lighting-detail work. */
+export type GroundSun = { ambient: number; light: number; backlight: number; dir: [number, number, number] }
+function computeVertexLightGrid(heights: Int32Array, verts: number, brightness = 1, gs?: GroundSun): Float32Array {
+  const dir = gs?.dir ?? DEFAULT_MODEL_SUN.dir
+  const sl = Math.hypot(dir[0], dir[1], dir[2]) || 1
+  const sdx = dir[0] / sl, sdy = dir[1] / sl, sdz = dir[2] / sl
+  const amb = gs?.ambient ?? GROUND_AMBIENT
+  const sunL = gs?.light ?? GROUND_SUN
+  const back = gs?.backlight ?? GROUND_BACKLIGHT
   const light = new Float32Array(verts * verts)
   for (let x = 0; x < verts; x++) {
     for (let y = 0; y < verts; y++) {
@@ -868,7 +890,7 @@ function computeVertexLightGrid(heights: Int32Array, verts: number, brightness =
       // The client Brightness preference scales ONLY the ambient term:
       // Class239:141 — IA((0.7 + brightness·0.1) · 1.1523438). Default 3 → ×1.
       const ndl = sdx * nx + sdy * ny + sdz * nz
-      light[x * verts + y] = GROUND_AMBIENT * brightness + ndl * (ndl > 0 ? GROUND_SUN : GROUND_BACKLIGHT)
+      light[x * verts + y] = amb * brightness + ndl * (ndl > 0 ? sunL : back)
     }
   }
   return light
@@ -878,12 +900,23 @@ function computeVertexLight(heights: Int32Array, brightness = 1): Float32Array {
   return computeVertexLightGrid(heights, VERTS, brightness)
 }
 
-/** Bilinear brightness multiplier at 512-scale coords (GL ground vertex light). */
+/** Bilinear brightness multiplier at 512-scale coords (GL ground vertex light).
+ *
+ *  Same boundary trap as `averageHeight`: `Math.min(sceneX >> 9, VERTS-2)`
+ *  with `sceneX & 511` gave the exact boundary coordinate 32768 tile 63 at
+ *  WEIGHT 0 — every border-column vertex sampled its light AND its static
+ *  shadow one column in from the shared edge. Lighting varies smoothly, but
+ *  shadows are steps, so the whole border column took the wrong shadow value
+ *  and drew a hard line down every region seam. Clamp then interpolate: offX
+ *  reaches 512 at the far edge, weighting the shared column fully, so both
+ *  sides of a seam read identical values. */
 function lightAt(light: Float32Array, sceneX: number, sceneY: number): number {
-  const tileX = Math.min(sceneX >> 9, VERTS - 2)
-  const tileY = Math.min(sceneY >> 9, VERTS - 2)
-  const offX = sceneX & 511
-  const offY = sceneY & 511
+  const cx = Math.min(Math.max(sceneX, 0), (VERTS - 1) << 9)
+  const cy = Math.min(Math.max(sceneY, 0), (VERTS - 1) << 9)
+  const tileX = Math.min(cx >> 9, VERTS - 2)
+  const tileY = Math.min(cy >> 9, VERTS - 2)
+  const offX = cx - (tileX << 9)
+  const offY = cy - (tileY << 9)
   const la = light[(tileX + 1) * VERTS + tileY] * offX + light[tileX * VERTS + tileY] * (512 - offX)
   const lb = light[tileX * VERTS + tileY + 1] * (512 - offX) + light[(tileX + 1) * VERTS + tileY + 1] * offX
   return (la * (512 - offY) + lb * offY) / (512 * 512)
@@ -891,29 +924,33 @@ function lightAt(light: Float32Array, sceneX: number, sceneY: number): number {
 
 // ---------------------------------------------------------------------------
 // Cross-region mosaic: heights, lighting and underlay blur computed over the
-// whole 3×3 neighbourhood in one grid, then sliced per region — adjacent
-// slices share identical boundary values, so region seams vanish.
+// whole neighbourhood in one grid, then sliced per region — adjacent slices
+// share identical boundary values, so region seams vanish. The grid is any
+// odd span (3×3, 5×5, …): the caller decodes one ring beyond what it builds,
+// so the outermost BUILT regions still blend seam-free.
 // ---------------------------------------------------------------------------
 
-const MOSAIC = 3 * SIZE // 192 tiles across the 3×3
-const MVERTS = MOSAIC + 1
-
 export class SceneMosaic {
-  private heights: Int32Array[] = [] // per plane, MVERTS²
+  private heights: Int32Array[] = [] // per plane, mverts²
   private lights: Float32Array[] = []
   private sliceCache = new Map<string, { heights: Int32Array[]; lights: Float32Array[] }>()
-  /** regions[dx+1][dy+1]; null when that neighbour isn't dumped. */
+  /** regions[dx+radius][dy+radius]; null when that neighbour isn't dumped. */
   private regions: (MapTerrain | null)[][]
   private regionX: number
   private regionY: number
   private configs: SceneConfigs
+  /** regions each side of the centre — (span − 1) / 2 */
+  private radius: number
+  /** mosaic width in tiles / vertices */
+  private tiles: number
+  private mverts: number
 
   constructor(
     regions: (MapTerrain | null)[][],
     regionX: number,
     regionY: number,
     configs: SceneConfigs,
-    _sun: SunConfig = DEFAULT_SUN,
+    sun: SunConfig = DEFAULT_SUN,
     /** client Brightness preference factor (0.7 + 0.1·pref); ambient only */
     brightness = 1,
   ) {
@@ -921,13 +958,17 @@ export class SceneMosaic {
     this.regionX = regionX
     this.regionY = regionY
     this.configs = configs
+    this.radius = (regions.length - 1) / 2
+    this.tiles = regions.length * SIZE
+    this.mverts = this.tiles + 1
+    const { tiles, mverts } = this
     for (let plane = 0; plane < 4; plane++) {
-      const h = new Int32Array(MVERTS * MVERTS)
+      const h = new Int32Array(mverts * mverts)
       const prev = plane > 0 ? this.heights[plane - 1] : null
-      for (let gx = 0; gx < MVERTS; gx++) {
-        for (let gy = 0; gy < MVERTS; gy++) {
-          const tx = Math.min(gx, MOSAIC - 1)
-          const ty = Math.min(gy, MOSAIC - 1)
+      for (let gx = 0; gx < mverts; gx++) {
+        for (let gy = 0; gy < mverts; gy++) {
+          const tx = Math.min(gx, tiles - 1)
+          const ty = Math.min(gy, tiles - 1)
           const rdx = Math.floor(tx / SIZE)
           const rdy = Math.floor(ty / SIZE)
           const terrain = this.regions[rdx]?.[rdy]
@@ -941,19 +982,24 @@ export class SceneMosaic {
           let out: number
           if (presence) {
             if (value === 1) value = 0
-            out = plane === 0 ? -((value * 8) << 2) : prev![gx * MVERTS + gy] - ((value * 8) << 2)
+            out = plane === 0 ? -((value * 8) << 2) : prev![gx * mverts + gy] - ((value * 8) << 2)
           } else if (plane === 0) {
-            const absX = (this.regionX - 1) * 64 + gx
-            const absY = (this.regionY - 1) * 64 + gy
+            const absX = (this.regionX - this.radius) * 64 + gx
+            const absY = (this.regionY - this.radius) * 64 + gy
             out = -calculateTileHeight(absX + 932731, absY + 556238) * 8 << 2
           } else {
-            out = prev![gx * MVERTS + gy] - 960
+            out = prev![gx * mverts + gy] - 960
           }
-          h[gx * MVERTS + gy] = out
+          h[gx * mverts + gy] = out
         }
       }
       this.heights.push(h)
-      this.lights.push(computeVertexLightGrid(h, MVERTS, brightness))
+      // lighting detail HIGH: `sun.light` present → the region's own sun
+      // shades the ground (RS dir → GL is (x, −y, −z), as in the model bake)
+      const gs: GroundSun | undefined = sun.light !== undefined
+        ? { ambient: sun.ambient, light: sun.light, backlight: sun.backlight ?? 1.2, dir: [sun.x, -sun.y, -sun.z] }
+        : undefined
+      this.lights.push(computeVertexLightGrid(h, mverts, brightness, gs))
     }
   }
 
@@ -962,8 +1008,9 @@ export class SceneMosaic {
     const key = `${dx},${dy}`
     let cached = this.sliceCache.get(key)
     if (cached) return cached
-    const baseX = (dx + 1) * SIZE
-    const baseY = (dy + 1) * SIZE
+    const { mverts } = this
+    const baseX = (dx + this.radius) * SIZE
+    const baseY = (dy + this.radius) * SIZE
     const heights: Int32Array[] = []
     const lights: Float32Array[] = []
     for (let plane = 0; plane < 4; plane++) {
@@ -971,8 +1018,8 @@ export class SceneMosaic {
       const l = new Float32Array(VERTS * VERTS)
       for (let x = 0; x < VERTS; x++) {
         for (let y = 0; y < VERTS; y++) {
-          h[x * VERTS + y] = this.heights[plane][(baseX + x) * MVERTS + baseY + y]
-          l[x * VERTS + y] = this.lights[plane][(baseX + x) * MVERTS + baseY + y]
+          h[x * VERTS + y] = this.heights[plane][(baseX + x) * mverts + baseY + y]
+          l[x * VERTS + y] = this.lights[plane][(baseX + x) * mverts + baseY + y]
         }
       }
       heights.push(h)
@@ -989,12 +1036,12 @@ export class SceneMosaic {
    *  vertices blend between the palettes of the 4 tiles meeting there
    *  (addUnderlayTiles), so consumers need one tile beyond the region. */
   paletteFor(dx: number, dy: number, plane: number): Int32Array {
-    const baseX = (dx + 1) * SIZE
-    const baseY = (dy + 1) * SIZE
+    const baseX = (dx + this.radius) * SIZE
+    const baseY = (dy + this.radius) * SIZE
     const palette = new Int32Array(VERTS * VERTS).fill(-1)
     const fluCache = new Map<number, { hue: number; saturation: number; lightness: number; divisor: number }>()
     const compAt = (gx: number, gy: number) => {
-      if (gx < 0 || gy < 0 || gx >= MOSAIC || gy >= MOSAIC) return null
+      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return null
       const rdx = Math.floor(gx / SIZE)
       const rdy = Math.floor(gy / SIZE)
       const terrain = this.regions[rdx]?.[rdy]
@@ -1043,11 +1090,11 @@ export class SceneMosaic {
    *  blurred palette (the client's calculateOverlayDisplay slot machinery) —
    *  this is what melts roads/mud patches into the surrounding ground. */
   overlayCornerFor(dx: number, dy: number, plane: number): Int32Array {
-    const baseX = (dx + 1) * SIZE
-    const baseY = (dy + 1) * SIZE
+    const baseX = (dx + this.radius) * SIZE
+    const baseY = (dy + this.radius) * SIZE
     const out = new Int32Array(VERTS * VERTS).fill(-1)
     const tileAt = (gx: number, gy: number): number => {
-      if (gx < 0 || gy < 0 || gx >= MOSAIC || gy >= MOSAIC) return 0
+      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return 0
       const rdx = Math.floor(gx / SIZE)
       const rdy = Math.floor(gy / SIZE)
       const terrain = this.regions[rdx]?.[rdy]
@@ -1097,12 +1144,12 @@ export class SceneMosaic {
    *  skip-empties rule, but sampling neighbour regions through the mosaic so
    *  region borders don't seam. -1 = tile has no underlay (stays black). */
   underlayRgbBlurFor(dx: number, dy: number, plane: number): Int32Array {
-    const baseX = (dx + 1) * SIZE
-    const baseY = (dy + 1) * SIZE
+    const baseX = (dx + this.radius) * SIZE
+    const baseY = (dy + this.radius) * SIZE
     const out = new Int32Array(SIZE * SIZE).fill(-1)
     const rgbCache = new Map<number, number>()
     const rgbAt = (gx: number, gy: number): number => {
-      if (gx < 0 || gy < 0 || gx >= MOSAIC || gy >= MOSAIC) return -1
+      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return -1
       const rdx = Math.floor(gx / SIZE)
       const rdy = Math.floor(gy / SIZE)
       const terrain = this.regions[rdx]?.[rdy]
@@ -1143,13 +1190,13 @@ export class SceneMosaic {
    *  the tile whose origin sits at that corner (addUnderlayTiles), which the
    *  splatting passes crossfade between. */
   underlayCornerFor(dx: number, dy: number, plane: number): Int32Array {
-    const baseX = (dx + 1) * SIZE
-    const baseY = (dy + 1) * SIZE
+    const baseX = (dx + this.radius) * SIZE
+    const baseY = (dy + this.radius) * SIZE
     const out = new Int32Array(VERTS * VERTS)
     for (let x = 0; x < VERTS; x++) {
       for (let y = 0; y < VERTS; y++) {
-        const gx = Math.min(baseX + x, MOSAIC - 1)
-        const gy = Math.min(baseY + y, MOSAIC - 1)
+        const gx = Math.min(baseX + x, this.tiles - 1)
+        const gy = Math.min(baseY + y, this.tiles - 1)
         const rdx = Math.floor(gx / SIZE)
         const rdy = Math.floor(gy / SIZE)
         const terrain = this.regions[rdx]?.[rdy]
@@ -1159,6 +1206,56 @@ export class SceneMosaic {
       }
     }
     return out
+  }
+
+  /** Cross-region overlay perimeter for one region+plane: the same
+   *  computeOverlayPerimeter, but the ±1-tile neighbour lookups keep going
+   *  into the adjacent regions — without this, corner blends (paths, mud
+   *  arcs) stop dead at the seam and adjacent cells triangulate their border
+   *  tiles differently, opening hairline cracks. Null if that region isn't
+   *  in the grid. */
+  /** Packed overlay tile (`id | shapeRot << 8`, 0 = none) lookup that keeps
+   *  going across regions — for `hasFacesOn`'s ±1-tile neighbour consults at
+   *  region borders. Region-local coords for cell (dx, dy); anything outside
+   *  the mosaic (or in an undumped region) reads as no-overlay. */
+  overlayTileBeyondFor(dx: number, dy: number): (plane: number, tx: number, ty: number) => number {
+    const baseX = (dx + this.radius) * SIZE
+    const baseY = (dy + this.radius) * SIZE
+    return (plane, tx, ty) => {
+      const gx = baseX + tx
+      const gy = baseY + ty
+      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return 0
+      const rdx = Math.floor(gx / SIZE)
+      const rdy = Math.floor(gy / SIZE)
+      const terrain = this.regions[rdx]?.[rdy]
+      if (!terrain) return 0
+      const idx = tileIndex(plane, gx - rdx * SIZE, gy - rdy * SIZE)
+      const id = terrain.overlayIds[idx] & 0xff
+      return id === 0 ? 0 : id | ((terrain.overlayShapeRot[idx] & 0xff) << 8)
+    }
+  }
+
+  overlayPerimeterFor(dx: number, dy: number, plane: number): Int32Array | null {
+    const centre = this.regions[dx + this.radius]?.[dy + this.radius]
+    if (!centre) return null
+    const baseX = (dx + this.radius) * SIZE
+    const baseY = (dy + this.radius) * SIZE
+    return computeOverlayPerimeter(centre, plane, this.configs, (tx, ty) => {
+      const gx = baseX + tx
+      const gy = baseY + ty
+      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return null
+      const rdx = Math.floor(gx / SIZE)
+      const rdy = Math.floor(gy / SIZE)
+      const terrain = this.regions[rdx]?.[rdy]
+      if (!terrain) return null
+      const idx = tileIndex(plane, gx - rdx * SIZE, gy - rdy * SIZE)
+      const id = terrain.overlayIds[idx] & 0xff
+      if (id === 0) return null
+      const flo = this.configs.overlays.get(id - 1)
+      if (!flo || !isCornerBlendable(flo)) return null
+      const sr = terrain.overlayShapeRot[idx] & 0xff
+      return { id, shape: sr >> 2, rot: sr & 0x3, flo }
+    })
   }
 }
 
@@ -1205,11 +1302,18 @@ function computeUnderlayCornerIds(terrain: MapTerrain, plane: number): Int32Arra
  * a blend that should cross a region seam stops at it (the same limitation
  * `computeOverlayCorners` has against `SceneMosaic.overlayCornerFor`).
  */
-function computeOverlayPerimeter(terrain: MapTerrain, plane: number, configs: SceneConfigs): Int32Array {
+function computeOverlayPerimeter(
+  terrain: MapTerrain,
+  plane: number,
+  configs: SceneConfigs,
+  /** Tile lookup past the region edge (mosaic) — absent means blends stop
+   *  at the seam, the old single-region behaviour. */
+  beyond?: (tx: number, ty: number) => { id: number; shape: number; rot: number; flo: FloJson } | null,
+): Int32Array {
   const out = new Int32Array(SIZE * SIZE * 8).fill(-1)
   const slots = new Int32Array(8)
   const at = (tx: number, ty: number): { id: number; shape: number; rot: number; flo: FloJson } | null => {
-    if (tx < 0 || ty < 0 || tx >= SIZE || ty >= SIZE) return null
+    if (tx < 0 || ty < 0 || tx >= SIZE || ty >= SIZE) return beyond?.(tx, ty) ?? null
     const idx = tileIndex(plane, tx, ty)
     const id = terrain.overlayIds[idx] & 0xff
     if (id === 0) return null
@@ -1626,7 +1730,7 @@ export async function buildTerrainMesh(
   heightsAll: Int32Array[],
   configs: SceneConfigs,
   assets: LocAssets,
-  pre?: { lights: Float32Array[]; shadows?: Float32Array[]; palettes: Int32Array[]; overlayCorners?: Int32Array[]; underlayCorners?: Int32Array[] },
+  pre?: { lights: Float32Array[]; shadows?: Float32Array[]; palettes: Int32Array[]; overlayCorners?: Int32Array[]; underlayCorners?: Int32Array[]; overlayPerimeters?: (Int32Array | null)[]; overlayTileBeyond?: (plane: number, tx: number, ty: number) => number },
   // Per-plane water-depth grids (VERTS×VERTS, client units) — riverbed minus
   // surface height. When present, water-material vertices get a `waterDepth`
   // attribute for the shore/transparency fade.
@@ -1649,15 +1753,10 @@ export async function buildTerrainMesh(
     (fluCornerCache[dp] ??= pre?.underlayCorners?.[dp] ?? computeUnderlayCornerIds(terrain, dp))
   const perimeterCache: (Int32Array | null)[] = [null, null, null, null]
   const perimeterOf = (dp: number) =>
-    (perimeterCache[dp] ??= computeOverlayPerimeter(terrain, dp, configs))
+    (perimeterCache[dp] ??= pre?.overlayPerimeters?.[dp] ?? computeOverlayPerimeter(terrain, dp, configs))
   const buckets = new BucketSet()
   // lighting-only tint for self-coloured textures (water etc.): the scene light
   // multiplier as a grey the texture multiplies.
-  const neutral = (mul: number): [number, number, number] => {
-    const c = srgbToLinear(Math.min(1, mul))
-    return [c, c, c]
-  }
-
   // Material metadata for every texture this plane can reference, fetched up
   // front: detailsOnly maps get tinted by the tile colour (brightness-
   // normalised by the map's average luma so the tint's own brightness is
@@ -1733,13 +1832,25 @@ export async function buildTerrainMesh(
         for (let e = 0; e < 4; e++) {
           if (ownEdges[(rotation + e) & 0x3]) continue
           const nx = x + EDGE_N[e][0], ny = y + EDGE_N[e][1]
-          if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) continue
-          const nIdx = tileIndex(plane, nx, ny)
-          const nId = terrain.overlayIds[nIdx] & 0xff
-          if (nId === 0) continue
+          let nId: number
+          let nsr: number
+          if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) {
+            // across the region border: consult the mosaic when it's there.
+            // Skipping instead (the old behaviour) picked a DIFFERENT face
+            // family than the tile on the other side of the seam, and the
+            // mismatched triangulations opened hairline cracks.
+            const packed = pre?.overlayTileBeyond?.(plane, nx, ny) ?? 0
+            if (packed === 0) continue
+            nId = packed & 0xff
+            nsr = packed >> 8
+          } else {
+            const nIdx = tileIndex(plane, nx, ny)
+            nId = terrain.overlayIds[nIdx] & 0xff
+            if (nId === 0) continue
+            nsr = terrain.overlayShapeRot[nIdx] & 0xff
+          }
           const nFlo = configs.overlays.get(nId - 1)
           if (!nFlo || floTileHsl(nFlo) === -1) continue
-          const nsr = terrain.overlayShapeRot[nIdx] & 0xff
           const nTable = isCornerBlendable(nFlo) ? BL_EDGE_HAS_FACE : NB_EDGE_HAS_FACE
           hasFacesOn[e] = nTable[nsr >> 2]?.[((nsr & 0x3) + ((e + 2) & 0x3)) & 0x3] === true
         }
@@ -1887,10 +1998,6 @@ export async function buildTerrainMesh(
         const meta = textureId >= 0 ? metas.get(textureId) : null
         const bucket = alphas ? buckets.getBlend(textureId) : buckets.get(textureId)
         bucket.owners.push(x * SIZE + y) // tile index, for terrain picking
-        // detail maps modulate the tile colour; normalise by the map's own
-        // average so the modulation is brightness-neutral
-        const boost = textureId >= 0 && meta?.detailsOnly && hsl !== -1 ? 255 / meta.avgLuma : 1
-        const useTint = textureId < 0 || (meta?.detailsOnly === true && hsl !== -1)
         // water tiles carry a per-vertex depth (surface→riverbed height gap, in
         // client units) so the water shader can fade to transparent at shallow
         // shores. Non-water buckets leave depths empty (default 0 in toMesh).
@@ -1928,12 +2035,28 @@ export async function buildTerrainMesh(
             : mode === 1 ? underlayVertexHsl(px, py)
             : mode === 2 ? overlayVertexHsl(px, py, hsl, ids?.[vi])
             : hsl
-          let rgb: [number, number, number]
-          if (useTint && vHsl !== -1) rgb = litColor(adjustLuminance(vHsl, strength), f53)
-          // textured tiles have no lightness to cut, so they take the
-          // display-space equivalent of the same strength scale
-          else rgb = neutral(f53 * GROUND_CUT_DISPLAY * Math.pow(strength / GROUND_STRENGTH_BASE, 0.7))
-          bucket.colors.push(rgb[0] * boost, rgb[1] * boost, rgb[2] * boost)
+          // Client `Node_Sub6.method12145` — the ground's vertex colour, and the
+          // exact analogue of the model path's method14282 (`texturedBaseRgb`).
+          // The ONLY difference between them is the grey the face colour is
+          // mixed toward: a model uses the constant `ambient·2`, the ground uses
+          // `(74 − shadow)·2`, so the ground's grey darkens with its own shadow.
+          //   base   = palette[hsl, lightness·(74−shadow)>>7]  (−1 ⇒ 0, as i_52)
+          //   mix    = lerp(base, grey, shadowFactor/256)      unless effectId 4
+          //   bright = ×(256+brightness)/256, saturating
+          // then × the directional term, clamped per channel (litRgb).
+          //
+          // What was here before was invented and is what made HIGH blinding:
+          // every textured tile took a flat neutral grey (≈0.68 display) instead
+          // of its own palette colour, and detail maps were additionally scaled
+          // by 255/avgLuma — up to another 2×. The client does neither, and
+          // picks grey-vs-colour off `shadowFactor`, not off `detailsOnly`
+          // (which is really `isGroundMesh` and has nothing to do with colour).
+          const base = vHsl === -1 ? 0 : hslToRgb(adjustLuminance(vHsl, strength))
+          const shade = meta
+            ? ((meta.effectId === 4 ? 0 : meta.shadowFactor & 0xff) | ((meta.texBrightness & 0xff) << 8))
+            : 0
+          const rgb = litRgb(textureId >= 0 ? texturedBaseRgb(base, shade, strength) : base, f53)
+          bucket.colors.push(rgb[0], rgb[1], rgb[2])
           if (alphas) bucket.alphas.push(alphas[vi])
           // world-planar UVs: one repeat per `texScale` scene units
           bucket.uvs.push(sceneX / texScale, sceneY / texScale)
@@ -1950,7 +2073,10 @@ export async function buildTerrainMesh(
       // Shape edge j maps to world edge (j - rotation) & 3.
       const splitFace = (faceIndex: number, a: number, b: number, c: number): [number, number, number][] => {
         if (edgeFace !== null) {
-          for (let j = 0; j < 4; j++) {
+          // the client's if/else chain tests edges in the order 0, 2, 1, 3
+          // (method5850/5851) — a corner face lying on two claimed edges must
+          // split on the same edge the client picks
+          for (const j of [0, 2, 1, 3]) {
             if (edgeFace[j] !== faceIndex) continue
             if (!hasFacesOn[(j - rotation) & 0x3]) continue
             const mid = 2 * j + 1
@@ -3011,6 +3137,29 @@ export function sunTintFor(sunColour: number | undefined): [number, number, numb
   ]
 }
 
+/** The sun colour as the client actually applies it: an ABSOLUTE multiplier
+ *  `sunColour/255`, not a ratio against some reference sun.
+ *
+ *  `HardwareRenderer.iw` (:622-624) splits the colour into `rgb/255` and every
+ *  light uniform is scaled by it — `SunColour = light·rgb`, `AntiSunColour =
+ *  −backlight·rgb`, `AmbientColour = ambient·rgb` (HardwareGround:540-543). The
+ *  client's own baseline is WHITE (`Class239.anInt2935 = 0xFFFFFF`), which is
+ *  what lighting detail LOW substitutes, so at LOW there is no tint at all.
+ *
+ *  `sunTintFor` above measures against a hardcoded 0xDDCCBB instead, which is
+ *  within one blue step of Lumbridge's own 0xDDCEBB — so it returned ≈(1,1,1)
+ *  and cancelled the entire warm sun. That is why the viewer read ~15-35%
+ *  brighter and far colder than the client: measured across two screenshot
+ *  pairs, client ÷ (viewer × sunColour/255) came out at 1.078/1.079/1.092 —
+ *  the same number in all three channels, i.e. exactly this missing multiply. */
+export function sunColourRgb(sunColour: number | undefined): [number, number, number] | null {
+  if (sunColour === undefined) return null
+  const r = ((sunColour >> 16) & 0xff) / 255
+  const g = ((sunColour >> 8) & 0xff) / 255
+  const b = (sunColour & 0xff) / 255
+  return r === 1 && g === 1 && b === 1 ? null : [r, g, b]
+}
+
 /**
  * The locs' static shadows, softened the way the HD client does it
  * (GroundGL.resetLight): effective shadow at a vertex = centre>>1 + west>>2 +
@@ -3968,13 +4117,17 @@ export async function buildLocsMesh(
    *  frustum, which a merged mesh can never reproduce. Omitted = old
    *  behaviour, `tall` comes back empty (the map viewer's path). */
   tallLocUnits?: number,
+  /** Lighting detail HIGH: the region environment's sun (already
+   *  brightness-scaled by modelSunFromEnvironment). Absent = the flat LOW
+   *  constants, the client's own behaviour with the preference off. */
+  sceneSun?: ModelSun,
 ): Promise<{ mesh: THREE.Mesh | null; transparentLocs: THREE.Mesh[]; markers: MarkerInfo[]; shadows: Uint8Array; animated: AnimatedLoc[]; tall: TallLoc[]; emitters: LocEmitter[] }> {
   // the Brightness preference scales the scene ambient — bake it into the sun
   // handed to every placement rather than special-casing computeModelLitRgb
-  const bakeSun: ModelSun | undefined = assets.brightness === 1 ? undefined : {
+  const bakeSun: ModelSun | undefined = sceneSun ?? (assets.brightness === 1 ? undefined : {
     ...DEFAULT_MODEL_SUN,
     ambientColour: DEFAULT_MODEL_SUN.ambientColour.map((c) => c * assets.brightness) as [number, number, number],
-  }
+  })
   const acc = new ModelAccumulator()
   const markers: MarkerInfo[] = []
   const locRefs: LocRef[] = []

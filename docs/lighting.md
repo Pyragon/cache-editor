@@ -49,6 +49,36 @@ same commit — not afterwards.**
 
 ---
 
+## State as of 2026-08-06 (PAUSED — close, not exact)
+
+Four traced bugs fixed in one session (§§5-6 below have the detail). The scene
+is much closer to the client and much warmer, but **Cody's verdict was "still
+not exact"** and no pair has been measured since the last fix.
+
+Fixed: the ground's invented neutral-grey + `255/avgLuma` boost (§5); the sun
+colour being cancelled by a hardcoded `0xDDCCBB` baseline (§6); the brightness
+slider rebuilding only the centre region, so it did nothing in a multi-region
+view; the slider's range starting at 1 when the client's is 0..4.
+
+**Start here next time: MEASURE, don't trace.** Take a viewer/client pair of the
+same spot and compare per-channel means + luminance percentiles:
+
+- deltas flat across percentiles ⇒ something ADDITIVE (fog, bloom, an ambient
+  floor)
+- deltas proportional to value ⇒ a lighting SCALE
+- `client ÷ (viewer × candidate)` equal in all three channels ⇒ a missing
+  COLOUR multiply — that is precisely how §6 was found in minutes after hours of
+  source-tracing had missed it
+
+The last measurement left ~1.08× (castle) / ~1.14× (kitchen) residual, but that
+was taken BEFORE the sun-colour fix, so it is stale — re-shoot first. Suspects
+not yet eliminated: fog strength/curve, the loc point-light bake (Cody reports
+too bright), and the fact that ground point lights are absent entirely, which
+changes what interiors should look like. Open items are listed in `TODO.md`
+under "Lighting".
+
+---
+
 ## Where the compression actually lives
 
 `clientBloom.ts`'s composite already applies the client's tone map:
@@ -246,9 +276,139 @@ floor.
 presumably the per-vertex lighting attributes (2) needs. `MapRegion:863,882`
 apply the flag to the ground and to the high-detail water plane.
 
----
+### 4. The HIGH ground pipeline, end to end (TRACED 2026-08-06)
 
-## The sun formula
+The full `HardwareGround` fork, from vertex build to shader technique — the
+"exact copies" pass:
+
+**Build time** (`HardwareGround.java:897-1055`): every vertex colour starts as
+the palette lookup `Class540.anIntArray7136[hsl & 0xff80 | lightness]` with
+`lightness = (hsl & 0x7f) · (74 − staticShadow) >> 7`, clamped 2..126 — the
+74-cut and the static shadow apply at EVERY detail level. Then:
+
+- `(flags & 0x7) == 0` (LOW): the CPU bakes the directional term into the
+  colour — `f = N·SunDir; f = ambient + f·(f > 0 ? sunLight : backlight)`
+  (`:963-964`), rgb × f clamped per channel 0..255 (`:988-1012`). No normals
+  in the VBO.
+- `(flags & 0x7) != 0` (HIGH): the colour is written **unlit** (palette +
+  shadow cut only) and the vertex **normal goes into the VBO**
+  (`:1028-1047`) for the shader to light live.
+
+Ground normals (`:81-88`): `normalize(dhx, −2·tileScale, dhy)` from ±1-tile
+height gradients — flat ground points −y (up, RS y-down), so with Lumbridge's
+sun the flat-ground N·L is **+0.968 — the sun branch**, both detail levels.
+
+**Draw time** (`HardwareGround.java:503-627`): `(flags & 0x37) == 0` binds the
+Model effect's `Unlit` technique (`method946` — vertex colours pass through).
+Otherwise the sun uniforms are set (`:540-543`) and the per-texture-effect
+switch picks a technique; the default case is
+`aBool8779 ? method950() : method965(0)` where `aBool8779` is the underwater
+flag — so normal HIGH ground is `method965(0)` = **`Standard_0PointLights` of
+the "Model" effect** (`Class48_Sub2.method14567` names all 18 techniques:
+0 Unlit, 1 Unlit_IgnoreAlpha, 2-6 Standard_N, 7-11 Specular_N,
+12-16 EnvironmentalMapping_N, 17 UnderwaterGround).
+
+**The shader** is the already-calibrated model family (`1_12.vert` — uniform
+set matches `Class48_Sub2` exactly):
+`Diffuse = Ambient + max(0,N·L)·Sun + max(0,−N·L)·AntiSun`, then
+`× vertexColour`, saturated at the vertex stage. Uniform values
+(`HardwareGround:540-543` + `HardwareRenderer.iw:614-651`):
+
+- `SunDir` = normalize(sunPosition << 2)
+- `SunColour` = `sunLight · sunRgb`
+- `AntiSunColour` = `−backlight · sunRgb` (negative — away-facing dips below
+  ambient)
+- `AmbientColour` = `(0.7 + 0.1·brightnessPref + jitter) · sunAmbient · sunRgb`
+
+Nothing rescales `sunLight`/`backlight` between the cache decode
+(`Atmosphere.method11468` — `readUnsignedShort()/256`, gated on the lighting
+pref) and the GPU. **So LOW and HIGH ground use the SAME two-sided formula —
+only the constants and the evaluation site differ** — and the viewer's
+`computeVertexLightGrid` already matches it term-for-term: same formula, same
+normals, same dir sign, same 74/shadow cut.
+
+### 5. What the light multiplies — the actual bug (FOUND 2026-08-06)
+
+The formula was right; **the colour it multiplied was invented.** The ground's
+vertex colour is not written in `HardwareGround` at all — it is handed to
+`Node_Sub6.method12145(vertexIndex, colour, 74−shadow, lightFactor)`
+(`HardwareGround:1072`), which is the ground's exact analogue of the model
+path's `method14282`:
+
+```java
+if (textureId != -1) {
+    sf = details.shadowFactor & 0xff;                 // dumped as `alpha`
+    if (sf != 0 && details.effectId != 4) {
+        grey = strength * 131586;                     // 0x020202 → strength·2 per channel
+        colour = lerp(colour, grey, sf / 256);
+    }
+    b = details.brightness & 0xff;
+    if (b != 0) colour = colour * (256 + b) / 256;    // saturating at 255
+}
+if (light != 1.0f) colour = clamp(colour * light);    // LOW only; HIGH leaves light at 1
+```
+
+So the grey a textured tile mixes toward is `(74 − shadow)·2` — **it darkens
+with the tile's own shadow**, and the mix amount is per-texture. The model
+version mixes toward the constant `ambient·2` (=128); that is the only
+difference between the two.
+
+What the viewer did instead, both invented:
+
+1. `useTint` chose *neutral grey vs palette colour* off `detailsOnly` — a field
+   that is really `isGroundMesh` and has nothing to do with colour mixing. So
+   every ordinary textured tile got a flat neutral grey (≈0.68 in display
+   space) where the client uses the tile's own, much darker, palette colour.
+2. Detail maps were additionally scaled by `255/avgLuma` — up to another **2×**
+   — to keep them "brightness-neutral". The client has no such term.
+
+That is the blinding kitchen: grey instead of colour explains "white rather
+than grey", and the two multipliers stack into the ~2× that only became
+obvious once HIGH's `f ≈ 3.37` pushed the result past the clamp. **The same
+bug was present at LOW all along** — at `f ≈ 1.85` it merely looked "a bit
+hot" instead of clipping, which is why the empirical LOW calibration
+(`GROUND_CUT_DISPLAY = pow(74/128, 0.7)`) papered over it. Both invented
+constants are now deleted and `emitTri` calls the client sequence.
+
+### 6. The missing sun COLOUR (MEASURED + FOUND 2026-08-06)
+
+The colour fix in §5 helped but left the scene ~15-35% bright and far too cold.
+Measuring Cody's two screenshot pairs (castle wall, kitchen) rather than
+theorising gave the answer immediately:
+
+| | R | G | B |
+|---|---|---|---|
+| viewer mean | 103.3 | 103.5 | 65.4 |
+| **client mean** | **96.6** | **90.2** | **52.3** |
+| client ÷ (viewer × `sunColour/255`) | 1.078 | 1.079 | 1.092 |
+
+The same constant in all three channels ⇒ the residual is **exactly one missing
+multiply by the sun colour**. Not a brightness scale — a *scale* would not land
+all three channels on the same number, and the per-percentile deltas
+(+12/+11/+11/+10/+10 through the darks and mids) were flat, which ruled out
+bloom too (and `bloomThreshold` is 1.0039, which nothing reaches).
+
+Cause: `sunTintFor` computed the tint **relative to a hardcoded `0xDDCCBB`**.
+Lumbridge's sun is `0xDDCEBB` — one blue step away — so it returned ≈(1,1,1)
+and cancelled the warm sun entirely. The client's baseline is WHITE
+(`Class239.anInt2935 = 0xFFFFFF`, which is exactly what LOW substitutes), and
+the real multiplier is the absolute `sunColour/255` = (0.867, 0.808, 0.733).
+
+Fixed with `sunColourRgb()` (absolute), applied only at lighting detail HIGH —
+at LOW the client's sun IS white, so tinting there would be wrong. Locs keep
+taking it through the `modelSunFromEnvironment` bake (the `takesSunTint` guard
+stops it double-applying); terrain, whose light grid is a scalar, takes it on
+the material where it had been silently ≈1.0. `sunTintFor` is retained only for
+`CutscenePlayer`, which still uses the old relative behaviour — **that is now
+known-wrong and should be moved over once the map view is signed off.**
+
+**Field-name warning.** The dump's `alpha` IS `shadowFactor`, and `detailsOnly`
+IS `isGroundMesh`; the decode ORDER is identical in cryogen, darkan-bot-refactor
+and the game client, so only the names are wrong — the data is correct. Both
+are *signed* bytes in the JSON but the client reads them `& 0xff`, so
+`alpha: -1` means shadowFactor **255** (near-total grey replacement — 630 of
+2591 textures) and `brightness: -1` means a **2.0×** multiplier (202 textures).
+Reading either without the mask inverts the meaning.
 
 The client's model vertex shader (`shaders/glsl/1_12.vert`):
 
@@ -410,9 +570,30 @@ lights and gain the shader in the same step.
 
 ## Environment features not applied at all
 
-Point lights on the ground, HDR values, the sun cube texture, per-chunk
-environment blending (one env per region is used), and the static lighting grid
-(opcode 129 — dumped and round-tripped as opaque base64, never rendered).
+Point lights on the ground, HDR values, and the sun cube texture.
+
+Two former entries here were traced 2026-08-06 and turned out to be non-issues:
+
+- **The "static lighting grid" (opcode 129) is not lighting.** Its ONLY
+  consumer in both darkan clients is the camera: `Isaac.processCamera`
+  (darkan-game-client `Isaac.java:63-66`) and `Camera.processCamera`
+  (darkan-bot-refactor `Camera.kt:85-87`) read
+  `(byte & 0xff) * 8 << 2` as a *height above the terrain* per tile and use it
+  to raise the minimum camera pitch near tall content (trees, buildings) so
+  the camera doesn't clip through them. It never touches a pixel. Cryogen's
+  `lightingGrid` field name is a decompiler-era misnomer — it's a camera
+  height-hint grid (per plane: type byte; type 1 = one byte per 4×4-tile
+  block, type 2 = copy the plane below).
+- **Per-chunk atmospheres are real machinery but per-region data.** `Class239`
+  keeps an `Atmosphere[sizeX>>3][sizeY>>3]` (one per 8×8-tile chunk,
+  registered by `method4056`) and crossfades the GLOBAL light uniforms over
+  5145 ms (`anInt2942`) when the player's chunk changes (`method4037/4072`).
+  But each region's env tail registers ONE atmosphere for all 64 of its
+  chunks (`Class329_Sub1` registration loop / bot-refactor
+  `SceneGraph.decodeEffectsClient:1033-1043`), so the chunk granularity only
+  matters when crossing region borders — the lighting itself is always one
+  set of global values, exactly what the viewer does with the centre
+  region's env.
 
 ---
 
@@ -467,5 +648,51 @@ same CPU bake.
 4. **The environment sun** behind a lighting-detail toggle: on = region values,
    off = the flat constants we now render correctly. The ON values (peak ~2.75×)
    are where the unclamp + bloom-threshold retune conversation comes back.
+
+   **STATUS 2026-08-06 (evening) — toggle LANDED (default Low); the
+   "unclamp" was WRONG and is reverted; exact DX facts secured; the HIGH
+   ground shader binding is the one open question.**
+
+   The morning attempt unclamped the bakes per this doc's compression theory
+   and blew the scene out (Cody's kitchen/fireplace screenshots). **The
+   theory is falsified**: Lumbridge's dumped whitePoint is 1.0039 — the
+   composite's tone map is an identity there and compresses nothing. The
+   clamps are restored everywhere and are now known to be CLIENT-FAITHFUL,
+   from the DX sources directly:
+
+   - `Class239.method4049` (HIGH) vs `method4052` (LOW), verbatim: identical
+     shape, raw values, no normalization. NOTE the elided term this doc's
+     earlier quote hid: ambient intensity = `(0.7 + brightness·0.1 +
+     MAP_REGION_DECODER.method4428()) · aFloat7081` — method4428 is an
+     additive region term (untraced; 0 in the normal case?). Direction =
+     the atmosphere's `Class385` vector `<<2` per component.
+   - `DirectXRenderer.method13948/13949/13950` (the HardwareRenderer `m`/`IA`
+     hooks): D3D fixed-function light 0 = diffuse `sunLight·sunRgb`, ambient
+     `ambIntensity·sunRgb` (BOTH sun-coloured); light 1 = diffuse
+     `−backlight·sunRgb`, inverted direction. D3D9 saturates lit vertex
+     colours to [0,1] by specification — nothing above 1 ever exists in this
+     path, and the Sub3 CPU bake clamps into 8-bit vertex colours likewise.
+     `modelSunFromEnvironment`'s value mapping is confirmed exact; the CLAMP
+     is part of the model, not an approximation.
+   - **The shipped shader dump (index 31) settles the shader side**:
+     `glsl/1_31.vert` (lowercase family; terrain-side uniforms — waterPlane,
+     waterParams, depth in MultiTexCoord1) computes
+     `hl = clamp(N·L·0.5 + 0.5)`, `lighting = hl·(sun + amb/2) + amb/2`,
+     `gl_FrontColor = colour·lighting` — HALF-LAMBERT plus front-colour
+     saturation. The half-Lambert this doc scorned for the MODEL family is
+     real for this family. 1_12.vert (uppercase, two-sided) remains the
+     model family.
+
+   OPEN before High can be called exact: which shader family the flags-0x7
+   ground binds (the named dumps carry no "Ground" dir — it is one of the
+   numbered programs; find the ground's program selection in
+   HardwareGround/DirectXGround), `method4428`, and the point-light/flicker
+   half (steps 5–6). Current state after the reverts: High = clamped bakes
+   with the region's sun values — locs exact per Sub3; ground uses the f53
+   grid with HIGH scalars + colour clamp, which overshoots the half-Lambert
+   compression if 1_31 turns out to be the HIGH ground family. Calibration
+   targets from Cody's pairs (castle wall 113,111,103→127,111,81; grass
+   78,80,64→81,73,47; kitchen + fireplace screenshots 2026-08-06) are the
+   sign-off bar.
 5. **Point lights into the shader** (the agreed plan above) — unblocks flicker.
 6. **Ground point lights** — the largest single missing path.

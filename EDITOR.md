@@ -237,9 +237,28 @@ green-on-green — the "leaves look drastically different" bug. Ported as
 `texturedBaseRgb` in `mapScene.ts`; the def's `brightness` byte is the same
 method's post-mix `(256+b)/256` boost. **Cryogen's field should be renamed
 `shadowFactor`** (with a re-dump) if the decoder ever gets its audit pass.
-Similarly suspect: `detailsOnly` sits in the decode slot of the client's
-`isGroundMesh` (== byte 0) — semantics happen to align for terrain detail
-maps, but the name is the dumper's, not the client's.
+
+**`detailsOnly` is also a misnomer — it is the client's `isGroundMesh`
+(CONFIRMED 2026-08-06).** Same decode slot AND the same inverted read
+(`readUnsignedByte() == 0`) in cryogen and the client, so the boolean's VALUE
+is right and only the name is wrong. It does not mean "this is a detail map",
+and nothing in the client uses it to decide colour mixing — it gates a
+ground-mesh branch in `HardwareGround:212`.
+
+**Both fields apply to the GROUND too, which we missed until 2026-08-06.** The
+ground's vertex colour goes through `Node_Sub6.method12145`, the exact
+analogue of `method14282`, with one difference: a model mixes toward the
+constant grey `ambient·2`, while the ground mixes toward `(74 − shadow)·2`, so
+the ground's grey darkens with its own static shadow. The viewer had instead
+been picking neutral-grey-vs-colour off `detailsOnly` and scaling detail maps
+by `255/avgLuma` — both invented, together ~2× too bright, and the cause of
+the blown-out "lighting detail HIGH" ground. See `docs/lighting.md` §5.
+
+**Gotcha for any editor page on these:** both are *signed* bytes in the dumped
+JSON but the client reads them `& 0xff`. `alpha: -1` is shadowFactor **255**
+(near-total grey replacement), not "−1" or "none"; `brightness: -1` is a
+**2.0×** multiplier. A UI that shows or edits the raw signed value will read
+as nonsense — show the masked 0..255 value.
 
 ---
 
@@ -343,8 +362,13 @@ pattern), with 0 degenerating to "finish". The rockfall anchor 14813
 is what replayed the burst. maxLoops caps loops only in the client's mode 0
 (entity-armed); explicitly-animated and ctor-armed OBJECT animations are mode
 1 (`anInt5461 != 0` skips the loop counter) and loop endlessly. All ported in
-the cutscene player's stepAnim. Editable nowhere yet; an animations page would
-need opcode 8 (maxLoops, 99 = default) and loopDelay side by side.
+the cutscene player's stepAnim. EDITABLE since 2026-08-05: the studio's
+sequence options edit loopDelay and maxLoops side by side, with the timeline
+marking the tail. The previews follow the same rules now too — the studio's
+playback/tween and `LocAnimator` (map + cutscene loc idles) rewind to
+`count − loopDelay` and never tween the wrap toward frame 0; a non-looping
+sequence holds its last frame. One deliberate preview divergence: non-looping
+sequences replay from the top instead of holding forever.
 
 **`adjustsLightIntensity` (TRACED 2026-07-29, DirectX path).** An earlier note
 here guessed it made the emitter light its surroundings — wrong. `Class54` is
@@ -765,6 +789,18 @@ each a byte × 8/255, so 0..8).
 
 **Not surfaced.** No editor and no repack path. See
 `project_map_env_tail_packing` for the packing state.
+
+**The "lightingGrid" (opcode 129) is a camera field, not a lighting field
+(TRACED 2026-08-06).** Cryogen's name is a decompiler-era misnomer: the only
+consumer in both darkan clients is the camera
+(darkan-game-client `Isaac.processCamera`, `Isaac.java:63-66`), which reads
+`(byte & 0xff) * 8 << 2` as a per-tile *height above the terrain* and raises
+the minimum camera pitch near tall content so the camera doesn't clip into
+trees/buildings. Format: per plane a type byte — 0 = clear (needs a previous
+grid), 1 = one height byte per 4×4-tile block (256 bytes), 2 = copy the plane
+below. An editor for it would be a "camera clearance" brush, not a light tool;
+rendering it as light would be wrong. Renaming the dumped field
+(`cameraHeightGrid` or similar) needs a cryogen change + re-dump.
 
 ---
 

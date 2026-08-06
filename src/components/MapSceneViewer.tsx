@@ -10,9 +10,9 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { LocEntry, MapData, MapRegionDef, MapTerrain } from '../loaders/maps'
 import { SIZE, decodeTerrain, decodeUnderwaterTerrain, tileIndex, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS, LOC_TYPE_LABELS } from '../loaders/maps'
-import { rgbToRenderedHex, DEFAULT_MODEL_SUN, modelUpscale } from '../loaders/models'
+import { rgbToRenderedHex, DEFAULT_MODEL_SUN, modelSunFromEnvironment, modelUpscale } from '../loaders/models'
 import { NumberInput } from './defFields'
-import { blurShadowGrid, sunTintFor, buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildChunkGrid, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef, averageHeight } from './mapScene'
+import { sunColourRgb, buildTerrainMesh, buildLocsMesh, buildMarkersMesh, buildLightsMesh, buildChunkGrid, buildSkyboxMesh, renderMinimapGround, loadRegionEnvironment, loadSceneConfigs, buildLightGrid, lightRadius, lightRgb, lightScenePos, lightRangesFor, LocAssets, SceneMosaic, DEFAULT_SUN, MARKER_COLORS, computeWaterDepth, computeRiverbedHeights, buildAnimatedLocMesh, markerKindFromDef, averageHeight } from './mapScene'
 import { LocAnimator } from './locAnimator'
 import { SceneParticles } from './sceneParticles'
 import { SceneBillboards } from './sceneBillboards'
@@ -26,9 +26,10 @@ import type { AreaInfo, MapSpriteInfo } from './ObjectDefEditor'
 import RegionEnvironmentPanel from './RegionEnvironmentPanel'
 import './MapSceneViewer.css'
 
-// 3D scene preview of a map region and its 8 neighbours (the client always
-// builds a 3×3 block — buildings that straddle a region boundary only look
-// right with the neighbours present). The chunk grid and floating markers
+// 3D scene preview of a map region, optionally with its neighbours built too
+// (the "Regions" span selector — the client always builds a 3×3 block, and
+// buildings that straddle a region boundary only look right with the
+// neighbours present). The chunk grid and floating markers
 // (sound emitters / map-icon anchors) are editor aids on top.
 // See mapScene.ts for the ported client pipeline.
 
@@ -46,7 +47,7 @@ type GfxStatus = 'applied' | 'partial' | 'no' | 'n/a'
 /** `control` marks the rows that are live in the editor — they render their
  *  pill/slider inline so each setting, its control and its description live
  *  together in one place. */
-const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note: string; control?: 'bloom' | 'fog' | 'drawDistance' | 'brightness' }[] = [
+const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note: string; control?: 'bloom' | 'fog' | 'drawDistance' | 'brightness' | 'lightdetail' }[] = [
   { name: 'Bloom', def: '0 (off)', status: 'applied', control: 'bloom', note: 'Client FilterBloom: luminance threshold 1.0, additive strength 0.25. HDR overbright textures only load while bloom is on, exactly like the client.' },
   { name: 'Fog', def: '1', status: 'applied', control: 'fog', note: 'Client formula: linear fog ending at the draw distance, fading over the last (fogDepth+256)·4 units, colour and depth from the region environment. Applies at every lighting-detail setting; water and sky handled.' },
   { name: 'Draw distance', def: 'unknowable', status: 'n/a', control: 'drawDistance', note: 'The fog end point — the client’s projection far plane, a graphics setting the cache can’t tell us. ~24 tiles matches a client-like zoom; the editor default sits further out so the overhead view stays clear.' },
@@ -58,10 +59,10 @@ const CLIENT_GFX_SETTINGS: { name: string; def: string; status: GfxStatus; note:
   { name: 'Textures', def: '1', status: 'applied', note: 'Material textures on terrain and locs.' },
   { name: 'Water', def: '1', status: 'applied', note: 'Env-mapped water surface + underwater depth; colour not signed off.' },
   { name: 'Sky boxes', def: '1', status: 'applied', note: 'Skybox mesh from the region environment (toggleable).' },
-  { name: 'Light detail', def: '1', status: 'partial', note: 'We render the LOW path, calibrated against the client (MeshRasterizer_Sub3 CPU bake + HardwareGround). The HIGH path — region sun, shader-lit ground, ground point lights — is not built.' },
+  { name: 'Light detail', def: '1', status: 'partial', control: 'lightdetail', note: 'Low = the client\'s flat constants (calibrated). High = the region environment\'s own sun on locs and ground, tone-mapped. Still missing from High: shader-lit ground colour (scalar + tint approximation) and ground point lights.' },
   { name: 'Scenery shadows', def: '2', status: 'partial', note: 'Static shadow grid only — no projected/dynamic scenery shadows.' },
   { name: 'Anti-aliasing', def: '0 (off)', status: 'applied', note: 'WebGL antialias is ON — deliberately differs from the client default.' },
-  { name: 'Build area', def: '104 tiles', status: 'no', note: 'We render one 64×64 region; neighbours are decoded for seam-free lighting only.' },
+  { name: 'Build area', def: '104 tiles', status: 'partial', note: 'The Regions selector builds 1×1 up to 9×9 regions; one ring beyond is decoded for seam-free lighting. Only the centre region is editable.' },
   { name: 'Particles', def: '2 (0 on low RAM)', status: 'no', note: 'Model particle emitters are parsed but not simulated in the map view.' },
   { name: 'Character shadows', def: '1', status: 'no', note: 'No NPCs/players in the map view.' },
   { name: 'Remove roofs', def: '2', status: 'no', note: 'We use per-plane toggles instead of the client’s roof-removal rule.' },
@@ -74,6 +75,24 @@ const ORDER_RIVERBED = -2
 const ORDER_OPAQUE_LOC = -1
 const ORDER_TERRAIN = 0
 const ORDER_TRANSPARENT_LOC = 1
+
+/** Selectable build spans (regions on a side). Every span decodes one ring
+ *  more than it builds, so 9×9 built means 11×11 decoded — build time and
+ *  memory scale with the square, which is what caps the list. */
+const REGION_SPANS = [1, 3, 5, 7, 9]
+
+// Free zoom: the wheel MOVES the camera along the ray under the cursor
+// (orbit pivot travelling with it) instead of OrbitControls' dolly, whose
+// step is a fraction of the remaining distance to the target and so decays
+// to nothing as you approach the ground — the long-standing "can't zoom in
+// any further" frustration, made worse by multi-region scenes.
+// (first cut was 0.22 / 128 / 16384, tuned down twice at Cody's request —
+// 1.5×, then another 2× — trading scroll distance for fine control)
+const FREEZOOM_FRACTION = 0.073 // step as a share of the distance to what's under the cursor
+const FREEZOOM_MIN_STEP = 42   // ~one-twelfth tile per notch floor — this is what kills the stall
+const FREEZOOM_MAX_STEP = 5461 // ~10 tiles — keeps a far-out flick sane
+const FREEZOOM_STANDOFF = 120  // stop this far short of the surface instead of clipping through it
+
 
 // BVH-accelerated raycasting: the merged terrain/locs meshes are hundreds of
 // thousands of triangles — brute-force raycasts on every mouse move are the
@@ -682,6 +701,33 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pov])
   const [showLocs, setShowLocs] = useState(true)
+  // How many regions on a side get REAL geometry (1 = just this region).
+  // One ring beyond the built area is always decoded so lighting and the
+  // underlay blur stay seam-free at the outer built edge. Changing it is a
+  // full scene rebuild (it's a dep of the build effect); build time and draw
+  // calls scale with the region count, which is why 1×1 is the default.
+  const [regionSpan, setRegionSpan] = useState(() => {
+    const v = parseInt(localStorage.getItem('cache-editor:region-span') ?? '1', 10)
+    return REGION_SPANS.includes(v) ? v : 1
+  })
+  // bumped when a background ring cell finishes, so effects that sweep the
+  // tagged meshes (visibility) pick up the late arrivals
+  const [bgBuildRev, setBgBuildRev] = useState(0)
+  // The client's Lighting detail preference. LOW = the flat constants
+  // (Atmosphere discards the region sun — our long-calibrated mode); HIGH =
+  // the region environment's own sun on locs AND ground, unclamped into the
+  // composite's tone map. Full trace in docs/lighting.md.
+  const [lightDetail, setLightDetail] = useState<'low' | 'high'>(() =>
+    localStorage.getItem('cache-editor:light-detail') === 'high' ? 'high' : 'low')
+  // what the background ring build is doing right now ('' = not building) —
+  // shown as a corner pill, NOT via `status`, which would re-raise the
+  // full loading overlay
+  const [bgNote, setBgNote] = useState('')
+  // the pill's fine-grained line ("objects (plane 2): 123/456"): written
+  // IMPERATIVELY into this span, throttled — those updates arrive hundreds
+  // of times a second during loc builds, and a state set for each would
+  // re-render the whole viewer per update (the game-tips-lag class of bug)
+  const bgDetailRef = useRef<HTMLSpanElement | null>(null)
   // the patch path attaches meshes without the visibility effect re-running
   // (it keys off `status`, which a patch never changes), so it sets their
   // initial visibility from the same toggles that effect uses. Plane
@@ -731,19 +777,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const applyEnvRef = useRef<((next: RegionEnvironment | null) => void) | null>(null)
   /** swaps the sky dome for another skybox id/rotation without a scene rebuild */
   const rebuildSkyboxRef = useRef<((skybox: RegionEnvironment['skybox'] | null) => Promise<void>) | null>(null)
-  // Brightness is baked into vertex colours, so a change re-runs the partial
-  // rebuild with the new factor (skipping the initial mount).
-  const brightnessAppliedRef = useRef(brightnessPref)
-  useEffect(() => {
-    if (brightnessAppliedRef.current === brightnessPref) return
-    brightnessAppliedRef.current = brightnessPref
-    const assets = assetsRef.current
-    const rebuild = rebuildCenterRef.current
-    if (!assets || !rebuild) return
-    assets.brightness = 0.7 + 0.1 * brightnessPref
-    void rebuild(terrainPropRef.current ?? data.terrain, objectsPropRef.current ?? data.def.objects)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [brightnessPref])
+  // Brightness is baked into EVERY cell's vertex colours, so it is a dependency
+  // of the whole-scene build effect rather than a centre-only rebuild — see the
+  // note on that effect's dep array.
   // An environment edit: fog, bloom, sun colour and the clear colour apply to
   // the live scene, the skybox swaps its dome, and the sun's DIRECTION/ambient
   // re-run the centre rebuild because they are baked into vertex colours.
@@ -932,9 +968,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     controls.maxPolarAngle = Math.PI / 2 - 0.02
     // middle mouse orbits, right pans; left is free for picking/painting
     controls.mouseButtons = { LEFT: null as unknown as THREE.MOUSE, MIDDLE: THREE.MOUSE.ROTATE, RIGHT: THREE.MOUSE.PAN }
+    // the wheel is ours (onZoomWheel below): free flight toward the cursor
+    // instead of the asymptotically-stalling dolly. See FREEZOOM_* constants.
+    controls.enableZoom = false
     controls.update()
     cameraRef.current = camera
     controlsRef.current = controls
+    // render-rig debug handle (scripts/render-rig): raycast/inspect the live
+    // scene from puppeteer. Overwritten per mount; harmless in normal use.
+    ;(window as unknown as { __dbg?: unknown }).__dbg = { scene, camera, renderer, THREE }
 
     // idle throttle: rendering this scene at 60fps around the clock starves
     // the rest of the browser — after a few seconds without input, drop to
@@ -1381,7 +1423,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       return { wx: data.def.regionX * 64 + tx, wy: data.def.regionY * 64 + ty, tx, ty }
     }
 
-    function updatePointer(e: PointerEvent) {
+    // widened past PointerEvent so the free-zoom WheelEvent can share it
+    function updatePointer(e: { clientX: number; clientY: number }) {
       const rect = renderer.domElement.getBoundingClientRect()
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
@@ -1858,6 +1901,33 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     window.addEventListener('keyup', onPovKeyUp)
     renderer.domElement.addEventListener('wheel', onPovWheel, { passive: false })
 
+    // Free zoom (replaces OrbitControls' dolly, disabled at setup): fly the
+    // camera along the ray under the cursor, orbit pivot translating with it
+    // so orbiting keeps working wherever you land. The step scales with the
+    // distance to whatever the cursor is over but has a FLOOR, so it never
+    // decays into the "can't get any closer" stall; zooming in stops a short
+    // standoff above the surface rather than clipping through.
+    function onZoomWheel(e: WheelEvent) {
+      if (povRef.current.active || e.ctrlKey) return // POV plane ride / browser page zoom
+      e.preventDefault()
+      bumpActivity()
+      updatePointer(e)
+      const hit = pick() // sets the raycaster from the pointer
+      const dir = raycaster.ray.direction.clone()
+      const zoomIn = e.deltaY < 0
+      // wheels report ~100 per notch; trackpads a stream of small deltas
+      const speed = THREE.MathUtils.clamp(Math.abs(e.deltaY) / 100, 0.15, 2)
+      const anchor = hit ? hit.distance : camera.position.distanceTo(controls.target)
+      let step = THREE.MathUtils.clamp(anchor * FREEZOOM_FRACTION * speed, FREEZOOM_MIN_STEP, FREEZOOM_MAX_STEP)
+      if (zoomIn && hit) step = Math.min(step, Math.max(0, hit.distance - FREEZOOM_STANDOFF))
+      if (step <= 0) return
+      const delta = dir.multiplyScalar(zoomIn ? step : -step)
+      camera.position.add(delta)
+      controls.target.add(delta)
+      controls.update()
+    }
+    renderer.domElement.addEventListener('wheel', onZoomWheel, { passive: false })
+
     // wall-clock delta for the particle sims, independent of the render
     // throttle above (they count client cycles, not frames)
     let particleLast = performance.now()
@@ -2161,20 +2231,27 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         const outlines = new THREE.Group()
         scene.add(outlines)
 
-        // load all 9 cells first — the mosaic needs every terrain up front so
-        // heights/lighting/underlay-blur are seam-free across boundaries
+        // load every cell first — the mosaic needs every terrain up front so
+        // heights/lighting/underlay-blur are seam-free across boundaries. The
+        // decode extent is one ring beyond the built span, so the outermost
+        // BUILT regions still blend seam-free into undisplayed neighbours.
         setStatus('loading regions…')
+        setBgNote('') // a torn-down build's ring note must not outlive it
         type Cell = { dx: number; dy: number; def: MapRegionDef; terrain: ReturnType<typeof decodeTerrain>; underwater?: MapTerrain }
+        const buildRadius = (regionSpan - 1) / 2
+        const decodeRadius = buildRadius + 1
+        const gridSpan = decodeRadius * 2 + 1
         // the centre region renders the parent's draft terrain (height-brush
         // edits survive a 2D/3D toggle); `let` because brush rebuilds swap it
         let currentTerrain = terrainPropRef.current ?? data.terrain
         lastBuiltTerrainRef.current = terrainPropRef.current
         const cells: Cell[] = [{ dx: 0, dy: 0, def: data.def, terrain: currentTerrain, underwater: data.underwaterTerrain }]
-        const regionGrid: (Cell['terrain'] | null)[][] = [[null, null, null], [null, null, null], [null, null, null]]
-        regionGrid[1][1] = currentTerrain
+        const regionGrid: (Cell['terrain'] | null)[][] =
+          Array.from({ length: gridSpan }, () => Array<Cell['terrain'] | null>(gridSpan).fill(null))
+        regionGrid[decodeRadius][decodeRadius] = currentTerrain
         if (mapsDir) {
-          for (const dx of [-1, 0, 1]) {
-            for (const dy of [-1, 0, 1]) {
+          for (let dx = -decodeRadius; dx <= decodeRadius; dx++) {
+            for (let dy = -decodeRadius; dy <= decodeRadius; dy++) {
               if (dx === 0 && dy === 0) continue
               try {
                 const id = ((data.def.regionX + dx) << 8) | (data.def.regionY + dy)
@@ -2182,7 +2259,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 const def = JSON.parse(await file.text()) as MapRegionDef
                 const terrain = decodeTerrain(def)
                 cells.push({ dx, dy, def, terrain, underwater: decodeUnderwaterTerrain(def) })
-                regionGrid[dx + 1][dy + 1] = terrain
+                regionGrid[dx + decodeRadius][dy + decodeRadius] = terrain
               } catch { /* neighbour not dumped */ }
             }
           }
@@ -2241,8 +2318,22 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               y: env.environment.sunPosition?.[1] ?? DEFAULT_SUN.y,
               z: env.environment.sunPosition?.[2] ?? DEFAULT_SUN.z,
               ambient: env.environment.sunAmbient ?? DEFAULT_SUN.ambient,
+              // HIGH: light/backlight present → SceneMosaic grounds shade
+              // with the region sun instead of the flat constants
+              ...(lightDetail === 'high'
+                ? {
+                    light: env.environment.sunLight ?? 0.69921875,
+                    backlight: env.environment.sunBacklight ?? 1.2,
+                  }
+                : {}),
             }
           : DEFAULT_SUN
+        // Lighting detail HIGH: the environment sun for the LOC bake (already
+        // brightness-scaled). LOW leaves this undefined — the flat constants,
+        // which is the client's own behaviour with the preference off.
+        const envSun = lightDetail === 'high' && env?.environment
+          ? modelSunFromEnvironment(env.environment, assets.brightness)
+          : undefined
         // clear colour = fog colour, so anything past the terrain fades into
         // the same backdrop. The fog itself is applyFog above (client formula);
         // the old approximate horizon fade that lived here fought with it.
@@ -2314,15 +2405,26 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
 
         // sun colour tint (fixed-function diffuse) relative to the default
         // 0xDDCCBB — applied to terrain/loc materials, including rebuilt ones
-        sunTintRef.current = sunTintFor(env?.environment?.sunColour)
+        // Client-exact: the sun colour multiplies everything at lighting detail
+        // HIGH and is WHITE at LOW (Class239.method4052 substitutes 0xFFFFFF),
+        // so LOW must not tint at all. sunTintFor's 0xDDCCBB-relative result is
+        // kept only as the no-environment fallback.
+        sunTintRef.current = lightDetail === 'high'
+          ? sunColourRgb(env?.environment?.sunColour)
+          : null
         const applyTint = (obj: THREE.Object3D) => {
           // Runs even with no sun tint: HDR materials still need their overbright
           // factor re-applied when bloom is toggled.
           const sunTint = sunTintRef.current
-          const tint = sunTint ?? [1, 1, 1]
           obj.traverse((o) => {
             const mesh = o as THREE.Mesh
             if (!mesh.material) return
+            // Lighting detail HIGH: LOCS carry the sun colour per vertex from
+            // the environment-sun bake — the material tint would double-apply.
+            // Terrain keeps it: its light grid is a scalar, the tint IS its
+            // colour term.
+            const takesSunTint = !envSun || mesh.userData?.isTerrain === true
+            const tint = takesSunTint && sunTint ? sunTint : [1, 1, 1]
             for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
               // water is a ShaderMaterial (no .color) — its sky tint lives in its
               // own uniforms, so skip it here
@@ -2332,7 +2434,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               // overwriting — a plain setRGB here silently discarded it, which is
               // why HDR materials never reached the bloom threshold.
               const hdr = bloomOnRef.current ? ((m.userData.hdrMultiplier as number) ?? 1) : 1
-              if (!sunTint && hdr === 1) continue // nothing to change
+              if ((!sunTint || !takesSunTint) && hdr === 1) continue // nothing to change
               c.setRGB(tint[0] * hdr, tint[1] * hdr, tint[2] * hdr)
             }
           })
@@ -2407,7 +2509,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           if (next?.environment?.fogColour !== undefined) {
             renderer.setClearColor(next.environment.fogColour & 0xffffff)
           }
-          sunTintRef.current = sunTintFor(next?.environment?.sunColour)
+          sunTintRef.current = lightDetail === 'high'
+            ? sunColourRgb(next?.environment?.sunColour)
+            : null
           refreshTintRef.current?.()
         }
 
@@ -2439,41 +2543,186 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // centre>>1 + west>>2 + south>>2 + north>>3 + east>>3. Raw subtraction
         // makes every wall/rock a hard 1-corner dark blob (per-tile mottling);
         // the blur halves the amplitude and feathers it over neighbours.
-        // Per-plane BLURRED static-shadow grid (kept separate from the sun light,
-        // as GroundGL does — the shadow is subtracted from baseStrength in the HSL
-        // stage, not from the directional multiplier). Softened via GroundGL's
-        // resetLight kernel (centre>>1 + neighbours) so walls/rocks feather into
-        // the ground instead of hard 1-corner blobs.
-        const blurredShadows = (locBuilds: ({ shadows: Uint8Array } | null)[]): Float32Array[] =>
-          locBuilds.map((b) => blurShadowGrid(b?.shadows))
+        // Per-plane BLURRED static-shadow grids (kept separate from the sun
+        // light, as GroundGL does — the shadow is subtracted from baseStrength
+        // in the HSL stage, not from the directional multiplier). Softened via
+        // GroundGL's resetLight kernel (centre>>1 + neighbours).
+        //
+        // CROSS-REGION: shadows are cast by each cell's OWN locs, but a
+        // building at a border must darken the neighbouring region's ground
+        // too (the client's grid spans the whole build area). Raw grids are
+        // cached per cell; composition maxes the shared boundary vertices
+        // with every cached neighbour and lets the blur kernel's off-grid
+        // taps read the neighbour's adjacent column/row. Cells built before
+        // their neighbours existed get a final recolour pass (end of the
+        // background ring build).
+        const cellRawShadows = new Map<string, (Uint8Array | undefined)[]>()
+        const cellTerrainMeshes = new Map<string, THREE.Mesh[]>()
+        const cellShadowsUsed = new Map<string, Float32Array[]>()
+        const shadowKey = (cdx: number, cdy: number) => `${cdx},${cdy}`
+        const composeBlurredShadow = (cdx: number, cdy: number, plane: number): Float32Array => {
+          const V = SIZE + 1
+          const grab = (ddx: number, ddy: number) => cellRawShadows.get(shadowKey(cdx + ddx, cdy + ddy))?.[plane]
+          const own = grab(0, 0)
+          const west = grab(-1, 0)
+          const east = grab(1, 0)
+          const south = grab(0, -1)
+          const north = grab(0, 1)
+          const out = new Float32Array(V * V)
+          if (!own && !west && !east && !south && !north) return out
+          // own grid with shared boundary vertices maxed against neighbours
+          // (a border vertex belongs to both cells; each grid only carries
+          // its own locs' contribution)
+          const g = new Uint8Array(V * V)
+          if (own) g.set(own)
+          for (let y = 0; y < V; y++) {
+            if (west) g[y] = Math.max(g[y], west[(V - 1) * V + y])
+            if (east) g[(V - 1) * V + y] = Math.max(g[(V - 1) * V + y], east[y])
+          }
+          for (let x = 0; x < V; x++) {
+            if (south) g[x * V] = Math.max(g[x * V], south[x * V + V - 1])
+            if (north) g[x * V + V - 1] = Math.max(g[x * V + V - 1], north[x * V])
+          }
+          // blurShadowGrid's kernel, with off-grid taps crossing the seam
+          const tap = (x: number, y: number): number => {
+            if (x < 0) return west ? west[(V - 2) * V + y] : 0
+            if (x > V - 1) return east ? east[V + y] : 0
+            if (y < 0) return south ? south[x * V + V - 2] : 0
+            if (y > V - 1) return north ? north[x * V + 1] : 0
+            return g[x * V + y]
+          }
+          for (let x = 0; x < V; x++) {
+            for (let y = 0; y < V; y++) {
+              out[x * V + y] = (g[x * V + y] >> 1)
+                + (tap(x - 1, y) >> 2) + (tap(x, y - 1) >> 2)
+                + (tap(x, y + 1) >> 3) + (tap(x + 1, y) >> 3)
+            }
+          }
+          return out
+        }
+        const composeCellShadows = (cdx: number, cdy: number): Float32Array[] => {
+          // DEBUG (rig): render with NO static shadows at all, to attribute a
+          // seam artifact to shadows vs terrain blending. Set
+          // localStorage['cache-editor:dbg-no-shadows'] = '1' and reload.
+          if (localStorage.getItem('cache-editor:dbg-no-shadows') === '1') {
+            return [0, 1, 2, 3].map(() => new Float32Array((SIZE + 1) * (SIZE + 1)))
+          }
+          return [0, 1, 2, 3].map((plane) => composeBlurredShadow(cdx, cdy, plane))
+        }
+
+        // The shadow-dependent terrain meshes of one cell — split out of
+        // buildCell so the recolour pass can rebuild JUST these (riverbed is
+        // shadow-independent and never rebuilt). `replace` swaps out the
+        // cell's previous terrain meshes after the new ones are attached.
+        const buildCellTerrain = async (cell: Cell, shadows: Float32Array[], background: boolean, replace = false) => {
+          const { dx, dy, terrain, underwater } = cell
+          const isCenter = dx === 0 && dy === 0
+          const key = shadowKey(dx, dy)
+          const offsetX = dx * REGION_UNITS
+          const offsetZ = -dy * REGION_UNITS
+          const { heights, lights } = mosaic.slicesFor(dx, dy)
+          const waterDepthAll = underwater ? computeWaterDepth(underwater) : undefined
+          const palettes = [0, 1, 2, 3].map((plane) => mosaic.paletteFor(dx, dy, plane))
+          const overlayCorners = [0, 1, 2, 3].map((plane) => mosaic.overlayCornerFor(dx, dy, plane))
+          const underlayCorners = [0, 1, 2, 3].map((plane) => mosaic.underlayCornerFor(dx, dy, plane))
+          const overlayPerimeters = [0, 1, 2, 3].map((plane) => mosaic.overlayPerimeterFor(dx, dy, plane))
+          const overlayTileBeyond = mosaic.overlayTileBeyondFor(dx, dy)
+          const added: THREE.Mesh[] = []
+          for (let plane = 0; plane < 4; plane++) {
+            const terrainMesh = await buildTerrainMesh(terrain, plane, heights, configs, assets, {
+              lights,
+              shadows,
+              palettes,
+              overlayCorners,
+              underlayCorners,
+              overlayPerimeters,
+              overlayTileBeyond,
+            }, waterDepthAll)
+            if (disposed) return
+            if (terrainMesh) {
+              // The region offset is baked into the GEOMETRY (exact — all
+              // offsets are integers well under 2^24), not set as
+              // mesh.position. With a translate, a neighbour's seam vertex is
+              // `local 32768 + offset −32768` while the centre's is `0 + 0`:
+              // mathematically equal, but the GPU's float32 vertex transform
+              // rounds the two paths differently by a few thousandths of a
+              // unit, and on steep border tiles that opened SUB-PIXEL SLITS
+              // between the meshes — white needles of skybox along the seam.
+              // Baking makes shared vertices bit-identical in the same
+              // coordinate space, so their transforms can't diverge.
+              if (offsetX !== 0 || offsetZ !== 0) terrainMesh.geometry.translate(offsetX, 0, offsetZ)
+              terrainMesh.renderOrder = ORDER_TERRAIN
+              // indirect: the default mode reorders triangles, which would break
+              // the material groups and the faceIndex→triangleOwners mapping
+              terrainMesh.geometry.computeBoundsTree({ indirect: true })
+              track(terrainMesh)
+              planeGroupsRef.current[plane]?.add(terrainMesh)
+              taggedRef.current.push({ obj: terrainMesh, neighbor: !isCenter, kind: 'terrain' })
+              added.push(terrainMesh)
+            }
+            if (!background) {
+              doneUnits++ // one terrain plane pass done
+              reportProgress()
+            }
+          }
+          if (replace) {
+            // new meshes first, old out after — no flicker frame
+            const old = cellTerrainMeshes.get(key) ?? []
+            taggedRef.current = taggedRef.current.filter((t) => !old.includes(t.obj as THREE.Mesh))
+            for (const m of old) {
+              m.parent?.remove(m)
+              disposeDeep(m)
+            }
+          }
+          cellTerrainMeshes.set(key, added)
+          cellShadowsUsed.set(key, shadows)
+        }
 
         // Real progress: 8 passes per cell (4 loc planes + 4 terrain planes);
         // the loc passes report a done/total we use for sub-pass fraction.
-        // Only the centre region is BUILT. The 8 neighbours are still decoded
-        // above because the mosaic needs their heights/underlays for seam-free
-        // lighting at the borders, but building their meshes cost ~9x the load
-        // time and draw calls for geometry that was never meant to be shown.
-        const buildCells = cells.filter((c) => c.dx === 0 && c.dy === 0)
-        const totalUnits = Math.max(1, buildCells.length * 8)
+        // Only cells inside the chosen span are BUILT — the outer decode ring
+        // exists purely so the mosaic's heights/underlays keep the borders
+        // seam-free. The CENTRE cell builds first, under the loading screen;
+        // the rest of the span builds in the BACKGROUND once the scene is
+        // live (kicked off at the end of this effect), so a big span costs
+        // pop-in rather than a longer wait.
+        const buildCells = cells.filter((c) => Math.abs(c.dx) <= buildRadius && Math.abs(c.dy) <= buildRadius)
+        const totalUnits = 8 // the loading bar covers the centre cell only
         let doneUnits = 0
         const reportProgress = (frac = 0) =>
           setLoadProgress(Math.min(99, ((doneUnits + frac) / totalUnits) * 100))
 
-        for (const { dx, dy, def, terrain, underwater } of buildCells) {
+        // Background-build progress streams into the pill's detail span at
+        // ~10Hz, bypassing React state entirely — the throttle plus the
+        // imperative write is what keeps hundreds of per-loc updates a second
+        // from costing frames.
+        let bgDetailPending = ''
+        let bgDetailTimer = 0
+        const bgReport = (text: string) => {
+          bgDetailPending = text
+          if (bgDetailTimer) return
+          bgDetailTimer = window.setTimeout(() => {
+            bgDetailTimer = 0
+            if (!disposed && bgDetailRef.current) bgDetailRef.current.textContent = bgDetailPending
+          }, 100)
+        }
+
+        // `background` builds report through bgReport, never setStatus —
+        // status would re-raise the loading overlay over a scene the user is
+        // already working in.
+        const buildCell = async (cell: Cell, background: boolean) => {
+          const { dx, dy, def, terrain, underwater } = cell
           const isCenter = dx === 0 && dy === 0
           if (disposed) return
 
           const offsetX = dx * REGION_UNITS
           const offsetZ = -dy * REGION_UNITS
           const label = isCenter ? 'this region' : `neighbour ${def.regionX},${def.regionY}`
-          const { heights, lights } = mosaic.slicesFor(dx, dy)
+          const { heights } = mosaic.slicesFor(dx, dy)
           // Underwater riverbed + per-vertex water depth (HD-water regions only).
           const waterDepthAll = underwater ? computeWaterDepth(underwater) : undefined
           const riverbedHeights = underwater && waterDepthAll
             ? computeRiverbedHeights(heights, waterDepthAll) : undefined
-          const palettes = [0, 1, 2, 3].map((plane) => mosaic.paletteFor(dx, dy, plane))
-          const overlayCorners = [0, 1, 2, 3].map((plane) => mosaic.overlayCornerFor(dx, dy, plane))
-          const underlayCorners = [0, 1, 2, 3].map((plane) => mosaic.underlayCornerFor(dx, dy, plane))
 
           // locs FIRST — their static shadows darken the terrain lighting
           const objList = isCenter ? initialObjects : def.objects
@@ -2483,17 +2732,30 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               locBuilds[plane] = await buildLocsMesh(
                 terrain, objList, plane, heights, assets,
                 (done, total) => {
+                  if (background) {
+                    bgReport(`objects (plane ${plane}): ${done}/${total}`)
+                    return
+                  }
                   setStatus(`objects (${label}, plane ${plane}): ${done}/${total}`)
                   reportProgress(total > 0 ? done / total : 1)
                 },
                 isCenter ? lightGrid : undefined,
+                undefined,
+                envSun,
               )
               if (disposed) return
             }
-            doneUnits++ // one loc plane pass done
-            reportProgress()
+            if (!background) {
+              doneUnits++ // one loc plane pass done
+              reportProgress()
+            }
           }
-          const shadows = blurredShadows(locBuilds)
+          // raw grids first, so composition sees this cell's own locs — the
+          // composed blur folds in every ALREADY-BUILT neighbour; cells built
+          // before their neighbours get the recolour pass at the end of the
+          // background ring build
+          cellRawShadows.set(shadowKey(dx, dy), locBuilds.map((b) => b?.shadows))
+          const shadows = composeCellShadows(dx, dy)
 
           if (isCenter) {
             // the marker list covers the region being edited, like the object list
@@ -2502,16 +2764,20 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             setMinimapVersion((v) => v + 1)
           }
 
-          setStatus(`terrain: ${label}…`)
-          for (let plane = 0; plane < 4; plane++) {
-            // Riverbed FIRST (opaque, drawn under the transparent water surface):
-            // the submerged "um" terrain, positioned at surface+depth, its own
-            // underlays giving the sandy/muddy bottom seen through shallow water.
-            if (underwater && riverbedHeights) {
+          if (background) bgReport('terrain…')
+          else setStatus(`terrain: ${label}…`)
+          // Riverbed (opaque, drawn under the transparent water surface): the
+          // submerged "um" terrain, positioned at surface+depth, its own
+          // underlays giving the sandy/muddy bottom seen through shallow
+          // water. Shadow-independent, so the recolour pass never touches it.
+          if (underwater && riverbedHeights) {
+            for (let plane = 0; plane < 4; plane++) {
               const bed = await buildTerrainMesh(underwater, plane, riverbedHeights, configs, assets)
               if (disposed) return
               if (bed) {
-                bed.position.set(offsetX, 0, offsetZ)
+                // offset baked into the geometry, not mesh.position — see
+                // buildCellTerrain for why
+                if (offsetX !== 0 || offsetZ !== 0) bed.geometry.translate(offsetX, 0, offsetZ)
                 bed.renderOrder = ORDER_RIVERBED // under the water surface
                 bed.geometry.computeBoundsTree({ indirect: true })
                 // riverbed is never pickable/water-swapped — add directly
@@ -2519,27 +2785,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 taggedRef.current.push({ obj: bed, neighbor: !isCenter, kind: 'riverbed' })
               }
             }
-            const terrainMesh = await buildTerrainMesh(terrain, plane, heights, configs, assets, {
-              lights,
-              shadows,
-              palettes,
-              overlayCorners,
-              underlayCorners,
-            }, waterDepthAll)
-            if (disposed) return
-            if (terrainMesh) {
-              terrainMesh.position.set(offsetX, 0, offsetZ)
-              terrainMesh.renderOrder = ORDER_TERRAIN
-              // indirect: the default mode reorders triangles, which would break
-              // the material groups and the faceIndex→triangleOwners mapping
-              terrainMesh.geometry.computeBoundsTree({ indirect: true })
-              track(terrainMesh)
-              planeGroupsRef.current[plane]?.add(terrainMesh)
-              taggedRef.current.push({ obj: terrainMesh, neighbor: !isCenter, kind: 'terrain' })
-            }
-            doneUnits++ // one terrain plane pass done
-            reportProgress()
           }
+          await buildCellTerrain(cell, shadows, background)
+          if (disposed) return
 
           for (let plane = 0; plane < 4; plane++) {
             const built = locBuilds[plane]
@@ -2582,7 +2830,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             // Animated locs (waving flags etc.): a separate posable mesh each,
             // placed with the region offset baked into the mesh transform.
             for (const al of built.animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points, al.ambient, al.contrast)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, envSun, al.owner, al.points, al.ambient, al.contrast)
               if (disposed) return
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
@@ -2627,27 +2875,36 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           taggedRef.current.push({ obj: outline, neighbor: !isCenter, kind: 'outline' })
         }
 
+        // The centre region, under the loading screen — the rest of the span
+        // follows in the background at the end of this effect.
+        const centreCell = buildCells.find((c) => c.dx === 0 && c.dy === 0)
+        if (centreCell) await buildCell(centreCell, false)
+        if (disposed) return
+
         setLightGizmos(currentLights)
 
         // Resolve each distinct loc idle sequence once, preload its frames, and
-        // hand the animator to every placement that uses it (the RAF loop poses).
-        if (animLocsRef.current.length > 0 && data.rootHandle) {
+        // hand the animator to every placement that uses it (the RAF loop
+        // poses). Cached across calls so background cells reuse what the
+        // centre already loaded; null records a sequence that isn't dumped.
+        const animatorCache = new Map<number, LocAnimator | null>()
+        const resolveAnimators = async (records: AnimLocRecord[]) => {
+          if (records.length === 0 || !data.rootHandle) return
           const animsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('animations'))
-          if (animsDir) {
-            const ids = [...new Set(animLocsRef.current.map((a) => a.animationId))]
-            const animators = new Map<number, LocAnimator>()
-            await Promise.all(ids.map(async (id) => {
-              try {
-                const def = JSON.parse(await (await (await animsDir.getFileHandle(`${id}.json`)).getFile()).text()) as AnimationDef
-                const animator = new LocAnimator(def)
-                await animator.preload(data.rootHandle!)
-                animators.set(id, animator)
-              } catch { /* animation not dumped — that flag stays at rest */ }
-            }))
-            if (disposed) return
-            for (const rec of animLocsRef.current) rec.animator = animators.get(rec.animationId)
-          }
+          if (!animsDir) return
+          const ids = [...new Set(records.map((a) => a.animationId))].filter((id) => !animatorCache.has(id))
+          await Promise.all(ids.map(async (id) => {
+            try {
+              const def = JSON.parse(await (await (await animsDir.getFileHandle(`${id}.json`)).getFile()).text()) as AnimationDef
+              const animator = new LocAnimator(def)
+              await animator.preload(data.rootHandle!)
+              animatorCache.set(id, animator)
+            } catch { animatorCache.set(id, null) /* animation not dumped — that flag stays at rest */ }
+          }))
+          if (disposed) return
+          for (const rec of records) rec.animator = animatorCache.get(rec.animationId) ?? undefined
         }
+        await resolveAnimators(animLocsRef.current)
 
         for (const { obj, kind } of taggedRef.current) {
           if (TINTED_KINDS.includes(kind)) applyTint(obj)
@@ -3080,6 +3337,27 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // the outermost tiles.
         const rebuildCenterImpl = async (nextTerrain: MapTerrain, nextObjects: LocEntry[], nextLights?: RegionLight[]) => {
           if (disposed) return
+          // recompute the suns from the LIVE environment and brightness — the
+          // effect-scope `sun`/`envSun` froze the values from build time, so a
+          // brightness-slider change or an env edit rebuilt with stale lighting
+          const liveEnv = envPropRef.current ?? env
+          const sunNow: SunConfig = liveEnv?.environment
+            ? {
+                x: liveEnv.environment.sunPosition?.[0] ?? DEFAULT_SUN.x,
+                y: liveEnv.environment.sunPosition?.[1] ?? DEFAULT_SUN.y,
+                z: liveEnv.environment.sunPosition?.[2] ?? DEFAULT_SUN.z,
+                ambient: liveEnv.environment.sunAmbient ?? DEFAULT_SUN.ambient,
+                ...(lightDetail === 'high'
+                  ? {
+                      light: liveEnv.environment.sunLight ?? 0.69921875,
+                      backlight: liveEnv.environment.sunBacklight ?? 1.2,
+                    }
+                  : {}),
+              }
+            : DEFAULT_SUN
+          const envSunNow = lightDetail === 'high' && liveEnv?.environment
+            ? modelSunFromEnvironment(liveEnv.environment, assets.brightness)
+            : undefined
           currentTerrain = nextTerrain
           if (nextLights) {
             currentLights = nextLights
@@ -3088,8 +3366,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           clearLocHighlight()
           setStatus('recomputing…')
           await new Promise((resolve) => setTimeout(resolve, 0)) // let the status paint
-          regionGrid[1][1] = nextTerrain
-          const nextMosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun, assets.brightness)
+          // decodeRadius-indexed CENTRE — [1][1] was the 3×3 grid's centre and
+          // in a wider grid it's a real neighbour: writing there both clobbered
+          // that neighbour's terrain in the mosaic and rebuilt the centre
+          // against stale border values (seams, gaps, dead blending)
+          regionGrid[decodeRadius][decodeRadius] = nextTerrain
+          const nextMosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sunNow, assets.brightness)
           if (disposed) return
           const slices = nextMosaic.slicesFor(0, 0)
           centerHeights = slices.heights
@@ -3102,6 +3384,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           const palettes = [0, 1, 2, 3].map((pl) => nextMosaic.paletteFor(0, 0, pl))
           const overlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.overlayCornerFor(0, 0, pl))
           const underlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.underlayCornerFor(0, 0, pl))
+          const overlayPerimeters = [0, 1, 2, 3].map((pl) => nextMosaic.overlayPerimeterFor(0, 0, pl))
 
           // light gizmos are deliberately NOT dropped here: setLightGizmos owns
           // them and swaps them at the end, so they stay on screen (and pickable)
@@ -3128,11 +3411,16 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 nextTerrain, nextObjects, plane, centerHeights, assets,
                 (done, total) => setStatus(`updating objects (plane ${plane}): ${done}/${total}`),
                 lightGrid,
+                undefined,
+                envSunNow,
               )
               if (disposed) return
             }
           }
-          const shadows = blurredShadows(locBuilds)
+          // refresh the centre's raw grid and recompose — an edit must keep
+          // the cross-region border shadows the initial build established
+          cellRawShadows.set(shadowKey(0, 0), locBuilds.map((b) => b?.shadows))
+          const shadows = composeCellShadows(0, 0)
 
           setSceneMarkers(locBuilds.flatMap((b) => b?.markers ?? []))
           minimapBaseRef.current = await renderMinimapGround(nextTerrain, configs, 0, nextMosaic.underlayRgbBlurFor(0, 0, 0), assets)
@@ -3142,6 +3430,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           const uwDepthCenter = uwCenter ? computeWaterDepth(uwCenter) : undefined
           const riverbedCenter = uwCenter && uwDepthCenter
             ? computeRiverbedHeights(centerHeights, uwDepthCenter) : undefined
+          const rebuiltTerrain: THREE.Mesh[] = []
           for (let plane = 0; plane < 4; plane++) {
             setStatus(`rebuilding terrain (plane ${plane})…`)
             if (uwCenter && riverbedCenter) {
@@ -3161,6 +3450,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               palettes,
               overlayCorners,
               underlayCorners,
+              overlayPerimeters,
+              overlayTileBeyond: nextMosaic.overlayTileBeyondFor(0, 0),
             }, uwDepthCenter)
             if (disposed) return
             if (terrainMesh) {
@@ -3170,8 +3461,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               applyTint(terrainMesh)
               planeGroupsRef.current[plane]?.add(terrainMesh)
               taggedRef.current.push({ obj: terrainMesh, neighbor: false, kind: 'terrain' })
+              rebuiltTerrain.push(terrainMesh)
             }
           }
+          // keep the recolour pass's per-cell tracking honest: these are now
+          // the centre's terrain meshes, built with the composed shadows
+          cellTerrainMeshes.set(shadowKey(0, 0), rebuiltTerrain)
+          cellShadowsUsed.set(shadowKey(0, 0), shadows)
           const rebuiltAnim: AnimLocRecord[] = []
           for (let plane = 0; plane < 4; plane++) {
             const built = locBuilds[plane]
@@ -3192,7 +3488,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               taggedRef.current.push({ obj: lm, neighbor: false, kind: 'loc' })
             }
             for (const al of built.animated) {
-              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, undefined, al.owner, al.points, al.ambient, al.contrast)
+              const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, envSunNow, al.owner, al.points, al.ambient, al.contrast)
               if (disposed) return
               if (!anim) continue
               anim.mesh.matrixAutoUpdate = false
@@ -3302,6 +3598,68 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           lastMultiLocRef.current = baseline
         }
         setStatus('')
+
+        // The rest of the span builds AFTER the user is in the scene, nearest
+        // ring first — silently (status would re-raise the loading overlay).
+        // Each cell tints and resolves animators for exactly what it added
+        // (set-difference, not indices: a concurrent centre rebuild may splice
+        // the shared arrays mid-build), then bumps bgBuildRev so the
+        // visibility effect covers the new meshes with the current toggles.
+        const ringCells = buildCells
+          .filter((c) => c.dx !== 0 || c.dy !== 0)
+          .sort((a, b) => Math.max(Math.abs(a.dx), Math.abs(a.dy)) - Math.max(Math.abs(b.dx), Math.abs(b.dy)))
+        if (ringCells.length > 0) {
+          void (async () => {
+            try {
+              for (let i = 0; i < ringCells.length; i++) {
+                const cell = ringCells[i]
+                if (disposed) return
+                setBgNote(`loading region ${cell.def.regionX}, ${cell.def.regionY} — ${i + 1}/${ringCells.length}`)
+                const hadTagged = new Set(taggedRef.current)
+                const hadAnim = new Set(animLocsRef.current)
+                await buildCell(cell, true)
+                if (disposed) return
+                for (const t of taggedRef.current) {
+                  if (!hadTagged.has(t) && TINTED_KINDS.includes(t.kind)) applyTint(t.obj)
+                }
+                await resolveAnimators(animLocsRef.current.filter((r) => !hadAnim.has(r)))
+                if (disposed) return
+                setBgBuildRev((n) => n + 1)
+              }
+              // SHADOW RECOLOUR: cells built before their neighbours' locs
+              // existed carry border shadows from their own locs only.
+              // Recompose with every raw grid now cached and rebuild the
+              // terrain of cells whose composition actually changed —
+              // typically the centre (built first) and any ring cell with a
+              // later-built neighbour whose locs shadow the shared border.
+              const sameShadows = (a: Float32Array[], b: Float32Array[] | undefined): boolean => {
+                if (!b) return false
+                for (let i = 0; i < a.length; i++) {
+                  if (a[i].length !== b[i].length) return false
+                  for (let k = 0; k < a[i].length; k++) if (a[i][k] !== b[i][k]) return false
+                }
+                return true
+              }
+              for (const cell of buildCells) {
+                if (disposed) return
+                const shadows = composeCellShadows(cell.dx, cell.dy)
+                if (sameShadows(shadows, cellShadowsUsed.get(shadowKey(cell.dx, cell.dy)))) continue
+                setBgNote(`relighting region ${cell.def.regionX}, ${cell.def.regionY}…`)
+                // the centre may have been edited mid-background — rebuild
+                // its terrain from the LIVE draft, not the load-time snapshot
+                const liveCell = cell.dx === 0 && cell.dy === 0 ? { ...cell, terrain: currentTerrain } : cell
+                await buildCellTerrain(liveCell, shadows, true, true)
+                if (disposed) return
+                setBgBuildRev((n) => n + 1)
+              }
+              if (!disposed) setBgNote('')
+            } catch (e) {
+              // a neighbour failing must not take down the live centre region
+              console.warn('[map] background region build failed:', e)
+              if (!disposed) setBgNote('')
+            }
+          })()
+        }
       } catch (e) {
         setStatus(`scene build failed: ${e}`)
       }
@@ -3321,6 +3679,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       window.removeEventListener('keydown', onPovKeyDown)
       window.removeEventListener('keyup', onPovKeyUp)
       renderer.domElement.removeEventListener('wheel', onPovWheel)
+      renderer.domElement.removeEventListener('wheel', onZoomWheel)
       if (document.pointerLockElement === renderer.domElement) document.exitPointerLock()
       controls.dispose()
       cameraRef.current = null
@@ -3360,7 +3719,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       taggedRef.current = []
       skyMeshRef.current = null
     }
-  }, [data])
+    // regionSpan / lightDetail: changing either is a full scene teardown +
+    // rebuild, exactly like switching regions
+    // brightnessPref is a dep because it is BAKED into every cell's vertex
+    // colours. It used to drive a centre-only rebuild, which in any multi-region
+    // view left the 8+ neighbours at their original bake — so moving the slider
+    // while looking at a neighbour changed literally nothing on screen.
+  }, [data, regionSpan, lightDetail, brightnessPref])
 
   // placement draft changed (Apply/Delete/place/move) — or a transform-to
   // preview toggled: unified centre rebuild — loc shadows feed the terrain
@@ -3894,7 +4259,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         : true
     }
     if (!showLights) lightHighlightClearRef.current?.()
-  }, [visiblePlanes, showLocs, showMarkers, showLights, showOutlines, status])
+    // bgBuildRev: background ring cells add meshes after this effect's last
+    // run — each landing bumps it so the sweep covers them
+  }, [visiblePlanes, showLocs, showMarkers, showLights, showOutlines, status, bgBuildRev])
 
   // The Client graphics settings dropdown. Rendered into the parent header
   // beside the Regions button when a slot is provided (portal — state stays
@@ -3939,10 +4306,27 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                   {g.control === 'brightness' && (
                     <span className="mapscene-gfx-slider">
                       <input
-                        type="range" min={1} max={4} step={1} value={brightnessPref}
+                        type="range" min={0} max={4} step={1} value={brightnessPref}
                         onChange={(e) => setBrightnessPref(Number(e.target.value))}
                       />
                       <span className="mapscene-gfx-sliderval">{brightnessPref} · ambient ×{(0.7 + 0.1 * brightnessPref).toFixed(1)}</span>
+                    </span>
+                  )}
+                  {g.control === 'lightdetail' && (
+                    <span className="mapscene-gfx-slider">
+                      <select
+                        className="mapscene-span-select"
+                        value={lightDetail}
+                        onChange={(e) => {
+                          const v = e.target.value === 'high' ? 'high' : 'low'
+                          setLightDetail(v)
+                          localStorage.setItem('cache-editor:light-detail', v)
+                        }}
+                      >
+                        <option value="low">Low — flat sun</option>
+                        <option value="high">High — region sun</option>
+                      </select>
+                      <span className="mapscene-gfx-sliderval">rebuilds the scene</span>
                     </span>
                   )}
                   <span className="mapscene-gfx-tail">
@@ -3978,6 +4362,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showLocs} onChange={(e) => setShowLocs(e.target.checked)} />
           Objects
+        </label>
+        <label
+          className="mapscene-toggle"
+          title="How many regions get built around this one (the client builds 3×3). Load time and draw calls scale with the count; one ring beyond is always decoded so lighting stays seam-free. Only the centre region is editable."
+        >
+          Regions
+          <select
+            className="mapscene-span-select"
+            value={regionSpan}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              setRegionSpan(v)
+              localStorage.setItem('cache-editor:region-span', String(v))
+            }}
+          >
+            {REGION_SPANS.map((n) => <option key={n} value={n}>{n}×{n}</option>)}
+          </select>
         </label>
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showOutlines} onChange={(e) => setShowOutlines(e.target.checked)} />
@@ -4084,6 +4485,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 </div>
                 <p className="rs-loading-sub">{Math.round(loadProgress)}%</p>
               </div>
+            </div>
+          )}
+          {!loadVisible && bgNote && (
+            <div className="mapscene-bg-note" title="Neighbouring regions are still building in the background — the centre region is fully usable meanwhile">
+              <span className="mapscene-bg-note-spinner" />
+              {bgNote}
+              {/* fine-grained progress streams in imperatively (see bgReport) */}
+              <span ref={bgDetailRef} className="mapscene-bg-note-detail" />
             </div>
           )}
           <div className="mapscene-minimap" title="Centre region, plane 0 — north up">

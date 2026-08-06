@@ -210,6 +210,35 @@ export const DEFAULT_MODEL_SUN: ModelSun = {
 }
 
 /**
+ * Lighting detail HIGH: the region environment's own sun, the way
+ * `EnvironmentManager.applySun` maps it into the `1_12.vert` uniforms —
+ *   AmbientColour = sunRgb · (0.7 + brightnessPref·0.1) · sunAmbient
+ *   SunColour     = sunRgb · sunLight
+ *   AntiSunColour = sunRgb · sunBacklight   (subtracted; Sub3:3047 negates)
+ * At LOW the client reads these fields and DISCARDS them for the flat
+ * constants above (Atmosphere.method11468) — which is why DEFAULT_MODEL_SUN
+ * is not a placeholder but the faithful LOW mode.
+ */
+export function modelSunFromEnvironment(
+  e: { sunColour?: number; sunAmbient?: number; sunLight?: number; sunBacklight?: number; sunPosition?: [number, number, number] },
+  /** client Brightness preference factor (0.7 + 0.1·pref); ambient only */
+  brightness = 1,
+): ModelSun {
+  const c = e.sunColour ?? 0xddccbb
+  const sunRgb: [number, number, number] = [((c >> 16) & 0xff) / 255, ((c >> 8) & 0xff) / 255, (c & 0xff) / 255]
+  const amb = (e.sunAmbient ?? 1.1523438) * brightness
+  const light = e.sunLight ?? DEFAULT_MODEL_SUN.sunColour[0]
+  const back = e.sunBacklight ?? DEFAULT_MODEL_SUN.antiSunColour[0]
+  const p = e.sunPosition ?? [-200, -240, -200]
+  return {
+    dir: [p[0], -p[1], -p[2]], // RS → GL (x, −y, −z); normalised by the consumer
+    sunColour: [sunRgb[0] * light, sunRgb[1] * light, sunRgb[2] * light],
+    ambientColour: [sunRgb[0] * amb, sunRgb[1] * amb, sunRgb[2] * amb],
+    antiSunColour: [sunRgb[0] * back, sunRgb[1] * back, sunRgb[2] * back],
+  }
+}
+
+/**
  * A region point light, in SCENE space and ready for the shader's diffuse term.
  * Built from a map-environment light record — see `buildLightGrid` in mapScene.
  */
@@ -396,7 +425,13 @@ export function computeModelLitRgb(
         }
       }
       const base = (f * 3 + k) * 3
-      // low clamp too: a fully back-facing vertex is ambient − anti = −0.05
+      // low clamp too: a fully back-facing vertex is ambient − anti = −0.05.
+      // The high clamp is NOT negotiable at any lighting detail: the client's
+      // Sub3 bake writes 8-bit vertex colours, and the D3D9 fixed-function
+      // path saturates per-vertex lighting to [0,1] by specification — bright
+      // faces saturate AT the sun colour, never past it. (An "unclamp for the
+      // tone map" attempt on 2026-08-06 made everything blinding — the
+      // composite's whitePoint is ~1.0 at Lumbridge, an identity curve.)
       out[base] = srgbToLinear(Math.min(1, Math.max(0, baseR * dr)))
       out[base + 1] = srgbToLinear(Math.min(1, Math.max(0, baseG * dg)))
       out[base + 2] = srgbToLinear(Math.min(1, Math.max(0, baseB * db)))
