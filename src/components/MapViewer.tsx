@@ -17,6 +17,9 @@ const ZOOM_LEVELS = [4, 6, 8, 10, 14]
 // world region picker view: canvas is a fixed 512px square, zoom levels are
 // px-per-region (2 = whole 256×256 world exactly fits)
 const PICKER_SIZE = 512
+/** Largest creatable area, in regions per side — arbitrary sanity cap (64×64
+ *  regions = 4096×4096 tiles, a quarter of the whole 256×256 region grid). */
+const MAX_CREATE_SPAN = 64
 const PICKER_ZOOMS = [2, 3, 4, 6, 8, 12, 16, 24, 32]
 
 function clampPickerView(scale: number, ox: number, oy: number) {
@@ -109,6 +112,14 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
   // stored tile byte = underlay definition id + 1 (0 = none). 164 = underlay
   // 163, the Lumbridge grass (what's on the ground at world tile 3219, 3224).
   const [createUnderlay, setCreateUnderlay] = useState(164)
+  // Area size in REGIONS, the clicked cell being the south-west corner.
+  // 1×1 stays an in-memory draft (the normal dirty/Save flow); anything
+  // bigger is a bulk operation that writes the files to disk immediately,
+  // like the picker's right-click delete — a many-region draft has no place
+  // in the one-region draft/save model.
+  const [createW, setCreateW] = useState(1)
+  const [createH, setCreateH] = useState(1)
+  const [createBusy, setCreateBusy] = useState(false)
   // world-grid region picker: shows every existing region, click to visit or
   // click a free cell to start creating there
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -656,8 +667,13 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
   // Create the pending region as an in-memory draft: nothing touches disk
   // until Save writes the region file. Discard — or navigating away past the
   // unsaved-changes confirm — abandons it entirely.
+  //
+  // A MULTI-region area (width/height > 1) is different: the files are
+  // written to disk immediately, after a confirm — like the picker's
+  // right-click delete, a bulk file operation has no place in the one-region
+  // draft/save model. Existing regions inside the area are left untouched.
   async function handleCreateRegion() {
-    if (!pendingCreate) return
+    if (!pendingCreate || createBusy) return
     if (isDirty) {
       const ok = await confirmDialog('You have unsaved changes in this region. Discard them and create the new region?', {
         title: 'Unsaved changes',
@@ -666,18 +682,72 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       })
       if (!ok) return
     }
-    const def = createRegionDef(pendingCreate.rx, pendingCreate.ry, createFill ? { underlayId: createUnderlay } : undefined)
-    const created = await newRegionData(world.rootHandle, def)
-    // Discard returns here; creating on top of another unsaved creation keeps
-    // the original return point (the abandoned draft is no place to go back to)
-    prevCoordsRef.current = unsavedNewRef.current === regionId ? (prevCoordsRef.current ?? HOME) : coords
-    unsavedNewRef.current = def.id
-    envRef.current = null
-    setEnv(null)
-    setData(created)
-    const target = pendingCreate.target
-    setPendingCreate(null)
-    setCoords(target)
+    const fill = createFill ? { underlayId: createUnderlay } : undefined
+    const w = Math.max(1, Math.min(MAX_CREATE_SPAN, createW))
+    const h = Math.max(1, Math.min(MAX_CREATE_SPAN, createH))
+
+    if (w === 1 && h === 1) {
+      const def = createRegionDef(pendingCreate.rx, pendingCreate.ry, fill)
+      const created = await newRegionData(world.rootHandle, def)
+      // Discard returns here; creating on top of another unsaved creation keeps
+      // the original return point (the abandoned draft is no place to go back to)
+      prevCoordsRef.current = unsavedNewRef.current === regionId ? (prevCoordsRef.current ?? HOME) : coords
+      unsavedNewRef.current = def.id
+      envRef.current = null
+      setEnv(null)
+      setData(created)
+      const target = pendingCreate.target
+      setPendingCreate(null)
+      setCoords(target)
+      return
+    }
+
+    // Bulk path. The clicked cell is the SW corner; cells that already exist
+    // (or fall off the 0-255 grid) are skipped, never overwritten.
+    const cells: { rx: number; ry: number }[] = []
+    let skipped = 0
+    for (let dx = 0; dx < w; dx++) {
+      for (let dy = 0; dy < h; dy++) {
+        const rx = pendingCreate.rx + dx
+        const ry = pendingCreate.ry + dy
+        if (rx > 255 || ry > 255 || usedRegions?.has((rx << 8) | ry)) { skipped++; continue }
+        cells.push({ rx, ry })
+      }
+    }
+    const ok = await confirmDialog(
+      `Write ${cells.length} new region files to the maps folder now?` +
+      (skipped > 0 ? ` ${skipped} cell${skipped === 1 ? '' : 's'} of the area already exist (or fall off the map) and will be left untouched.` : '') +
+      ' Unlike a single new region, a multi-region area is written to disk immediately rather than staged for Save.',
+      { title: `Create ${w}×${h} area`, confirmLabel: `Create ${cells.length} regions` },
+    )
+    if (!ok) return
+    setCreateBusy(true)
+    try {
+      const createdIds: number[] = []
+      for (let i = 0; i < cells.length; i++) {
+        // createRegionDef returns the encoded, JSON-ready def — the same
+        // shape saveRegion writes
+        const def = createRegionDef(cells[i].rx, cells[i].ry, fill)
+        const fh = await world.mapsDir.getFileHandle(`${def.id}.json`, { create: true })
+        const writable = await fh.createWritable()
+        await writable.write(JSON.stringify(def))
+        await writable.close()
+        createdIds.push(def.id)
+        if ((i + 1) % 16 === 0 || i === cells.length - 1) setSearchMsg(`creating regions… ${i + 1}/${cells.length}`)
+      }
+      setUsedRegions((prev) => {
+        if (!prev) return prev
+        const next = new Set(prev)
+        for (const id of createdIds) next.add(id)
+        return next
+      })
+      setSearchMsg(`created ${createdIds.length} regions${skipped > 0 ? ` (${skipped} skipped)` : ''}`)
+      const target = pendingCreate.target
+      setPendingCreate(null)
+      setCoords(target)
+    } finally {
+      setCreateBusy(false)
+    }
   }
 
   // stable identity for the 3D viewer — an inline object would rebuild the
@@ -782,8 +852,16 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       {pendingCreate && (
         <div className="map-create-bar">
           <span className="map-create-msg">
-            Region {pendingCreate.rx}, {pendingCreate.ry} isn't in the cache — create it?
+            {createW === 1 && createH === 1
+              ? <>Region {pendingCreate.rx}, {pendingCreate.ry} isn't in the cache — create it?</>
+              : <>Create a {createW}×{createH} region area — SW corner {pendingCreate.rx}, {pendingCreate.ry}, NE corner {Math.min(255, pendingCreate.rx + createW - 1)}, {Math.min(255, pendingCreate.ry + createH - 1)}?</>}
           </span>
+          <label className="map-create-underlay" title="Area size in regions — the clicked cell is the south-west corner. 1×1 is staged in memory until Save; anything bigger writes the region files to disk immediately (existing regions inside the area are never overwritten).">
+            <span className="item-field-label">regions</span>
+            <NumberInput value={createW} onChange={setCreateW} min={1} max={MAX_CREATE_SPAN} digits={2} />
+            <span className="item-field-label">×</span>
+            <NumberInput value={createH} onChange={setCreateH} min={1} max={MAX_CREATE_SPAN} digits={2} />
+          </label>
           <label className="mapscene-toggle">
             <input type="checkbox" checked={createFill} onChange={(e) => setCreateFill(e.target.checked)} />
             fill plane 0 with flat ground
@@ -794,8 +872,10 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
               <NumberInput value={createUnderlay} onChange={setCreateUnderlay} min={0} max={255} />
             </label>
           )}
-          <button type="button" className="save-bar-save" onClick={handleCreateRegion}>Create region</button>
-          <button type="button" className="save-bar-discard" onClick={() => setPendingCreate(null)}>Cancel</button>
+          <button type="button" className="save-bar-save" disabled={createBusy} onClick={() => void handleCreateRegion()}>
+            {createBusy ? 'Creating…' : createW === 1 && createH === 1 ? 'Create region' : `Create ${createW * createH} regions`}
+          </button>
+          <button type="button" className="save-bar-discard" disabled={createBusy} onClick={() => setPendingCreate(null)}>Cancel</button>
         </div>
       )}
 
