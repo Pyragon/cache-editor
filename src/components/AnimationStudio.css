@@ -408,7 +408,41 @@
   margin: 10px 0 0;
 }
 
-/* Sequence options: name + input on one line, the explanation under them. */
+/* The "how this works" guide modal — map-picker chrome, reading sizes. */
+.anim-studio-guide {
+  width: min(680px, calc(100vw - 48px));
+  max-height: min(80vh, 900px);
+  overflow-y: auto;
+}
+
+.anim-studio-guide .map-picker-head {
+  justify-content: space-between;
+}
+
+.anim-studio-guide h4 {
+  margin: 16px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.anim-studio-guide p {
+  margin: 4px 0;
+  max-width: 68ch;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.anim-studio-guide p strong {
+  color: #7eb8ff;
+  font-weight: 600;
+}
+
+/* Sequence options: name on its own line, the input under it, the
+   explanation last. */
 .anim-studio-optgrid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -423,27 +457,29 @@
   background: #14161d;
 }
 
-.anim-studio-opt > span {
-  display: inline-block;
-  min-width: 150px;
+/* first-child, NOT every span — the tweened card's .btn-pill is also a direct
+   span child, and a blanket min-width once stretched the pill past its
+   buttons, leaving dead space inside the border. */
+.anim-studio-opt > span:first-child {
+  display: block;
+  margin-bottom: 6px;
   color: var(--text-dim);
   font-size: 12px;
 }
 
+/* Buttons under an option's input (loop all) get their own line. */
+.anim-studio-opt > .field-link-btn {
+  display: block;
+  margin-top: 6px;
+}
+
 .anim-studio-opt > em {
   display: block;
-  margin-top: 3px;
+  margin-top: 6px;
   max-width: 52ch;
   font-style: normal;
   font-size: 11px;
   line-height: 1.45;
   color: var(--text-dim);
   opacity: 0.75;
-}
-
-/* Option inputs: standalone size, beside their label. */
-.anim-studio-opt .num-input {
-  display: inline-block;
-  max-width: 150px;
-  vertical-align: middle;
 }

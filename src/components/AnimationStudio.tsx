@@ -100,6 +100,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
   const trackRef = useRef<HTMLDivElement>(null)
   const [compatVersion, setCompatVersion] = useState(0)
   const [scanning, setScanning] = useState<ScanProgress | null>(null)
+  const [showGuide, setShowGuide] = useState(false)
   const cameraStateRef = useRef<CameraState | null>(null)
 
   const rig = useMemo((): Rig | null => (base ? buildRig(base) : null), [base])
@@ -251,20 +252,50 @@ export default function AnimationStudio({ data, onClose }: Props) {
   const activeSlot = channels.find((c) => c.type === channelType)?.slot ?? null
   const gizmoMode = gizmoModeFor(channelType)
 
+  /** Any edit: dirty, and whatever the last save said is stale. */
+  const touch = () => { setDirty(true); setSaveNote('') }
+
+  /** Sequence-level edits (loop delay, hand items…) waiting for save. */
+  const [defEdits, setDefEdits] = useState<Partial<AnimationDef>>({})
+  /** The sequence as it will be written: last-saved def + pending edits. */
+  const seq: AnimationDef = { ...savedDefRef.current, ...defEdits }
+  const editSeq = (patch: Partial<AnimationDef>) => { setDefEdits((prev) => ({ ...prev, ...patch })); touch() }
+  seqRef.current = seq
+
+  /**
+   * Where playback returns to after the last frame, or null when it doesn't.
+   *
+   * The client restarts at `frameCount - loopDelay`, NOT at frame 0, so only
+   * the tail repeats. 73% of sequences use -1, which loops nothing — they play
+   * through once. Looping a whole walk cycle means loopDelay === frameCount.
+   * loopDelay 0 rewinds by nothing, so the client finishes — same as -1 here.
+   */
+  const loopBackAt = seq.loopDelay >= 0 && seq.loopDelay <= frames.length
+    ? frames.length - seq.loopDelay
+    : null
+
   const posed = useMemo(() => {
     if (!model || !base || !current) return null
     // Tweening blends toward the NEXT frame by how far through this one we are.
     // Only while playing: a still frame must show what it really stores, or you
     // would be posing against a blend rather than the frame.
-    const next = tweened && playing && frames.length > 1
-      ? frames[(frameIndex + 1) % frames.length].frame
+    //
+    // The last frame's target is the loop-back frame (count − loopDelay), the
+    // tail window the client rewinds into — never frame 0 unless the whole
+    // thing loops. A sequence that doesn't loop has no target: the client is
+    // finishing there, so the pose HOLDS for the frame's duration.
+    const nextIndex = frameIndex + 1 < frames.length
+      ? frameIndex + 1
+      : loopBackAt != null && loopBackAt < frames.length ? loopBackAt : null
+    const next = tweened && playing && frames.length > 1 && nextIndex != null
+      ? frames[nextIndex].frame
       : null
     return applyAnimationFrame(
       model, base, current.frame, next,
       next ? elapsed : 0, next ? Math.max(1, current.durationCycles) : 1,
       undefined, activeSlot ?? undefined,
     )
-  }, [model, base, current, activeSlot, tweened, playing, elapsed, frames, frameIndex])
+  }, [model, base, current, activeSlot, tweened, playing, elapsed, frames, frameIndex, loopBackAt])
 
   // Playback: frames are held for their own duration (20ms cycles). Tweened
   // sequences re-pose every rendered frame at the sub-cycle fraction, because
@@ -283,7 +314,13 @@ export default function AnimationStudio({ data, onClose }: Props) {
       let guard = 0
       while (within >= Math.max(1, frames[index].durationCycles) && guard++ < 64) {
         within -= Math.max(1, frames[index].durationCycles)
-        index = (index + 1) % frames.length
+        // Past the end, the client rewinds to count − loopDelay, so only the
+        // tail repeats. A sequence that doesn't loop would finish and hold;
+        // the preview replays it from the top instead, which is the one
+        // deliberate divergence — a preview that stops needs a rewind button.
+        index = index + 1 < frames.length
+          ? index + 1
+          : loopBackAt != null && loopBackAt < frames.length ? loopBackAt : 0
       }
       setFrameIndex(index)
       setElapsed(within)
@@ -292,7 +329,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
     return () => cancelAnimationFrame(raf)
     // frameIndex seeds the loop; re-running on every advance would restart it
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, frames])
+  }, [playing, frames, loopBackAt])
 
   /**
    * The pivot this rotation turns about. An entry that already exists carries
@@ -451,16 +488,6 @@ export default function AnimationStudio({ data, onClose }: Props) {
     return slot == null ? 0 : (pivotUsers.get(slot)?.size ?? 0)
   }
 
-  /** Any edit: dirty, and whatever the last save said is stale. */
-  const touch = () => { setDirty(true); setSaveNote('') }
-
-  /** Sequence-level edits (loop delay, hand items…) waiting for save. */
-  const [defEdits, setDefEdits] = useState<Partial<AnimationDef>>({})
-  /** The sequence as it will be written: last-saved def + pending edits. */
-  const seq: AnimationDef = { ...savedDefRef.current, ...defEdits }
-  const editSeq = (patch: Partial<AnimationDef>) => { setDefEdits((prev) => ({ ...prev, ...patch })); touch() }
-  seqRef.current = seq
-
   // Re-fit the composite when the item toggles (or the items themselves)
   // change; skipped while nothing held is or was in the mesh.
   useEffect(() => {
@@ -518,13 +545,6 @@ export default function AnimationStudio({ data, onClose }: Props) {
   }
 
   /**
-   * Where playback returns to after the last frame, or null when it doesn't.
-   *
-   * The client restarts at `frameCount - loopDelay`, NOT at frame 0, so only
-   * the tail repeats. 73% of sequences use -1, which loops nothing — they play
-   * through once. Looping a whole walk cycle means loopDelay === frameCount.
-   */
-  /**
    * How far apart two poses are, in transforms that don't match.
    *
    * The reason it matters: when an animation ends the entity snaps back to its
@@ -571,10 +591,6 @@ export default function AnimationStudio({ data, onClose }: Props) {
     })
     touch()
   }
-
-  const loopBackAt = seq.loopDelay >= 0 && seq.loopDelay <= frames.length
-    ? frames.length - seq.loopDelay
-    : null
 
   // Frames can arrive without labels (state preserved across a hot reload from
   // before labels existed). Backfill instead of falling back at render time —
@@ -785,6 +801,14 @@ export default function AnimationStudio({ data, onClose }: Props) {
       <div className="item-header">
         <div className="item-title-row">
           <span className="enum-title">Animation studio — {data.id}</span>
+          <button
+            type="button"
+            className="field-link-btn"
+            title="What parts, pivots, tweening and the rest actually are"
+            onClick={() => setShowGuide(true)}
+          >
+            How this works
+          </button>
           <button
             type="button"
             className="field-link-btn"
@@ -1233,7 +1257,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
         <div className="anim-studio-optgrid">
           <label className="anim-studio-opt">
             <span>Loop delay</span>
-            <NumberInput className="item-field-input" value={seq.loopDelay} min={-1} onChange={(v) => editSeq({ loopDelay: v })} />
+            <NumberInput className="item-field-input" value={seq.loopDelay} min={-1} digits={3} onChange={(v) => editSeq({ loopDelay: v })} />
             <button
               type="button"
               className="field-link-btn"
@@ -1251,7 +1275,7 @@ export default function AnimationStudio({ data, onClose }: Props) {
           </label>
           <label className="anim-studio-opt">
             <span>Max loops</span>
-            <NumberInput className="item-field-input" value={seq.maxLoops} min={0} onChange={(v) => editSeq({ maxLoops: v })} />
+            <NumberInput className="item-field-input" value={seq.maxLoops} min={0} digits={3} onChange={(v) => editSeq({ maxLoops: v })} />
             <em>Times the loop runs before the animation ends. 99 is the near-universal value; 1 plays through once.</em>
           </label>
           <label className="anim-studio-opt">
@@ -1275,45 +1299,47 @@ export default function AnimationStudio({ data, onClose }: Props) {
           </label>
           <label className="anim-studio-opt">
             <span>Priority</span>
-            <NumberInput className="item-field-input" value={seq.priority} min={-1} onChange={(v) => editSeq({ priority: v })} />
+            <NumberInput className="item-field-input" value={seq.priority} min={-1} digits={2} onChange={(v) => editSeq({ priority: v })} />
             <em>Which animation wins when two want the same entity — higher beats lower. −1 is the common default.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Animating precedence</span>
-            <NumberInput className="item-field-input" value={seq.animatingPrecedence} min={-1} onChange={(v) => editSeq({ animatingPrecedence: v })} />
+            <NumberInput className="item-field-input" value={seq.animatingPrecedence} min={-1} digits={2} onChange={(v) => editSeq({ animatingPrecedence: v })} />
             <em>What shows when another animation is already playing. Darkan’s name; exact semantics untraced — −1 default.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Walking precedence</span>
-            <NumberInput className="item-field-input" value={seq.walkingPrecedence} min={-1} onChange={(v) => editSeq({ walkingPrecedence: v })} />
+            <NumberInput className="item-field-input" value={seq.walkingPrecedence} min={-1} digits={2} onChange={(v) => editSeq({ walkingPrecedence: v })} />
             <em>What shows while the entity is moving — whether the walk or this animation wins. Untraced beyond the name; −1 default.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Replay mode</span>
-            <NumberInput className="item-field-input" value={seq.replayMode} min={0} max={2} onChange={(v) => editSeq({ replayMode: v })} />
+            <NumberInput className="item-field-input" value={seq.replayMode} min={0} max={2} digits={1} onChange={(v) => editSeq({ replayMode: v })} />
             <em>Untraced beyond its values: 16,695 of 17,186 sequences store 2 (0 and 1 are rare). Change with care.</em>
           </label>
           <label className="anim-studio-opt">
             <span>Left hand item</span>
-            <NumberInput className="item-field-input" value={seq.leftHandItem} min={-1} max={65535} onChange={(v) => editSeq({ leftHandItem: v })} />
+            <NumberInput className="item-field-input" value={seq.leftHandItem} min={-1} max={65535} digits={5} onChange={(v) => editSeq({ leftHandItem: v })} />
             <em>
               Darkan’s replacementShield — the LEFT hand. In the client an explicit 65535 EMPTIES
-              the hand and a missing value leaves it as equipped; the dump stores 65535 for both
-              (15,773 of 17,186 sequences have it — it is the dumped default). Any other value =
+              the hand and a missing value leaves it as equipped; dumps made before cryogen's
+              2026-08-05 fix store 65535 for both — re-dump animations to distinguish them. Any other value =
               that item id shown instead.
             </em>
           </label>
           <label className="anim-studio-opt">
             <span>Right hand item</span>
-            <NumberInput className="item-field-input" value={seq.rightHandItem} min={-1} max={65535} onChange={(v) => editSeq({ rightHandItem: v })} />
+            <NumberInput className="item-field-input" value={seq.rightHandItem} min={-1} max={65535} digits={5} onChange={(v) => editSeq({ rightHandItem: v })} />
             <em>
               Darkan’s replacementWeapon — the RIGHT hand. Same rule: explicit 65535 empties the
-              hand, absent leaves it alone, the dump writes 65535 for both. Any other value = that
+              hand, absent (−1) leaves it alone; pre-fix dumps wrote 65535 for both. Any other value = that
               item id shown instead.
             </em>
           </label>
         </div>
       </section>
+
+      {showGuide && <StudioGuide onClose={() => setShowGuide(false)} />}
 
       {saveNote && <p className="map-sprite-hint anim-studio-savenote">{saveNote}</p>}
 
@@ -1340,3 +1366,110 @@ export default function AnimationStudio({ data, onClose }: Props) {
 const TIMELINE_PX = 10
 
 const TYPE_WORD: Record<number, string> = { 0: 'pivot', 1: 'move', 2: 'rotate', 3: 'scale' }
+
+/**
+ * The "how this works" writeup. Everything here is traced client behaviour,
+ * not editor invention — keep it in sync with EDITOR.md when either changes.
+ */
+function StudioGuide({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="map-picker-overlay" onClick={onClose}>
+      <div className="map-picker anim-studio-guide" onClick={(e) => e.stopPropagation()}>
+        <div className="map-picker-head">
+          <span className="map-picker-title">How the studio works</span>
+          <button type="button" className="field-link-btn" onClick={onClose}>Close</button>
+        </div>
+
+        <h4>What an animation is made of</h4>
+        <p>
+          A <strong>sequence</strong> (the thing this page edits) is playback metadata: which frames
+          play, in what order, each for how long, plus options like looping and hand items. The
+          poses themselves live in <strong>frame files</strong>, grouped into frame sets, and every
+          frame is a list of transforms against a shared <strong>skeleton</strong> (frame base).
+          Nothing here is bones-and-weights like Blender — a frame says &ldquo;move these vertex
+          groups, rotate those&rdquo;, and applying its transforms in order to the rest pose IS the
+          pose.
+        </p>
+
+        <h4>Parts and groups</h4>
+        <p>
+          Every vertex of the model belongs to a numbered <strong>vertex group</strong>. The
+          skeleton&rsquo;s transforms each act on a set of groups, and the studio calls each
+          distinct set a <strong>part</strong> — the click-to-select things in the Rig list. Parts
+          nest by containment: the set {'{'}upper arm, forearm, hand{'}'} contains {'{'}forearm,
+          hand{'}'}, so the studio shows one under the other, and clicking the model selects the
+          deepest part beneath the pointer. Parts that only ever serve as a rotation origin are
+          <strong> joints</strong>, dimmed in the list — you rarely pose them directly.
+        </p>
+
+        <h4>Pivots — what a rotation turns about</h4>
+        <p>
+          A rotation entry doesn&rsquo;t carry a pivot point. Instead the skeleton runs an
+          <strong> origin transform</strong> (type 0) before it, and the rotation turns about
+          wherever that origin currently sits — the &ldquo;turns about&rdquo; picker chooses which
+          one. Almost every rotation in the real cache (93.9%) references a joint this way. Because
+          the origin is whatever ran <em>last</em>, order matters; the studio tracks the running
+          pivot for you and puts the gizmo on it.
+        </p>
+
+        <h4>Posing with the gizmo</h4>
+        <p>
+          Select a part, pick a channel (rotate is the default — nearly every pose adjustment is a
+          rotation), drag the handle. Rotations are stored at quarter-degree-ish resolution
+          (14-bit, pre-shifted), so a drag lands within about a unit of where you put it. Every
+          drag is one undo step (Ctrl+Z / Ctrl+Shift+Z), captured on grab so it can&rsquo;t
+          accumulate rounding.
+        </p>
+
+        <h4>The timeline</h4>
+        <p>
+          One cell per frame, laid out on a real time axis: a frame&rsquo;s width is its
+          <strong> duration</strong> in client ticks of 20&nbsp;ms. Drag cells to reorder, click to
+          jump, and the numbers stay stable — frame 6 is frame 6 wherever you drag it. The
+          amber region marks the loop tail (see below).
+        </p>
+
+        <h4>Tweening</h4>
+        <p>
+          With the sequence&rsquo;s <strong>tweened</strong> flag on, the client blends each frame
+          toward the next instead of stepping — shortest arc for rotations, over the current
+          frame&rsquo;s duration. About half of all sequences use it; a deliberately snappy
+          animation shouldn&rsquo;t. On the <em>last</em> frame the blend targets the frame playback
+          actually returns to — the loop tail&rsquo;s start — and if the animation doesn&rsquo;t
+          loop, nothing: it holds. (Blending toward frame 1 there is a bug the studio used to have —
+          the whole animation appeared to run backwards during a long final frame.)
+        </p>
+
+        <h4>Looping</h4>
+        <p>
+          <strong>Loop delay</strong> is how many frames of the TAIL repeat: playback restarts at
+          frame&nbsp;count&nbsp;−&nbsp;loop&nbsp;delay, not at frame 1. −1 never loops — the
+          animation plays through once and the entity snaps back to its stance (the &ldquo;last
+          frame differs from the first&rdquo; warning is about how visible that snap is). Looping
+          the whole animation means loop delay = frame count — the &ldquo;loop all&rdquo; button.
+          <strong> Max loops</strong> caps how many times the tail runs; 99 is the near-universal
+          value.
+        </p>
+
+        <h4>Hand items</h4>
+        <p>
+          A sequence can override what the hands hold while it plays: −1 leaves the equipped item
+          alone, an item id shows that item instead, and 65535 explicitly <strong>empties</strong>
+          the hand — that&rsquo;s how sheathing works. The toolbar&rsquo;s hand-item buttons preview
+          the override on the pose.
+        </p>
+
+        <h4>Saving</h4>
+        <p>
+          Save is <strong>copy-on-write</strong>: every frame whose pose you changed becomes a NEW
+          frame file, and this sequence is rewritten to point at the new files — frames are shared
+          between animations, so the ones you didn&rsquo;t touch keep serving every other sequence
+          unmodified. The sequence&rsquo;s parallel arrays (per-frame sounds, durations, interleave
+          order) are permuted to follow your frame reordering. Per-frame <strong>sounds</strong>
+          exist in the format but aren&rsquo;t editable here yet — the raw animations page shows
+          them.
+        </p>
+      </div>
+    </div>
+  )
+}

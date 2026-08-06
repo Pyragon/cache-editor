@@ -58,8 +58,11 @@ function newDefaults(id: number): AnimationDef {
     id,
     loopDelay: -1,
     priority: -1,
-    leftHandItem: 65535,
-    rightHandItem: 65535,
+    // -1 = no override (opcode absent). 65535 is a REAL value — the client
+    // empties that hand. Dumps made before cryogen's 2026-08-05 fix store
+    // 65535 for both meanings; a re-dump distinguishes them.
+    leftHandItem: -1,
+    rightHandItem: -1,
     maxLoops: 1,
     animatingPrecedence: -1,
     walkingPrecedence: -1,
