@@ -76,8 +76,10 @@ export function NumberInput({ value, onChange, className = 'item-field-input', s
     <span
       className={`num-input${digits ? ' num-input-sized' : ''}`}
       title={title}
-      // digits·ch content + 6px left pad + 41px stepper reserve + 2px borders
-      style={digits ? { width: `calc(${digits + 1}ch + 49px)` } : undefined}
+      // digits·ch content + 6px left pad + 41px stepper reserve + 2px borders,
+      // plus 10px slack: `ch` is the width of "0" and wider glyphs in a full
+      // set of digits were landing photo-finish against the steppers
+      style={digits ? { width: `calc(${digits + 1}ch + 59px)` } : undefined}
     >
       <input
         ref={inputRef}
