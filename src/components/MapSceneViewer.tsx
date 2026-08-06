@@ -79,7 +79,6 @@ const ORDER_TRANSPARENT_LOC = 1
 /** Selectable build spans (regions on a side). Every span decodes one ring
  *  more than it builds, so 9×9 built means 11×11 decoded — build time and
  *  memory scale with the square, which is what caps the list. */
-const REGION_SPANS = [1, 3, 5, 7, 9]
 
 // Free zoom: the wheel MOVES the camera along the ray under the cursor
 // (orbit pivot travelling with it) instead of OrbitControls' dolly, whose
@@ -204,9 +203,12 @@ type LocSelection = {
   regionX: number
   regionY: number
   inCenter: boolean
-  /** index into the centre region's objects array; -1 when unmatched */
+  /** index into its OWN region's objects array; -1 when unmatched */
   index: number
-  /** only centre-region locs are editable — neighbours live in another file */
+  /** the region this placement belongs to, so an edit is drafted and saved
+   *  against the right file — every loaded region is editable */
+  regionId: number
+  /** editable once matched in its own region's list */
   editable: boolean
   sizeX: number
   sizeY: number
@@ -219,7 +221,11 @@ type LocSelection = {
 }
 
 /** A scene object the build tracks so later passes can find it by role. */
-type Tagged = { obj: THREE.Object3D; neighbor: boolean; kind: 'terrain' | 'riverbed' | 'loc' | 'marker' | 'light' | 'outline' }
+/** `neighbor` is kept for the visibility/tint sweeps that only care whether a
+ *  mesh belongs to the edited region; `dx`/`dy` identify WHICH cell built it,
+ *  so a rebuild can dispose exactly one region's meshes now that every loaded
+ *  region is editable (light gizmos aren't cell-owned, hence optional). */
+type Tagged = { obj: THREE.Object3D; neighbor: boolean; dx?: number; dy?: number; kind: 'terrain' | 'riverbed' | 'loc' | 'marker' | 'light' | 'outline' }
 /** Which tagged kinds the sun tint / HDR multiplier is allowed to touch: the
  *  world geometry only. `applyTint` OVERWRITES `material.color` (world materials
  *  keep their colour in vertex colours, so there's nothing to preserve), which
@@ -294,6 +300,17 @@ function bakedSunOf(env: RegionEnvironment | null): string {
 
 /** One edit against the parent's drafts; coalesce folds it into the previous
  *  undo step (used for drag-stroke continuations). */
+/** Unsaved edits to a LOADED region other than the one you're standing in.
+ *  Every loaded region is editable and each is its own pair of files, so the
+ *  parent keeps one of these per region rather than a map per field — which
+ *  also makes an undo snapshot a single reference. */
+export type RegionDraft = {
+  objects?: LocEntry[]
+  terrain?: MapTerrain
+  lights?: RegionLight[]
+  env?: RegionEnvironment
+}
+
 type EditPatch = {
   terrain?: MapTerrain
   objects?: LocEntry[]
@@ -306,6 +323,10 @@ type EditPatch = {
    *  changes every placement of that object everywhere in the game. */
   objectDefs?: Map<number, ObjectDefJson>
   coalesce?: boolean
+  /** Which region `objects` belongs to. Absent = the base region, which is the
+   *  only one that used to be editable. Every LOADED region is editable now, so
+   *  an edit to a neighbour carries its id and the parent drafts it separately. */
+  regionId?: number
 }
 
 /** Copied area: per-plane tile channels + contained placements (relative). */
@@ -321,8 +342,16 @@ type StampClipboard = {
   objects: LocEntry[]
 }
 
-export default function MapSceneViewer({ data, focus, objects, terrain, lights, env, envEditable = false, objectDefs, onEdit, gfxSlot, onNavigate, pov = false }: {
+export default function MapSceneViewer({ data, focus, objects, terrain, lights, env, envEditable = false, objectDefs, onEdit, gfxSlot, onNavigate, pov = false, regionRect = null, regionDrafts }: {
   data: MapData
+  /** Absolute region rectangle to load, from the world picker. Null = just the
+   *  base region. Always a rectangle: the picker spans corners rather than
+   *  toggling cells, so a selection can never be two islands with a gap. */
+  regionRect?: { x0: number; y0: number; x1: number; y1: number } | null
+  /** Placement drafts for LOADED regions other than the base one, keyed by
+   *  region id. The base region keeps using `objects` so its faster patch path
+   *  is untouched. */
+  regionDrafts?: Map<number, RegionDraft>
   focus?: { x: number; y: number; plane: number } | null
   /** draft of the centre region's placements (edits not yet saved) — kept
    *  outside `data` so an edit rebuilds only the centre locs, not the world */
@@ -362,6 +391,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // client-style minimap ground (blurred+lit, shape-masked overlays; 256×256
   // RGBA), produced by the scene build / terrain rebuilds from the mosaic
   const minimapBaseRef = useRef<Uint8ClampedArray | null>(null)
+  /** every loaded region's minimap ground raster, keyed by region id */
+  const minimapCellsRef = useRef(new Map<number, Uint8ClampedArray>())
+  /** the whole loaded rectangle drawn once; the visible minimap is a window
+   *  onto it that follows the camera arrow */
+  const minimapFullRef = useRef<HTMLCanvasElement | null>(null)
+  /** blit the window around the arrow — set by the scene effect, called by the
+   *  RAF loop and by the heavy draw so an edit shows without camera movement */
+  const minimapBlitRef = useRef<(() => void) | null>(null)
   const [minimapVersion, setMinimapVersion] = useState(0)
   // minimap brightness = the client's palette gamma (its Brightness setting).
   // The map-dumper ground is raw config RGB, so 1.0 is neutral; the slider
@@ -382,12 +419,42 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const objectsPropRef = useRef<LocEntry[] | null>(null)
   objectsPropRef.current = objects ?? null
   const lastBuiltObjectsRef = useRef<LocEntry[] | null>(null)
+  /** each LOADED region's placements as built, keyed by region id — the
+   *  fallback when a region has no draft yet */
+  /** which loaded region the Env tab is showing; null = the base region */
+  const [envRegionId, setEnvRegionId] = useState<number | null>(null)
+  /** neighbour environment records read from disk, so the pills can switch
+   *  without the parent having to preload every loaded region's file */
+  const [envCache, setEnvCache] = useState<Map<number, RegionEnvironment | null>>(() => new Map())
+  const cellObjectsRef = useRef(new Map<number, LocEntry[]>())
+  /** each loaded region's terrain as built, so a placement-only edit to a
+   *  neighbour can rebuild that cell without the parent shipping terrain too */
+  const cellTerrainRef = useRef(new Map<number, MapTerrain>())
+  const regionDraftsRef = useRef<Map<number, RegionDraft> | undefined>(undefined)
+  regionDraftsRef.current = regionDrafts
+  /** the live placement list for any loaded region: its draft if it has one,
+   *  otherwise what was built from disk */
+  const listForRegion = (rx: number, ry: number): LocEntry[] => {
+    if (rx === data.def.regionX && ry === data.def.regionY) return objectsPropRef.current ?? data.def.objects
+    const id = (rx << 8) | ry
+    return regionDraftsRef.current?.get(id)?.objects ?? cellObjectsRef.current.get(id) ?? []
+  }
+  // the scene effect outlives any one render, so it reads through a ref rather
+  // than closing over this render's copy
+  const listForRegionRef = useRef(listForRegion)
+  listForRegionRef.current = listForRegion
   const lightsPropRef = useRef<RegionLight[] | null>(null)
   lightsPropRef.current = lights ?? null
   const lastBuiltLightsRef = useRef<RegionLight[] | null>(null)
   // unified centre rebuild (terrain + locs + shadows + minimap) — assigned by
   // the scene build once its closure state (mosaic grid, assets) exists
   const rebuildCenterRef = useRef<((t: MapTerrain, objs: LocEntry[], lights?: RegionLight[]) => Promise<void>) | null>(null)
+  /** Rebuild any LOADED region, addressed by its offset from the base one.
+   *  Every loaded region is editable, so edits to a neighbour rebuild that
+   *  cell rather than the centre. (0, 0) is what rebuildCenterRef forwards to. */
+  const rebuildCellRef = useRef<((dx: number, dy: number, t: MapTerrain, objs: LocEntry[], lights?: RegionLight[]) => Promise<void>) | null>(null)
+  /** re-draw the light gizmos for one loaded region (the Env tab's pill) */
+  const lightGizmoRef = useRef<((list: RegionLight[], rdx: number, rdy: number) => void) | null>(null)
   /** Targeted placement patch — see its definition for what it does and does
    *  not update. Resolves false when the edit is too broad, and the caller
    *  falls back to the full rebuild. */
@@ -706,10 +773,6 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // underlay blur stay seam-free at the outer built edge. Changing it is a
   // full scene rebuild (it's a dep of the build effect); build time and draw
   // calls scale with the region count, which is why 1×1 is the default.
-  const [regionSpan, setRegionSpan] = useState(() => {
-    const v = parseInt(localStorage.getItem('cache-editor:region-span') ?? '1', 10)
-    return REGION_SPANS.includes(v) ? v : 1
-  })
   // bumped when a background ring cell finishes, so effects that sweep the
   // tagged meshes (visibility) pick up the late arrivals
   const [bgBuildRev, setBgBuildRev] = useState(0)
@@ -876,7 +939,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const billboardsRef = useRef<SceneBillboards | null>(null)
   const taggedRef = useRef<Tagged[]>([])
   // Placed locs with an idle sequence (waving flags) — posed each RAF frame.
-  type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; billboards?: import('./sceneBillboards').AnimatedBillboards; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; mesh: THREE.Mesh; sphere: THREE.Sphere }
+  type AnimLocRecord = { update: (posed: import('../loaders/skeletalAnimation').PosedVertices) => void; billboards?: import('./sceneBillboards').AnimatedBillboards; model: ModelData; animationId: number; animator?: LocAnimator; neighbor: boolean; dx?: number; dy?: number; mesh: THREE.Mesh; sphere: THREE.Sphere }
   const animLocsRef = useRef<AnimLocRecord[]>([])
   // Particle systems keyed by their emitter-carrying model: an animated loc's
   // posed frames re-anchor the emitter triangles (the client re-reads them off
@@ -1143,15 +1206,25 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       lightSelStalk.visible = false
     }
     lightHighlightClearRef.current = clearLightHighlight
-    /** Put the highlight on a light record (centre region, current heights). */
+    /** Which loaded region the light gizmos/highlight currently belong to —
+     *  the Env tab's region pill. A light record's x/z are region-local, so
+     *  without this offset a neighbour's ring lands a whole region away. */
+    let lightCellDx = 0
+    let lightCellDy = 0
+    /** that region's vertex heights, captured when its gizmos were built —
+     *  the mosaic isn't in scope this early in the effect */
+    let lightCellHeights: Int32Array[] | null = null
+    /** Put the highlight on a light record, in its own region's space. */
     function highlightLight(rec: RegionLight) {
-      const p = lightScenePos(rec, lightHeights)
+      const p = lightScenePos(rec, lightCellHeights ?? lightHeights)
+      const ox = lightCellDx * REGION_UNITS
+      const oz = -lightCellDy * REGION_UNITS
       const radius = Math.max(lightRadius(rec), 64)
-      lightSelRing.position.set(p.x, p.y, p.z)
+      lightSelRing.position.set(p.x + ox, p.y, p.z + oz)
       lightSelRing.scale.set(radius, 1, radius)
       lightSelRing.visible = true
       // stalk from the ground up through the light, so its height reads
-      lightSelStalk.position.set(p.x, p.ground, p.z)
+      lightSelStalk.position.set(p.x + ox, p.ground, p.z + oz)
       lightSelStalk.scale.set(1, Math.max(p.y - p.ground, 1), 1)
       lightSelStalk.visible = true
     }
@@ -1289,6 +1362,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       setSelection({
         kind: 'loc', name: 'Object', objectId, type, rotation, x, y, plane,
         regionX: data.def.regionX, regionY: data.def.regionY,
+        regionId: (data.def.regionX << 8) | data.def.regionY,
         inCenter: true, index, editable: index >= 0,
         sizeX: 1, sizeY: 1, models: '', def: null,
       })
@@ -1450,12 +1524,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       const meshRegionX = locRegion ? locRegion.x : data.def.regionX + Math.round(mesh.position.x / (64 * TILE))
       const meshRegionY = locRegion ? locRegion.y : data.def.regionY - Math.round(mesh.position.z / (64 * TILE))
       const isCenter = meshRegionX === data.def.regionX && meshRegionY === data.def.regionY
-      const centerList = objectsPropRef.current ?? data.def.objects
-      const index = isCenter
-        ? centerList.findIndex((o) =>
-            o[0] === loc.objectId && o[1] === loc.shape && o[2] === loc.rotation
-            && o[3] === loc.x && o[4] === loc.y && o[5] === loc.plane)
-        : -1
+      // resolve against the OWNING region's list, not just the centre's — a
+      // neighbour's placements are editable too, so they need a real index
+      const ownerList = listForRegionRef.current(meshRegionX, meshRegionY)
+      const index = ownerList.findIndex((o) =>
+        o[0] === loc.objectId && o[1] === loc.shape && o[2] === loc.rotation
+        && o[3] === loc.x && o[4] === loc.y && o[5] === loc.plane)
       return { loc, mesh, owner, isCenter, index, meshRegionX, meshRegionY }
     }
 
@@ -1466,8 +1540,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       const hit = pick()
       if (!hit) return
       const t = worldTileOf(hit.point)
-      if (t.tx < 0 || t.tx > 63 || t.ty < 0 || t.ty > 63) return // centre region only
-      const key = t.tx * 64 + t.ty
+      // absolute tile coords — applyBrush resolves which loaded region each
+      // tile of the footprint belongs to, so borders aren't a wall any more
+      const key = t.tx * 4096 + t.ty
       if (key === lastPaintTile) return
       const wasFirst = first && lastPaintTile === -1
       lastPaintTile = key
@@ -1504,7 +1579,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     // multi-tile object anywhere but its anchor tile must not teleport it.
     // `armed` stays false until the pointer passes DRAG_PX; an unarmed release
     // falls through and is handled as an ordinary click.
-    let movingLoc: { entry: LocEntry; index: number; grabTx: number; grabTy: number; armed: boolean } | null = null
+    let movingLoc: { entry: LocEntry; index: number; regionX: number; regionY: number; grabTx: number; grabTy: number; armed: boolean } | null = null
     let suppressClick = false
 
     function onPointerMove(e: PointerEvent) {
@@ -1613,6 +1688,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           movingLoc = {
             entry: [sel.objectId, sel.type, sel.rotation, sel.x, sel.y, sel.plane] as LocEntry,
             index: sel.index,
+            regionX: sel.regionX,
+            regionY: sel.regionY,
             grabTx: grab.tx,
             grabTy: grab.ty,
             armed: false,
@@ -1663,11 +1740,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         if (hit) {
           const t = movingTargetTile(moving, hit.point)
           if (t && (t.tx !== moving.entry[3] || t.ty !== moving.entry[4])) {
-            const base = objectsPropRef.current ?? data.def.objects
+            const base = listForRegionRef.current(moving.regionX, moving.regionY)
             const next = base.map((o) => [...o] as LocEntry)
             next[moving.index] = [moving.entry[0], moving.entry[1], moving.entry[2], t.tx, t.ty, moving.entry[5]] as LocEntry
             setSelection(null)
-            onEditRef.current?.({ objects: next })
+            onEditRef.current?.({ objects: next, regionId: (moving.regionX << 8) | moving.regionY })
             return
           }
         }
@@ -1765,7 +1842,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             regionY: meshRegionY,
             inCenter: isCenter,
             index,
-            editable: isCenter && index >= 0,
+            regionId: (meshRegionX << 8) | meshRegionY,
+            editable: index >= 0,
             sizeX: 1,
             sizeY: 1,
             models: '',
@@ -2030,16 +2108,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       } else {
         controls.update()
       }
-      // minimap camera marker: position = orbit target, arrow = view heading
-      if ((mmFrame++ & 7) === 0 && minimapCamRef.current) {
-        const P = 4
-        const tx = Math.max(0, Math.min(SIZE, controls.target.x / TILE))
-        const ty = Math.max(0, Math.min(SIZE, -controls.target.z / TILE))
-        const fx = controls.target.x - camera.position.x
-        const fz = controls.target.z - camera.position.z
-        const rot = Math.atan2(fx, -fz)
-        minimapCamRef.current.style.transform =
-          `translate(${tx * P - 7}px, ${SIZE * P - ty * P - 7}px) rotate(${rot}rad)`
+      // Minimap: the map scrolls under a FIXED centre arrow, like the client's.
+      // The arrow only ever rotates; the window we blit is what moves.
+      if ((mmFrame++ & 7) === 0) {
+        if (minimapCamRef.current) {
+          const fx = controls.target.x - camera.position.x
+          const fz = controls.target.z - camera.position.z
+          const rot = Math.atan2(fx, -fz)
+          const c = SIZE * 4 / 2
+          minimapCamRef.current.style.transform = `translate(${c - 7}px, ${c - 7}px) rotate(${rot}rad)`
+        }
+        minimapBlitRef.current?.()
       }
       // the sky dome stays centred on the camera so it reads as infinitely far
       if (skyMeshRef.current) skyMeshRef.current.position.copy(camera.position)
@@ -2237,29 +2316,50 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // BUILT regions still blend seam-free into undisplayed neighbours.
         setStatus('loading regions…')
         setBgNote('') // a torn-down build's ring note must not outlive it
-        type Cell = { dx: number; dy: number; def: MapRegionDef; terrain: ReturnType<typeof decodeTerrain>; underwater?: MapTerrain }
-        const buildRadius = (regionSpan - 1) / 2
-        const decodeRadius = buildRadius + 1
-        const gridSpan = decodeRadius * 2 + 1
+        type Cell = { dx: number; dy: number; def: MapRegionDef; terrain: ReturnType<typeof decodeTerrain>; underwater?: MapTerrain
+          /** that region's own point lights, so its locs are baked with the
+           *  torches that actually stand in it rather than none at all */
+          lights?: RegionLight[] }
+        // Region extents to BUILD, as offsets from the base region. The picker
+        // hands down an absolute rectangle; with none, it's just the base.
+        // One extra ring is DECODED around them so the outermost built regions
+        // still have neighbours to blend heights/lighting against.
+        const baseRx = data.def.regionX, baseRy = data.def.regionY
+        const dxMin = regionRect ? regionRect.x0 - baseRx : 0
+        const dxMax = regionRect ? regionRect.x1 - baseRx : 0
+        const dyMin = regionRect ? regionRect.y0 - baseRy : 0
+        const dyMax = regionRect ? regionRect.y1 - baseRy : 0
+        // grid index of the base region = where offset 0 lands once the decode
+        // ring has pushed the origin out by one
+        const offX = 1 - dxMin
+        const offY = 1 - dyMin
+        const gridW = dxMax - dxMin + 3
+        const gridH = dyMax - dyMin + 3
         // the centre region renders the parent's draft terrain (height-brush
         // edits survive a 2D/3D toggle); `let` because brush rebuilds swap it
         let currentTerrain = terrainPropRef.current ?? data.terrain
         lastBuiltTerrainRef.current = terrainPropRef.current
         const cells: Cell[] = [{ dx: 0, dy: 0, def: data.def, terrain: currentTerrain, underwater: data.underwaterTerrain }]
         const regionGrid: (Cell['terrain'] | null)[][] =
-          Array.from({ length: gridSpan }, () => Array<Cell['terrain'] | null>(gridSpan).fill(null))
-        regionGrid[decodeRadius][decodeRadius] = currentTerrain
+          Array.from({ length: gridW }, () => Array<Cell['terrain'] | null>(gridH).fill(null))
+        regionGrid[offX][offY] = currentTerrain
         if (mapsDir) {
-          for (let dx = -decodeRadius; dx <= decodeRadius; dx++) {
-            for (let dy = -decodeRadius; dy <= decodeRadius; dy++) {
+          for (let dx = dxMin - 1; dx <= dxMax + 1; dx++) {
+            for (let dy = dyMin - 1; dy <= dyMax + 1; dy++) {
               if (dx === 0 && dy === 0) continue
               try {
                 const id = ((data.def.regionX + dx) << 8) | (data.def.regionY + dy)
                 const file = await (await mapsDir.getFileHandle(`${id}.json`)).getFile()
                 const def = JSON.parse(await file.text()) as MapRegionDef
                 const terrain = decodeTerrain(def)
-                cells.push({ dx, dy, def, terrain, underwater: decodeUnderwaterTerrain(def) })
-                regionGrid[dx + decodeRadius][dy + decodeRadius] = terrain
+                // only regions we actually BUILD need lights; the outer decode
+                // ring exists for height/underlay blending alone
+                const inBuild = dx >= dxMin && dx <= dxMax && dy >= dyMin && dy <= dyMax
+                const cellEnv = inBuild && data.rootHandle
+                  ? await loadRegionEnvironment(data.rootHandle, id).catch(() => null)
+                  : null
+                cells.push({ dx, dy, def, terrain, underwater: decodeUnderwaterTerrain(def), lights: cellEnv?.lights })
+                regionGrid[dx + offX][dy + offY] = terrain
               } catch { /* neighbour not dumped */ }
             }
           }
@@ -2348,7 +2448,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         particles.setAmbient(sun.ambient * brightnessMulRef.current)
 
         setStatus('computing mosaic…')
-        const mosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun, assets.brightness)
+        let mosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sun, assets.brightness, offX, offY)
         if (disposed) return
 
         // region point lights (map-environment `lights[]`), baked per placement.
@@ -2369,25 +2469,36 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // (they're a few hundred vertices) — cheap enough to redo on every
         // slider tick while a light is being edited, which is what makes the
         // panel feel live without touching the baked loc lighting.
-        const setLightGizmos = (list: RegionLight[]) => {
+        /** Gizmos for ONE loaded region's lights — the Env tab's region pills
+         *  choose which, since a light record lives in that region's own
+         *  environment file. A neighbour's are offset and sampled against its
+         *  own heights, a light's y being relative to the tile under it. */
+        const setLightGizmos = (list: RegionLight[], rdx = 0, rdy = 0) => {
+          lightCellDx = rdx
+          lightCellDy = rdy
+          lightCellHeights = (rdx === 0 && rdy === 0) ? lightHeights : mosaic.slicesFor(rdx, rdy).heights
           const stale = taggedRef.current.filter((t) => t.kind === 'light')
           taggedRef.current = taggedRef.current.filter((t) => t.kind !== 'light')
           for (const { obj } of stale) {
             obj.parent?.remove(obj)
             disposeDeep(obj)
           }
+          const isBase = rdx === 0 && rdy === 0
+          const hs = lightCellHeights ?? lightHeights
           for (let plane = 0; plane < 4; plane++) {
             const indices: number[] = []
             for (let i = 0; i < list.length; i++) {
               if (list[i].plane === plane) indices.push(i)
             }
-            const group = buildLightsMesh(list, lightHeights, indices)
+            const group = buildLightsMesh(list, hs, indices)
             if (!group) continue
+            if (!isBase) group.position.set(rdx * REGION_UNITS, 0, -rdy * REGION_UNITS)
             group.visible = showLightsRef.current
             planeGroupsRef.current[plane]?.add(group)
-            taggedRef.current.push({ obj: group, neighbor: false, kind: 'light' })
+            taggedRef.current.push({ obj: group, neighbor: !isBase, kind: 'light' })
           }
         }
+        lightGizmoRef.current = (list, rdx, rdy) => setLightGizmos(list, rdx, rdy)
 
         // Live preview of the light being edited: the gizmo (position, height,
         // colour, reach ring) follows the panel's draft immediately. The LIGHTING
@@ -2401,6 +2512,44 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           }
           setLightGizmos(currentLights.map((l, i) => (i === index ? rec : l)))
           highlightLight(rec)
+        }
+
+        // Window onto the full-rectangle minimap, centred on the camera arrow.
+        // Source coords are in the full canvas's pixel space: x grows east from
+        // the rectangle's west edge, y grows SOUTH from its north edge.
+        minimapBlitRef.current = () => {
+          const dst = minimapRef.current?.getContext('2d')
+          const full = minimapFullRef.current
+          if (!dst || !full) return
+          const P = 4
+          const view = SIZE * P // the visible minimap is one region wide
+          const rect = regionRect ?? { x0: data.def.regionX, y0: data.def.regionY, x1: data.def.regionX, y1: data.def.regionY }
+          // camera target in tiles, relative to the base region's origin
+          const tx = controls.target.x / TILE
+          const ty = -controls.target.z / TILE
+          // ...then into the full canvas's pixel space
+          const px = ((data.def.regionX - rect.x0) * SIZE + tx) * P
+          const py = ((rect.y1 - data.def.regionY) * SIZE + (SIZE - ty)) * P
+          // ALWAYS centred on the arrow, deliberately unclamped: the client
+          // centres on the player too, and clamping would slide the arrow off
+          // centre near the edges. Past the loaded rectangle there is simply
+          // nothing to draw, so it reads as black.
+          const sx = px - view / 2
+          const sy = py - view / 2
+          dst.fillStyle = '#000'
+          dst.fillRect(0, 0, view, view)
+          // source rect clipped to the canvas, drawn at the matching offset so
+          // partial coverage lands in the right place
+          const cx0 = Math.max(0, sx)
+          const cy0 = Math.max(0, sy)
+          const cx1 = Math.min(full.width, sx + view)
+          const cy1 = Math.min(full.height, sy + view)
+          if (cx1 <= cx0 || cy1 <= cy0) return // entirely off the loaded map
+          dst.drawImage(
+            full,
+            cx0, cy0, cx1 - cx0, cy1 - cy0,
+            cx0 - sx, cy0 - sy, cx1 - cx0, cy1 - cy0,
+          )
         }
 
         // sun colour tint (fixed-function diffuse) relative to the default
@@ -2657,7 +2806,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               terrainMesh.geometry.computeBoundsTree({ indirect: true })
               track(terrainMesh)
               planeGroupsRef.current[plane]?.add(terrainMesh)
-              taggedRef.current.push({ obj: terrainMesh, neighbor: !isCenter, kind: 'terrain' })
+              taggedRef.current.push({ obj: terrainMesh, neighbor: !isCenter, dx, dy, kind: 'terrain' })
               added.push(terrainMesh)
             }
             if (!background) {
@@ -2686,7 +2835,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // the rest of the span builds in the BACKGROUND once the scene is
         // live (kicked off at the end of this effect), so a big span costs
         // pop-in rather than a longer wait.
-        const buildCells = cells.filter((c) => Math.abs(c.dx) <= buildRadius && Math.abs(c.dy) <= buildRadius)
+        const buildCells = cells.filter((c) => c.dx >= dxMin && c.dx <= dxMax && c.dy >= dyMin && c.dy <= dyMax)
         const totalUnits = 8 // the loading bar covers the centre cell only
         let doneUnits = 0
         const reportProgress = (frac = 0) =>
@@ -2725,7 +2874,17 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             ? computeRiverbedHeights(heights, waterDepthAll) : undefined
 
           // locs FIRST — their static shadows darken the terrain lighting
-          const objList = isCenter ? initialObjects : def.objects
+          // this region's own point lights — a draft if it has one, else what
+          // its environment file holds. Previously only the centre baked any.
+          const cellLights = isCenter
+            ? currentLights
+            : (regionDraftsRef.current?.get((def.regionX << 8) | def.regionY)?.lights ?? cell.lights ?? [])
+          const cellLightGrid = isCenter ? lightGrid : buildLightGrid(cellLights, heights)
+          const objList = isCenter ? initialObjects : (regionDraftsRef.current?.get((def.regionX << 8) | def.regionY)?.objects ?? def.objects)
+          // what this region currently holds, for picks/edits and for a
+          // placement-only rebuild of it later
+          cellObjectsRef.current.set((def.regionX << 8) | def.regionY, objList)
+          cellTerrainRef.current.set((def.regionX << 8) | def.regionY, terrain)
           const locBuilds: (Awaited<ReturnType<typeof buildLocsMesh>> | null)[] = [null, null, null, null]
           for (let plane = 0; plane < 4; plane++) {
             if (def.hasLocations && objList.length > 0) {
@@ -2739,7 +2898,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                   setStatus(`objects (${label}, plane ${plane}): ${done}/${total}`)
                   reportProgress(total > 0 ? done / total : 1)
                 },
-                isCenter ? lightGrid : undefined,
+                cellLightGrid,
                 undefined,
                 envSun,
               )
@@ -2760,9 +2919,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           if (isCenter) {
             // the marker list covers the region being edited, like the object list
             setSceneMarkers(locBuilds.flatMap((b) => b?.markers ?? []))
-            minimapBaseRef.current = await renderMinimapGround(terrain, configs, 0, mosaic.underlayRgbBlurFor(dx, dy, 0), assets)
-            setMinimapVersion((v) => v + 1)
           }
+          // every loaded region contributes its own minimap ground — the map
+          // spans the whole loaded rectangle, not just the region you're in
+          minimapCellsRef.current.set(
+            (def.regionX << 8) | def.regionY,
+            await renderMinimapGround(terrain, configs, 0, mosaic.underlayRgbBlurFor(dx, dy, 0), assets),
+          )
+          if (isCenter) minimapBaseRef.current = minimapCellsRef.current.get((def.regionX << 8) | def.regionY) ?? null
+          setMinimapVersion((v) => v + 1)
 
           if (background) bgReport('terrain…')
           else setStatus(`terrain: ${label}…`)
@@ -2782,7 +2947,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 bed.geometry.computeBoundsTree({ indirect: true })
                 // riverbed is never pickable/water-swapped — add directly
                 planeGroupsRef.current[plane]?.add(bed)
-                taggedRef.current.push({ obj: bed, neighbor: !isCenter, kind: 'riverbed' })
+                taggedRef.current.push({ obj: bed, neighbor: !isCenter, dx, dy, kind: 'riverbed' })
               }
             }
           }
@@ -2798,7 +2963,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               built.mesh.geometry.computeBoundsTree({ indirect: true })
               track(built.mesh)
               planeGroupsRef.current[plane]?.add(built.mesh)
-              taggedRef.current.push({ obj: built.mesh, neighbor: !isCenter, kind: 'loc' })
+              taggedRef.current.push({ obj: built.mesh, neighbor: !isCenter, dx, dy, kind: 'loc' })
             }
             // One mesh per transparent loc — three.js frustum-culls and depth-
             // sorts them back-to-front, which is the client's object pass.
@@ -2809,7 +2974,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               track(lm)
               applyTint(lm)
               planeGroupsRef.current[plane]?.add(lm)
-              taggedRef.current.push({ obj: lm, neighbor: !isCenter, kind: 'loc' })
+              taggedRef.current.push({ obj: lm, neighbor: !isCenter, dx, dy, kind: 'loc' })
             }
             // Particle emitters (fires, torches) and billboard sprites (glow,
             // smoke): the placement matrix here has no region offset baked in,
@@ -2841,7 +3006,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               anim.mesh.userData.locRegion = { x: def.regionX, y: def.regionY }
               track(anim.mesh)
               planeGroupsRef.current[plane]?.add(anim.mesh)
-              taggedRef.current.push({ obj: anim.mesh, neighbor: !isCenter, kind: 'loc' })
+              taggedRef.current.push({ obj: anim.mesh, neighbor: !isCenter, dx, dy, kind: 'loc' })
               if (anim.mesh.userData.sortCentreY !== undefined) sortCentreRef.current.push(anim.mesh)
               const sphere = anim.mesh.geometry.boundingSphere
                 ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
@@ -2854,7 +3019,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 upscale: modelUpscale(al.model),
                 plane,
               }) ?? undefined
-              animLocsRef.current.push({ update: anim.update, billboards: bb, model: al.model, animationId: al.animationId, neighbor: !isCenter, mesh: anim.mesh, sphere })
+              animLocsRef.current.push({ update: anim.update, billboards: bb, model: al.model, animationId: al.animationId, neighbor: !isCenter, dx, dy, mesh: anim.mesh, sphere })
             }
             if (built.markers.length > 0) {
               const markerGroup = buildMarkersMesh(built.markers)
@@ -2862,7 +3027,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 markerGroup.position.set(offsetX, 0, offsetZ)
                 track(markerGroup)
                 planeGroupsRef.current[plane]?.add(markerGroup)
-                taggedRef.current.push({ obj: markerGroup, neighbor: !isCenter, kind: 'marker' })
+                taggedRef.current.push({ obj: markerGroup, neighbor: !isCenter, dx, dy, kind: 'marker' })
               }
             }
           }
@@ -2872,7 +3037,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           outline.position.set(offsetX, 0, offsetZ)
           track(outline)
           outlines.add(outline)
-          taggedRef.current.push({ obj: outline, neighbor: !isCenter, kind: 'outline' })
+          taggedRef.current.push({ obj: outline, neighbor: !isCenter, dx, dy, kind: 'outline' })
         }
 
         // The centre region, under the loading screen — the rest of the span
@@ -3011,11 +3176,29 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // --- Terrain brush: heights (derived from the current computed
         // heights), underlay/overlay paint, or flag bits — committed drafts
         const VERTS = SIZE + 1
+        /** the live terrain of any LOADED region, by cell offset */
+        const terrainForCell = (rdx: number, rdy: number): MapTerrain | null => {
+          if (rdx === 0 && rdy === 0) return terrainPropRef.current ?? currentTerrain
+          const id = ((data.def.regionX + rdx) << 8) | (data.def.regionY + rdy)
+          return regionDraftsRef.current?.get(id)?.terrain ?? cellTerrainRef.current.get(id) ?? null
+        }
+        /** vertex heights of any loaded region, for height sampling across a border */
+        const heightsForCell = (rdx: number, rdy: number) =>
+          (rdx === 0 && rdy === 0) ? centerHeights : mosaic.slicesFor(rdx, rdy).heights
+        /**
+         * Effective stored height at an ABSOLUTE tile (base-region origin, so a
+         * neighbour to the east is 64..127). Resolving the region here is what
+         * lets a brush sample and smooth across a region border.
+         */
         const vEffAt = (plane: number, x: number, y: number) => {
-          // effective height value: plane 0 stores absolute (-v*32),
-          // upper planes store the offset below the plane underneath
-          const h = centerHeights[plane][x * VERTS + y]
-          const below = plane > 0 ? centerHeights[plane - 1][x * VERTS + y] : 0
+          const rdx = Math.floor(x / 64), rdy = Math.floor(y / 64)
+          const hs = heightsForCell(rdx, rdy)
+          if (!hs?.[plane]) return 0
+          const lx = x - rdx * 64, ly = y - rdy * 64
+          // plane 0 stores absolute (-v*32), upper planes the offset below the
+          // plane underneath
+          const h = hs[plane][lx * VERTS + ly]
+          const below = plane > 0 ? hs[plane - 1][lx * VERTS + ly] : 0
           return plane === 0 ? Math.round(-h / 32) : Math.round((below - h) / 32)
         }
         let strokeAnchorV = 0 // flatten: the height sampled at stroke start
@@ -3023,11 +3206,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           const p = terrainBrushRef.current
           const commit = onEditRef.current
           if (!p || !commit) return
-          const t = terrainPropRef.current ?? currentTerrain
           const coalesce = opts?.coalesce ?? false
 
-          // circular footprint clipped to the centre region
-          const tiles: [number, number][] = []
+          // Circular footprint in ABSOLUTE tiles, then grouped by the region
+          // each tile belongs to — every loaded region is editable, so a stroke
+          // near a border paints both sides instead of being clipped at it.
+          const byCell = new Map<string, { rdx: number; rdy: number; tiles: [number, number][] }>()
           const r = Math.max(0.5, p.size - 0.5)
           const ri = Math.ceil(r)
           for (let dx = -ri; dx <= ri; dx++) {
@@ -3035,65 +3219,82 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               if (dx * dx + dy * dy > r * r) continue
               const x = cx + dx
               const y = cy + dy
-              if (x >= 0 && x <= 63 && y >= 0 && y <= 63) tiles.push([x, y])
+              const rdx = Math.floor(x / 64), rdy = Math.floor(y / 64)
+              if (rdx < dxMin || rdx > dxMax || rdy < dyMin || rdy > dyMax) continue // not loaded
+              const key = `${rdx},${rdy}`
+              let bucket = byCell.get(key)
+              if (!bucket) byCell.set(key, bucket = { rdx, rdy, tiles: [] })
+              bucket.tiles.push([x - rdx * 64, y - rdy * 64])
             }
           }
-          if (tiles.length === 0) return
+          if (byCell.size === 0) return
 
-          if (p.tool === 'height') {
-            if (opts?.first) strokeAnchorV = vEffAt(p.plane, cx, cy)
-            const nextPresence = t.heightPresence.slice()
-            const nextValue = t.heightValue.slice()
-            for (const [x, y] of tiles) {
-              const idx = tileIndex(p.plane, x, y)
-              let target: number
-              if (p.mode === 'flatten') {
-                target = strokeAnchorV
-              } else if (p.mode === 'smooth') {
-                // 3×3 average of the pre-stroke heights
-                let sum = 0
-                let n = 0
-                for (let sx = -1; sx <= 1; sx++) {
-                  for (let sy = -1; sy <= 1; sy++) {
-                    const nx = Math.max(0, Math.min(63, x + sx))
-                    const ny = Math.max(0, Math.min(63, y + sy))
-                    sum += vEffAt(p.plane, nx, ny)
-                    n++
+          if (p.tool === 'height' && opts?.first) strokeAnchorV = vEffAt(p.plane, cx, cy)
+
+          for (const { rdx, rdy, tiles } of byCell.values()) {
+            const t = terrainForCell(rdx, rdy)
+            if (!t) continue
+            const isBase = rdx === 0 && rdy === 0
+            const regionId = ((data.def.regionX + rdx) << 8) | (data.def.regionY + rdy)
+            const emit = (terrain: MapTerrain) =>
+              commit(isBase ? { terrain, coalesce } : { terrain, coalesce, regionId })
+            // absolute coords of this cell's origin, for cross-border sampling
+            const ox = rdx * 64, oy = rdy * 64
+
+            if (p.tool === 'height') {
+              const nextPresence = t.heightPresence.slice()
+              const nextValue = t.heightValue.slice()
+              for (const [x, y] of tiles) {
+                const idx = tileIndex(p.plane, x, y)
+                let target: number
+                if (p.mode === 'flatten') {
+                  target = strokeAnchorV
+                } else if (p.mode === 'smooth') {
+                  // 3×3 average of the pre-stroke heights, sampled in absolute
+                  // coords so it reads across the region border rather than
+                  // clamping against it
+                  let sum = 0
+                  let n = 0
+                  for (let sx = -1; sx <= 1; sx++) {
+                    for (let sy = -1; sy <= 1; sy++) {
+                      sum += vEffAt(p.plane, ox + x + sx, oy + y + sy)
+                      n++
+                    }
                   }
+                  target = Math.round(sum / n)
+                } else {
+                  target = vEffAt(p.plane, ox + x, oy + y) + (p.mode === 'raise' ? p.step : -p.step)
                 }
-                target = Math.round(sum / n)
-              } else {
-                target = vEffAt(p.plane, x, y) + (p.mode === 'raise' ? p.step : -p.step)
+                target = Math.max(0, Math.min(255, target))
+                // stored value 1 decodes to height 0 (client quirk) — so 0 and 1
+                // both collapse to the sentinel
+                nextValue[idx] = target <= 1 ? 1 : target
+                nextPresence[idx >> 3] |= 1 << (idx & 0x7)
               }
-              target = Math.max(0, Math.min(255, target))
-              // stored value 1 decodes to height 0 (client quirk) — so 0 and 1
-              // both collapse to the sentinel
-              nextValue[idx] = target <= 1 ? 1 : target
-              nextPresence[idx >> 3] |= 1 << (idx & 0x7)
+              emit({ ...t, heightPresence: nextPresence, heightValue: nextValue })
+            } else if (p.tool === 'underlay') {
+              const next = t.underlayIds.slice()
+              for (const [x, y] of tiles) next[tileIndex(p.plane, x, y)] = p.underlayId & 0xff
+              emit({ ...t, underlayIds: next })
+            } else if (p.tool === 'overlay') {
+              const nextOverlay = t.overlayIds.slice()
+              const nextShapeRot = t.overlayShapeRot.slice()
+              for (const [x, y] of tiles) {
+                const idx = tileIndex(p.plane, x, y)
+                nextOverlay[idx] = p.overlayId & 0xff
+                nextShapeRot[idx] = p.overlayId > 0
+                  ? (((p.overlayShape & 0xf) << 2) | (p.overlayRotation & 0x3)) & 0xff
+                  : 0
+              }
+              emit({ ...t, overlayIds: nextOverlay, overlayShapeRot: nextShapeRot })
+            } else {
+              const next = t.tileFlags.slice()
+              for (const [x, y] of tiles) {
+                const idx = tileIndex(p.plane, x, y)
+                next[idx] = p.flagSet ? (next[idx] | p.flagBit) : (next[idx] & ~p.flagBit)
+              }
+              emit({ ...t, tileFlags: next })
             }
-            commit({ terrain: { ...t, heightPresence: nextPresence, heightValue: nextValue }, coalesce })
-          } else if (p.tool === 'underlay') {
-            const next = t.underlayIds.slice()
-            for (const [x, y] of tiles) next[tileIndex(p.plane, x, y)] = p.underlayId & 0xff
-            commit({ terrain: { ...t, underlayIds: next }, coalesce })
-          } else if (p.tool === 'overlay') {
-            const nextOverlay = t.overlayIds.slice()
-            const nextShapeRot = t.overlayShapeRot.slice()
-            for (const [x, y] of tiles) {
-              const idx = tileIndex(p.plane, x, y)
-              nextOverlay[idx] = p.overlayId & 0xff
-              nextShapeRot[idx] = p.overlayId > 0
-                ? (((p.overlayShape & 0xf) << 2) | (p.overlayRotation & 0x3)) & 0xff
-                : 0
-            }
-            commit({ terrain: { ...t, overlayIds: nextOverlay, overlayShapeRot: nextShapeRot }, coalesce })
-          } else {
-            const next = t.tileFlags.slice()
-            for (const [x, y] of tiles) {
-              const idx = tileIndex(p.plane, x, y)
-              next[idx] = p.flagSet ? (next[idx] | p.flagBit) : (next[idx] & ~p.flagBit)
-            }
-            commit({ terrain: { ...t, tileFlags: next }, coalesce })
           }
         }
 
@@ -3335,8 +3536,18 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // the terrain lighting), minimap, terrain and outline. Neighbour
         // meshes keep their old boundary values; only visible when brushing
         // the outermost tiles.
-        const rebuildCenterImpl = async (nextTerrain: MapTerrain, nextObjects: LocEntry[], nextLights?: RegionLight[]) => {
+        /**
+         * Rebuild ONE loaded region in place. Every loaded region is editable,
+         * so this takes the cell to rebuild rather than assuming the centre.
+         * The centre additionally owns scene-wide state (minimap, POV heights,
+         * the light grid and gizmos, the marker list), so those stay guarded.
+         */
+        const rebuildCellImpl = async (cellDx: number, cellDy: number, nextTerrain: MapTerrain, nextObjects: LocEntry[], nextLights?: RegionLight[]) => {
           if (disposed) return
+          const isCentre = cellDx === 0 && cellDy === 0
+          const offsetX = cellDx * REGION_UNITS
+          const offsetZ = -cellDy * REGION_UNITS
+          const cellRec = cells.find((c) => c.dx === cellDx && c.dy === cellDy)
           // recompute the suns from the LIVE environment and brightness — the
           // effect-scope `sun`/`envSun` froze the values from build time, so a
           // brightness-slider change or an env edit rebuilt with stale lighting
@@ -3358,7 +3569,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           const envSunNow = lightDetail === 'high' && liveEnv?.environment
             ? modelSunFromEnvironment(liveEnv.environment, assets.brightness)
             : undefined
-          currentTerrain = nextTerrain
+          if (isCentre) currentTerrain = nextTerrain
+          // the cell record is what later rebuilds and the recolour pass read
+          if (cellRec) cellRec.terrain = nextTerrain
+          if (cellRec) {
+            const rid = (cellRec.def.regionX << 8) | cellRec.def.regionY
+            cellObjectsRef.current.set(rid, nextObjects)
+            cellTerrainRef.current.set(rid, nextTerrain)
+          }
           if (nextLights) {
             currentLights = nextLights
             setSceneLights(nextLights)
@@ -3366,30 +3584,41 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           clearLocHighlight()
           setStatus('recomputing…')
           await new Promise((resolve) => setTimeout(resolve, 0)) // let the status paint
-          // decodeRadius-indexed CENTRE — [1][1] was the 3×3 grid's centre and
+          // base-indexed CENTRE — [1][1] was the 3×3 grid's centre and
           // in a wider grid it's a real neighbour: writing there both clobbered
           // that neighbour's terrain in the mosaic and rebuilt the centre
           // against stale border values (seams, gaps, dead blending)
-          regionGrid[decodeRadius][decodeRadius] = nextTerrain
-          const nextMosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sunNow, assets.brightness)
+          regionGrid[cellDx + offX][cellDy + offY] = nextTerrain
+          const nextMosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sunNow, assets.brightness, offX, offY)
           if (disposed) return
-          const slices = nextMosaic.slicesFor(0, 0)
-          centerHeights = slices.heights
-          povHeights = centerHeights
-          // heights moved (a height brush) or the lights themselves changed —
-          // either way the grid and the gizmos have to be rebuilt, since a
-          // light's y is relative to its tile's ground
-          lightHeights = centerHeights
-          lightGrid = buildLightGrid(currentLights, lightHeights)
-          const palettes = [0, 1, 2, 3].map((pl) => nextMosaic.paletteFor(0, 0, pl))
-          const overlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.overlayCornerFor(0, 0, pl))
-          const underlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.underlayCornerFor(0, 0, pl))
-          const overlayPerimeters = [0, 1, 2, 3].map((pl) => nextMosaic.overlayPerimeterFor(0, 0, pl))
+          // later cell builds/rebuilds must see the edited heights too
+          mosaic = nextMosaic
+          const slices = nextMosaic.slicesFor(cellDx, cellDy)
+          const cellHeights = slices.heights
+          // this cell's lights: an explicit payload wins, then its draft, then
+          // what it was built with — so a rebuild never silently drops them
+          const rid = (data.def.regionX + cellDx) << 8 | (data.def.regionY + cellDy)
+          const cellLights = nextLights
+            ?? (isCentre ? currentLights : (regionDraftsRef.current?.get(rid)?.lights ?? cellRec?.lights ?? []))
+          if (cellRec) cellRec.lights = cellLights
+          if (isCentre) {
+            centerHeights = cellHeights
+            povHeights = centerHeights
+            // heights moved (a height brush) or the lights themselves changed —
+            // either way the grid and the gizmos have to be rebuilt, since a
+            // light's y is relative to its tile's ground
+            lightHeights = centerHeights
+            lightGrid = buildLightGrid(currentLights, lightHeights)
+          }
+          const palettes = [0, 1, 2, 3].map((pl) => nextMosaic.paletteFor(cellDx, cellDy, pl))
+          const overlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.overlayCornerFor(cellDx, cellDy, pl))
+          const underlayCorners = [0, 1, 2, 3].map((pl) => nextMosaic.underlayCornerFor(cellDx, cellDy, pl))
+          const overlayPerimeters = [0, 1, 2, 3].map((pl) => nextMosaic.overlayPerimeterFor(cellDx, cellDy, pl))
 
           // light gizmos are deliberately NOT dropped here: setLightGizmos owns
           // them and swaps them at the end, so they stay on screen (and pickable)
           // through the rebuild instead of blinking out for a few seconds
-          const stale = taggedRef.current.filter((t) => !t.neighbor
+          const stale = taggedRef.current.filter((t) => t.dx === cellDx && t.dy === cellDy
             && (t.kind === 'terrain' || t.kind === 'riverbed' || t.kind === 'outline' || t.kind === 'loc' || t.kind === 'marker'))
           taggedRef.current = taggedRef.current.filter((t) => !stale.includes(t))
           for (const { obj } of stale) {
@@ -3399,8 +3628,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           // the centre's animated-loc meshes were just disposed with the loc
           // meshes above — drop their pose records and billboard sprites
           // (neighbours survive; the rebuild below re-adds both)
-          for (const r of animLocsRef.current) if (!r.neighbor) r.billboards?.remove()
-          animLocsRef.current = animLocsRef.current.filter((r) => r.neighbor)
+          for (const r of animLocsRef.current) if (r.dx === cellDx && r.dy === cellDy) r.billboards?.remove()
+          animLocsRef.current = animLocsRef.current.filter((r) => !(r.dx === cellDx && r.dy === cellDy))
           // drop sort entries whose mesh was just disposed (parent detached)
           sortCentreRef.current = sortCentreRef.current.filter((m) => m.parent !== null)
 
@@ -3408,9 +3637,9 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           if (nextObjects.length > 0) {
             for (let plane = 0; plane < 4; plane++) {
               locBuilds[plane] = await buildLocsMesh(
-                nextTerrain, nextObjects, plane, centerHeights, assets,
+                nextTerrain, nextObjects, plane, cellHeights, assets,
                 (done, total) => setStatus(`updating objects (plane ${plane}): ${done}/${total}`),
-                lightGrid,
+                isCentre ? lightGrid : buildLightGrid(cellLights, cellHeights),
                 undefined,
                 envSunNow,
               )
@@ -3419,17 +3648,24 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           }
           // refresh the centre's raw grid and recompose — an edit must keep
           // the cross-region border shadows the initial build established
-          cellRawShadows.set(shadowKey(0, 0), locBuilds.map((b) => b?.shadows))
-          const shadows = composeCellShadows(0, 0)
+          cellRawShadows.set(shadowKey(cellDx, cellDy), locBuilds.map((b) => b?.shadows))
+          const shadows = composeCellShadows(cellDx, cellDy)
 
-          setSceneMarkers(locBuilds.flatMap((b) => b?.markers ?? []))
-          minimapBaseRef.current = await renderMinimapGround(nextTerrain, configs, 0, nextMosaic.underlayRgbBlurFor(0, 0, 0), assets)
-          setMinimapVersion((v) => v + 1)
+          if (isCentre) {
+            setSceneMarkers(locBuilds.flatMap((b) => b?.markers ?? []))
+          }
+          {
+            const rasterId = (data.def.regionX + cellDx) << 8 | (data.def.regionY + cellDy)
+            const raster = await renderMinimapGround(nextTerrain, configs, 0, nextMosaic.underlayRgbBlurFor(cellDx, cellDy, 0), assets)
+            minimapCellsRef.current.set(rasterId, raster)
+            if (isCentre) minimapBaseRef.current = raster
+            setMinimapVersion((v) => v + 1)
+          }
 
-          const uwCenter = data.underwaterTerrain
+          const uwCenter = isCentre ? data.underwaterTerrain : cellRec?.underwater
           const uwDepthCenter = uwCenter ? computeWaterDepth(uwCenter) : undefined
           const riverbedCenter = uwCenter && uwDepthCenter
-            ? computeRiverbedHeights(centerHeights, uwDepthCenter) : undefined
+            ? computeRiverbedHeights(cellHeights, uwDepthCenter) : undefined
           const rebuiltTerrain: THREE.Mesh[] = []
           for (let plane = 0; plane < 4; plane++) {
             setStatus(`rebuilding terrain (plane ${plane})…`)
@@ -3437,86 +3673,99 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               const bed = await buildTerrainMesh(uwCenter, plane, riverbedCenter, configs, assets)
               if (disposed) return
               if (bed) {
+                // offset baked into the geometry, not mesh.position — see
+                // buildCellTerrain for why
+                if (offsetX !== 0 || offsetZ !== 0) bed.geometry.translate(offsetX, 0, offsetZ)
                 bed.renderOrder = ORDER_RIVERBED
                 bed.geometry.computeBoundsTree({ indirect: true })
                 applyTint(bed)
                 planeGroupsRef.current[plane]?.add(bed)
-                taggedRef.current.push({ obj: bed, neighbor: false, kind: 'riverbed' })
+                taggedRef.current.push({ obj: bed, neighbor: !isCentre, dx: cellDx, dy: cellDy, kind: 'riverbed' })
               }
             }
-            const terrainMesh = await buildTerrainMesh(nextTerrain, plane, centerHeights, configs, assets, {
+            const terrainMesh = await buildTerrainMesh(nextTerrain, plane, cellHeights, configs, assets, {
               lights: slices.lights,
               shadows,
               palettes,
               overlayCorners,
               underlayCorners,
               overlayPerimeters,
-              overlayTileBeyond: nextMosaic.overlayTileBeyondFor(0, 0),
+              overlayTileBeyond: nextMosaic.overlayTileBeyondFor(cellDx, cellDy),
             }, uwDepthCenter)
             if (disposed) return
             if (terrainMesh) {
+              if (offsetX !== 0 || offsetZ !== 0) terrainMesh.geometry.translate(offsetX, 0, offsetZ)
               terrainMesh.renderOrder = ORDER_TERRAIN
               terrainMesh.geometry.computeBoundsTree({ indirect: true })
               track(terrainMesh)
               applyTint(terrainMesh)
               planeGroupsRef.current[plane]?.add(terrainMesh)
-              taggedRef.current.push({ obj: terrainMesh, neighbor: false, kind: 'terrain' })
+              taggedRef.current.push({ obj: terrainMesh, neighbor: !isCentre, dx: cellDx, dy: cellDy, kind: 'terrain' })
               rebuiltTerrain.push(terrainMesh)
             }
           }
           // keep the recolour pass's per-cell tracking honest: these are now
           // the centre's terrain meshes, built with the composed shadows
-          cellTerrainMeshes.set(shadowKey(0, 0), rebuiltTerrain)
-          cellShadowsUsed.set(shadowKey(0, 0), shadows)
+          cellTerrainMeshes.set(shadowKey(cellDx, cellDy), rebuiltTerrain)
+          cellShadowsUsed.set(shadowKey(cellDx, cellDy), shadows)
           const rebuiltAnim: AnimLocRecord[] = []
           for (let plane = 0; plane < 4; plane++) {
             const built = locBuilds[plane]
             if (!built) continue
             if (built.mesh) {
+              built.mesh.position.set(offsetX, 0, offsetZ)
               built.mesh.renderOrder = ORDER_OPAQUE_LOC
               built.mesh.geometry.computeBoundsTree({ indirect: true })
               track(built.mesh)
               applyTint(built.mesh)
               planeGroupsRef.current[plane]?.add(built.mesh)
-              taggedRef.current.push({ obj: built.mesh, neighbor: false, kind: 'loc' })
+              taggedRef.current.push({ obj: built.mesh, neighbor: !isCentre, dx: cellDx, dy: cellDy, kind: 'loc' })
             }
             for (const lm of built.transparentLocs) {
+              lm.position.x += offsetX
+              lm.position.z += offsetZ
               lm.renderOrder = ORDER_TRANSPARENT_LOC
               track(lm)
               applyTint(lm)
               planeGroupsRef.current[plane]?.add(lm)
-              taggedRef.current.push({ obj: lm, neighbor: false, kind: 'loc' })
+              taggedRef.current.push({ obj: lm, neighbor: !isCentre, dx: cellDx, dy: cellDy, kind: 'loc' })
             }
             for (const al of built.animated) {
               const anim = await buildAnimatedLocMesh(al.model, al.matrix, assets, envSunNow, al.owner, al.points, al.ambient, al.contrast)
               if (disposed) return
               if (!anim) continue
+              const placedMatrix = offsetX !== 0 || offsetZ !== 0
+                ? new THREE.Matrix4().makeTranslation(offsetX, 0, offsetZ).multiply(al.matrix)
+                : al.matrix
               anim.mesh.matrixAutoUpdate = false
-              anim.mesh.matrix.copy(al.matrix)
+              anim.mesh.matrix.copy(placedMatrix)
               anim.mesh.updateMatrixWorld(true)
-              anim.mesh.userData.locRegion = { x: data.def.regionX, y: data.def.regionY }
+              anim.mesh.userData.locRegion = cellRec
+                ? { x: cellRec.def.regionX, y: cellRec.def.regionY }
+                : { x: data.def.regionX + cellDx, y: data.def.regionY + cellDy }
               track(anim.mesh)
               applyTint(anim.mesh)
               planeGroupsRef.current[plane]?.add(anim.mesh)
-              taggedRef.current.push({ obj: anim.mesh, neighbor: false, kind: 'loc' })
+              taggedRef.current.push({ obj: anim.mesh, neighbor: !isCentre, dx: cellDx, dy: cellDy, kind: 'loc' })
               if (anim.mesh.userData.sortCentreY !== undefined) sortCentreRef.current.push(anim.mesh)
               const sphere = anim.mesh.geometry.boundingSphere
                 ? anim.mesh.geometry.boundingSphere.clone().applyMatrix4(anim.mesh.matrixWorld)
-                : new THREE.Sphere(new THREE.Vector3(), 1e9)
+                : new THREE.Sphere(new THREE.Vector3(offsetX, 0, offsetZ), 1e9)
               rebuiltAnim.push({
                 update: anim.update, model: al.model, animationId: al.animationId,
                 billboards: billboardsRef.current?.addAnimated({
-                  model: al.model, matrix: al.matrix, upscale: modelUpscale(al.model), plane,
+                  model: al.model, matrix: placedMatrix, upscale: modelUpscale(al.model), plane,
                 }) ?? undefined,
-                neighbor: false, mesh: anim.mesh, sphere,
+                neighbor: !isCentre, dx: cellDx, dy: cellDy, mesh: anim.mesh, sphere,
               })
             }
             if (built.markers.length > 0) {
               const markerGroup = buildMarkersMesh(built.markers)
               if (markerGroup) {
+                markerGroup.position.set(offsetX, 0, offsetZ)
                 track(markerGroup)
                 planeGroupsRef.current[plane]?.add(markerGroup)
-                taggedRef.current.push({ obj: markerGroup, neighbor: false, kind: 'marker' })
+                taggedRef.current.push({ obj: markerGroup, neighbor: !isCentre, dx: cellDx, dy: cellDy, kind: 'marker' })
               }
             }
           }
@@ -3538,18 +3787,21 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             }
             animLocsRef.current.push(...rebuiltAnim)
           }
-          const outline = buildChunkGrid(centerHeights[0])
+          const outline = buildChunkGrid(cellHeights[0])
+          outline.position.set(offsetX, 0, offsetZ)
           track(outline)
           outlines.add(outline)
-          taggedRef.current.push({ obj: outline, neighbor: false, kind: 'outline' })
-          setLightGizmos(currentLights)
-          // keep the selected light's ring on it (its record — and the ground
-          // under it — may have just moved)
-          const selLight = selectionRef.current
-          if (selLight?.kind === 'light') {
-            const rec = currentLights[selLight.index]
-            if (rec) highlightLight(rec)
-            else clearLightHighlight()
+          taggedRef.current.push({ obj: outline, neighbor: !isCentre, dx: cellDx, dy: cellDy, kind: 'outline' })
+          if (isCentre) {
+            setLightGizmos(currentLights)
+            // keep the selected light's ring on it (its record — and the ground
+            // under it — may have just moved)
+            const selLight = selectionRef.current
+            if (selLight?.kind === 'light') {
+              const rec = currentLights[selLight.index]
+              if (rec) highlightLight(rec)
+              else clearLightHighlight()
+            }
           }
           setStatus('')
         }
@@ -3568,17 +3820,21 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           buildChain = run.then(() => undefined, () => undefined)
           return run
         }
-        let queuedRebuild: { t: MapTerrain; o: LocEntry[]; l?: RegionLight[] } | null = null
-        rebuildCenterRef.current = (t, o, l) => {
-          const idle = queuedRebuild === null
-          queuedRebuild = { t, o, l }
-          if (!idle) return buildChain.then(() => undefined) // an already-queued rebuild will pick this payload up
+        // latest-wins PER CELL: edits to different regions must not coalesce
+        // into one another, but repeated edits to the same one still collapse
+        const queuedRebuilds = new Map<string, { dx: number; dy: number; t: MapTerrain; o: LocEntry[]; l?: RegionLight[] }>()
+        rebuildCellRef.current = (dx, dy, t, o, l) => {
+          const key = `${dx},${dy}`
+          const idle = !queuedRebuilds.has(key)
+          queuedRebuilds.set(key, { dx, dy, t, o, l })
+          if (!idle) return buildChain.then(() => undefined) // the queued rebuild picks this payload up
           return enqueueBuild(async () => {
-            const job = queuedRebuild!
-            queuedRebuild = null
-            await rebuildCenterImpl(job.t, job.o, job.l)
+            const job = queuedRebuilds.get(key)!
+            queuedRebuilds.delete(key)
+            await rebuildCellImpl(job.dx, job.dy, job.t, job.o, job.l)
           })
         }
+        rebuildCenterRef.current = (t, o, l) => rebuildCellRef.current!(0, 0, t, o, l)
         patchLocsRef.current = (prev, next) => enqueueBuild(() => patchLocsImpl(prev, next))
         // Remember what every morph loc resolved to under the current variable
         // values. Without this baseline the first save after a build would see
@@ -3704,6 +3960,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       lightHighlightClearRef.current = null
       selectOutlineClearRef.current = null
       rebuildCenterRef.current = null
+      rebuildCellRef.current = null
+      minimapBlitRef.current = null
       patchLocsRef.current = null
       fogApplyRef.current = null
       selectFromListRef.current = null
@@ -3725,7 +3983,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     // colours. It used to drive a centre-only rebuild, which in any multi-region
     // view left the 8+ neighbours at their original bake — so moving the slider
     // while looking at a neighbour changed literally nothing on screen.
-  }, [data, regionSpan, lightDetail, brightnessPref])
+  }, [data, regionRect, lightDetail, brightnessPref])
 
   // placement draft changed (Apply/Delete/place/move) — or a transform-to
   // preview toggled: unified centre rebuild — loc shadows feed the terrain
@@ -3778,6 +4036,56 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lights, status])
+
+  // Pull a neighbour's environment record in when its pill is first opened.
+  useEffect(() => {
+    if (envRegionId === null || envRegionId === data.id) return
+    if (envCache.has(envRegionId)) return
+    let cancelled = false
+    void (async () => {
+      const rec = data.rootHandle ? await loadRegionEnvironment(data.rootHandle, envRegionId) : null
+      if (cancelled) return
+      setEnvCache((prev) => new Map(prev).set(envRegionId, rec))
+    })()
+    return () => { cancelled = true }
+  }, [envRegionId, envCache, data.id, data.rootHandle])
+
+  /** every region currently loaded, in reading order */
+  const loadedRegionIds = useMemo(() => {
+    if (!regionRect) return [data.id]
+    const ids: number[] = []
+    for (let ry = regionRect.y1; ry >= regionRect.y0; ry--) {
+      for (let rx = regionRect.x0; rx <= regionRect.x1; rx++) ids.push((rx << 8) | ry)
+    }
+    return ids
+  }, [regionRect, data.id])
+
+  // A NEIGHBOUR region's placements changed. The base region has its own
+  // (patch-optimised) path above; this covers every other loaded region, and
+  // rebuilds only the cell that actually changed.
+  const lastBuiltDraftsRef = useRef(new Map<number, RegionDraft>())
+  useEffect(() => {
+    const rebuildCell = rebuildCellRef.current
+    if (!rebuildCell || !regionDrafts) return
+    const baseId = (data.def.regionX << 8) | data.def.regionY
+    for (const [id, draft] of regionDrafts) {
+      if (id === baseId) continue
+      // env-only edits (fog/bloom/sun colour) don't need a rebake; the ones
+      // that do (sun direction/ambient) come through as a terrain/objects edit
+      if (!draft.objects && !draft.terrain && !draft.lights) continue
+      if (lastBuiltDraftsRef.current.get(id) === draft) continue
+      const terrainForCell = draft.terrain ?? cellTerrainRef.current.get(id)
+      if (!terrainForCell) continue // that region isn't loaded
+      lastBuiltDraftsRef.current.set(id, draft)
+      void rebuildCell(
+        (id >> 8) - data.def.regionX, (id & 0xff) - data.def.regionY,
+        terrainForCell,
+        draft.objects ?? cellObjectsRef.current.get(id) ?? [],
+        draft.lights,
+      )
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [regionDrafts, status])
 
   // coordinate-search teleport: fly the camera to the focused tile. Runs
   // after the scene effect (declared below it), so on a cross-region jump the
@@ -3919,6 +4227,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // resolve display names + map categories for the object list/minimap — the
   // scene build already cached every placed object's def, so these are memory hits
   const listEntries = objects ?? data.def.objects
+  /** every loaded region's placements, for the minimap's wall/sprite/icon
+   *  layers — the map covers the whole loaded rectangle now */
+  const minimapRegions = useMemo(
+    () => loadedRegionIds.map((id) => ({
+      id,
+      rdx: (id >> 8) - data.def.regionX,
+      rdy: (id & 0xff) - data.def.regionY,
+      list: id === data.id ? listEntries : listForRegion(id >> 8, id & 0xff),
+    })),
+    // minimapVersion: cellObjectsRef is a ref, so a build is what signals it
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [loadedRegionIds, listEntries, data.id, minimapVersion],
+  )
+  const minimapObjectIds = useMemo(
+    () => [...new Set(minimapRegions.flatMap((r) => r.list.map((o) => o[0])))],
+    [minimapRegions],
+  )
   const [objCats, setObjCats] = useState<Map<number, number>>(new Map())
   const [objSprites, setObjSprites] = useState<Map<number, number>>(new Map())
   // objects with right-click options — the client draws their walls WHITE
@@ -3937,7 +4262,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       const sprites = new Map<number, number>()
       const interactive = new Set<number>()
       const picks: { objectId: number; kind: MarkerInfo['kind']; type: number }[] = []
-      await Promise.all([...new Set(listEntries.map((o) => o[0]))].map(async (id) => {
+      await Promise.all(minimapObjectIds.map(async (id) => {
         try {
           const def = await assets.getDef(id)
           if (def?.name && def.name !== 'null') names.set(id, def.name)
@@ -3965,7 +4290,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
     return () => { cancelled = true }
     // objectDefs: a def edit changes a marker's kind (and so this list's colour
     // and the minimap's icon/sprite lookups) without touching the placements
-  }, [listEntries, status, objectDefs])
+  }, [listEntries, minimapObjectIds, status, objectDefs])
 
   // MAP_AREAS static elements (world-map-only pins, scanned out of
   // map_areas/static_elements and resolved to area icons) used to be overlaid
@@ -4099,104 +4424,128 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // minimap: client-style — the mosaic's blurred+lit ground colours (from the
   // scene build), wall lines, mapscene sprites, and map function icons.
   useEffect(() => {
-    const ctx = minimapRef.current?.getContext('2d')
-    if (!ctx) return
     const P = 4 // client draws 4px per tile
-    const base = minimapBaseRef.current
+    // Draw the WHOLE loaded rectangle once into an offscreen canvas; the
+    // visible minimap is a window onto it that follows the camera arrow, so
+    // panning costs one drawImage per frame instead of redrawing every layer.
+    const rect = regionRect ?? { x0: data.def.regionX, y0: data.def.regionY, x1: data.def.regionX, y1: data.def.regionY }
+    const cols = rect.x1 - rect.x0 + 1
+    const rows = rect.y1 - rect.y0 + 1
+    let full = minimapFullRef.current
+    if (!full) full = minimapFullRef.current = document.createElement('canvas')
+    if (full.width !== cols * SIZE * P || full.height !== rows * SIZE * P) {
+      full.width = cols * SIZE * P
+      full.height = rows * SIZE * P
+    }
+    const ctx = full.getContext('2d')
+    if (!ctx) return
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, full.width, full.height)
     const terrainNow = terrain ?? data.terrain
 
-    // ground: prerendered by the scene build (blurred+lit, shape-masked),
-    // run through the brightness LUT (client gamma vs our 0.7 base palette)
-    if (base) {
-      const adjusted = new Uint8ClampedArray(base.length)
-      for (let i = 0; i < base.length; i += 4) {
-        adjusted[i] = mmGammaLut[base[i]]
-        adjusted[i + 1] = mmGammaLut[base[i + 1]]
-        adjusted[i + 2] = mmGammaLut[base[i + 2]]
-        adjusted[i + 3] = 255
-      }
-      ctx.putImageData(new ImageData(adjusted as Uint8ClampedArray<ArrayBuffer>, SIZE * P, SIZE * P), 0, 0)
-    } else {
-      ctx.fillStyle = '#000'
-      ctx.fillRect(0, 0, SIZE * P, SIZE * P)
-    }
+    /** top-left pixel of a region within the full canvas (north is up) */
+    const originOf = (id: number) => ({
+      ox: ((id >> 8) - rect.x0) * SIZE * P,
+      oy: (rect.y1 - (id & 0xff)) * SIZE * P,
+    })
 
-    // wall lines (plane 0), client colours: plain walls near-white #EEEEEE,
-    // interactive ones (doors, gates — anything with an option) red #EE0000.
-    // ComponentMinimap.drawLocOnMinimap: types 0/2/3/9 only; objects with a
-    // map sprite draw their sprite instead of a line (handled below).
-    for (const e of listEntries) {
-      if (e[5] !== 0) continue
-      if (objSprites.has(e[0])) continue // sprite replaces the wall line
-      const type = e[1]
-      const rot = e[2]
-      const left = e[3] * P
-      const top = (SIZE - 1 - e[4]) * P
-      ctx.fillStyle = objInteractive.has(e[0]) ? '#ee0000' : '#eeeeee'
-      const edge = (r: number) => {
-        if (r === 0) ctx.fillRect(left, top, 1, P) // west
-        else if (r === 1) ctx.fillRect(left, top, P, 1) // north
-        else if (r === 2) ctx.fillRect(left + P - 1, top, 1, P) // east
-        else ctx.fillRect(left, top + P - 1, P, 1) // south
+    for (const region of minimapRegions) {
+      const { ox, oy } = originOf(region.id)
+      // ground: prerendered by the scene build (blurred+lit, shape-masked),
+      // run through the brightness LUT (client gamma vs our 0.7 base palette)
+      const base = minimapCellsRef.current.get(region.id)
+      if (base) {
+        const adjusted = new Uint8ClampedArray(base.length)
+        for (let i = 0; i < base.length; i += 4) {
+          adjusted[i] = mmGammaLut[base[i]]
+          adjusted[i + 1] = mmGammaLut[base[i + 1]]
+          adjusted[i + 2] = mmGammaLut[base[i + 2]]
+          adjusted[i + 3] = 255
+        }
+        ctx.putImageData(new ImageData(adjusted as Uint8ClampedArray<ArrayBuffer>, SIZE * P, SIZE * P), ox, oy)
       }
-      if (type === 0) edge(rot)
-      else if (type === 2) { edge(rot); edge((rot + 1) & 3) }
-      else if (type === 3) {
-        // corner pixel: rot 0 NW, 1 NE, 2 SE, 3 SW (drawLocOnMinimap)
-        const cxp = rot === 0 || rot === 3 ? left : left + P - 1
-        const cyp = rot === 0 || rot === 1 ? top : top + P - 1
-        ctx.fillRect(cxp, cyp, 1, 1)
-      } else if (type === 9) {
-        // diagonal wall
-        for (let i = 0; i < P; i++) {
-          ctx.fillRect((rot & 1) === 0 ? left + P - 1 - i : left + i, top + i, 1, 1)
+
+      // wall lines (plane 0), client colours: plain walls near-white #EEEEEE,
+      // interactive ones (doors, gates — anything with an option) red #EE0000.
+      // ComponentMinimap.drawLocOnMinimap: types 0/2/3/9 only; objects with a
+      // map sprite draw their sprite instead of a line (handled below).
+      for (const e of region.list) {
+        if (e[5] !== 0) continue
+        if (objSprites.has(e[0])) continue // sprite replaces the wall line
+        const type = e[1]
+        const rot = e[2]
+        const left = ox + e[3] * P
+        const top = oy + (SIZE - 1 - e[4]) * P
+        ctx.fillStyle = objInteractive.has(e[0]) ? '#ee0000' : '#eeeeee'
+        const edge = (r: number) => {
+          if (r === 0) ctx.fillRect(left, top, 1, P) // west
+          else if (r === 1) ctx.fillRect(left, top, P, 1) // north
+          else if (r === 2) ctx.fillRect(left + P - 1, top, 1, P) // east
+          else ctx.fillRect(left, top + P - 1, P, 1) // south
+        }
+        if (type === 0) edge(rot)
+        else if (type === 2) { edge(rot); edge((rot + 1) & 3) }
+        else if (type === 3) {
+          // corner pixel: rot 0 NW, 1 NE, 2 SE, 3 SW (drawLocOnMinimap)
+          const cxp = rot === 0 || rot === 3 ? left : left + P - 1
+          const cyp = rot === 0 || rot === 1 ? top : top + P - 1
+          ctx.fillRect(cxp, cyp, 1, 1)
+        } else if (type === 9) {
+          // diagonal wall
+          for (let i = 0; i < P; i++) {
+            ctx.fillRect((rot & 1) === 0 ? left + P - 1 - i : left + i, top + i, 1, 1)
+          }
+        }
+      }
+
+      // mapscene sprites (tree/rock symbols), anchored at the placement tile.
+      // Wall decorations are skipped: the client's per-tile pass
+      // (Static.method13042) reads mapSpriteId from the wall, scenery and
+      // floor-decoration slots only and never asks for the decoration slot, so
+      // a type 4-8 placement never draws one however its def is set.
+      for (const e of region.list) {
+        if (e[5] !== 0) continue
+        if ((OBJECT_SLOTS[e[1]] ?? 2) === 1) continue
+        const spriteId = objSprites.get(e[0])
+        if (spriteId === undefined) continue
+        const bmp = spriteBitmaps.get(spriteId)
+        if (!bmp) continue
+        ctx.drawImage(bmp, ox + e[3] * P, oy + (SIZE - 1 - e[4]) * P + P - bmp.height)
+      }
+
+      // map function icons on top, centred on their tile
+      for (const e of region.list) {
+        const cat = objCats.get(e[0])
+        if (cat === undefined || !areaBitmaps.has(cat)) continue
+        const cx = ox + e[3] * P + P / 2
+        const cy = oy + (SIZE - 1 - e[4]) * P + P / 2
+        const bmp = areaBitmaps.get(cat)
+        if (bmp) {
+          ctx.drawImage(bmp, cx - bmp.width / 2, cy - bmp.height / 2)
+        } else {
+          ctx.fillStyle = '#b47aff'
+          ctx.fillRect(cx - 2, cy - 2, 4, 4)
         }
       }
     }
 
-    // flags-tool aid: show blocked tiles only while painting flags
+    // flags-tool aid: show blocked tiles only while painting flags (base
+    // region only — the brush's flag plane is the base region's)
     if (sideTab === 'terrain' && terrainBrush.tool === 'flags') {
+      const { ox, oy } = originOf(data.id)
       ctx.fillStyle = 'rgba(255, 60, 60, 0.4)'
       for (let x = 0; x < SIZE; x++) {
         for (let y = 0; y < SIZE; y++) {
           if (terrainNow.tileFlags[tileIndex(terrainBrush.plane, x, y)] & terrainBrush.flagBit) {
-            ctx.fillRect(x * P, (SIZE - 1 - y) * P, P, P)
+            ctx.fillRect(ox + x * P, oy + (SIZE - 1 - y) * P, P, P)
           }
         }
       }
     }
-
-    // mapscene sprites (tree/rock symbols), anchored at the placement tile.
-    // Wall decorations are skipped: the client's per-tile pass
-    // (Static.method13042) reads mapSpriteId from the wall, scenery and
-    // floor-decoration slots only and never asks for the decoration slot, so
-    // a type 4-8 placement never draws one however its def is set.
-    for (const e of listEntries) {
-      if (e[5] !== 0) continue
-      if ((OBJECT_SLOTS[e[1]] ?? 2) === 1) continue
-      const spriteId = objSprites.get(e[0])
-      if (spriteId === undefined) continue
-      const bmp = spriteBitmaps.get(spriteId)
-      if (!bmp) continue
-      ctx.drawImage(bmp, e[3] * P, (SIZE - 1 - e[4]) * P + P - bmp.height)
-    }
-
-    // map function icons on top, centred on their tile
-    for (const e of listEntries) {
-      const cat = objCats.get(e[0])
-      if (cat === undefined || !areaBitmaps.has(cat)) continue
-      const cx = e[3] * P + P / 2
-      const cy = (SIZE - 1 - e[4]) * P + P / 2
-      const bmp = areaBitmaps.get(cat)
-      if (bmp) {
-        ctx.drawImage(bmp, cx - bmp.width / 2, cy - bmp.height / 2)
-      } else {
-        ctx.fillStyle = '#b47aff'
-        ctx.fillRect(cx - 2, cy - 2, 4, 4)
-      }
-    }
-
-  }, [data, terrain, listEntries, objCats, areaBitmaps, objSprites, spriteBitmaps, objInteractive, minimapVersion, sideTab, terrainBrush, mmGammaLut])
+    // the window blit runs from the RAF loop; nudge it so an edit shows even
+    // while the camera is still
+    minimapBlitRef.current?.()
+  }, [data, terrain, regionRect, minimapRegions, objCats, areaBitmaps, objSprites, spriteBitmaps, objInteractive, minimapVersion, sideTab, terrainBrush, mmGammaLut])
 
   useEffect(() => {
     if (skyMeshRef.current) skyMeshRef.current.visible = showSky
@@ -4220,9 +4569,26 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   // The parent owns the draft (maps/environments `lights[]`) exactly like the
   // terrain/placement drafts. Without it the lights are still listed, gizmo'd
   // and selectable — just read-only.
-  const lightList = lights ?? sceneLights
-  const canEditLights = !!onEdit && !!lights
-  const commitLights = (next: RegionLight[]) => onEdit?.({ lights: next })
+  // Lights live in the region's environment file, so they follow the Env tab's
+  // region pill: selecting a neighbour there lists, edits and saves ITS lights.
+  const lightRegionId = envRegionId ?? data.id
+  const lightsAreBase = lightRegionId === data.id
+  const lightList = lightsAreBase
+    ? (lights ?? sceneLights)
+    : (regionDrafts?.get(lightRegionId)?.lights ?? envCache.get(lightRegionId)?.lights ?? [])
+  const canEditLights = !!onEdit && (lightsAreBase ? !!lights : true)
+  const commitLights = (next: RegionLight[]) =>
+    onEdit?.(lightsAreBase ? { lights: next } : { lights: next, regionId: lightRegionId })
+
+  // keep the gizmos on whichever region the pill selects
+  useEffect(() => {
+    lightGizmoRef.current?.(
+      lightList,
+      (lightRegionId >> 8) - data.def.regionX,
+      (lightRegionId & 0xff) - data.def.regionY,
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightList, lightRegionId, status])
   onAddLightRef.current = (tx, ty) => {
     // Everything else is derived: the tile centre, and a footprint matching the
     // chosen size. The new light is selected straight away, so the full panel
@@ -4365,20 +4731,14 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         </label>
         <label
           className="mapscene-toggle"
-          title="How many regions get built around this one (the client builds 3×3). Load time and draw calls scale with the count; one ring beyond is always decoded so lighting stays seam-free. Only the centre region is editable."
+          title="Which regions are built, chosen in the world-region picker (the Regions button). Load time and draw calls scale with the count; one ring beyond is always decoded so lighting stays seam-free. Only the base region is editable."
         >
           Regions
-          <select
-            className="mapscene-span-select"
-            value={regionSpan}
-            onChange={(e) => {
-              const v = parseInt(e.target.value, 10)
-              setRegionSpan(v)
-              localStorage.setItem('cache-editor:region-span', String(v))
-            }}
-          >
-            {REGION_SPANS.map((n) => <option key={n} value={n}>{n}×{n}</option>)}
-          </select>
+          <span className="mapscene-span-select mapscene-region-readout">
+            {regionRect
+              ? `${regionRect.x1 - regionRect.x0 + 1}×${regionRect.y1 - regionRect.y0 + 1} — ${regionRect.x0},${regionRect.y0} to ${regionRect.x1},${regionRect.y1}`
+              : '1×1 — this region'}
+          </span>
         </label>
         <label className="mapscene-toggle">
           <input type="checkbox" checked={showOutlines} onChange={(e) => setShowOutlines(e.target.checked)} />
@@ -4540,14 +4900,45 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
               Env
             </button>
           </div>
-          {sideTab === 'env' && (
-            <RegionEnvironmentPanel
-              env={env ?? null}
-              regionId={data.id}
-              editable={envEditable}
-              onChange={(next) => onEdit?.({ env: next })}
-            />
-          )}
+          {sideTab === 'env' && (() => {
+            // Each loaded region has its OWN environment file, so the tab picks
+            // one rather than always showing the base region's.
+            const shownId = envRegionId ?? data.id
+            const isBase = shownId === data.id
+            const shownEnv = isBase
+              ? (env ?? null)
+              : (regionDrafts?.get(shownId)?.env ?? envCache.get(shownId) ?? null)
+            const pending = !isBase && !regionDrafts?.get(shownId)?.env && !envCache.has(shownId)
+            return (
+              <>
+                {loadedRegionIds.length > 1 && (
+                  <div className="mapscene-env-pills">
+                    {loadedRegionIds.map((id) => (
+                      <button
+                        key={id}
+                        type="button"
+                        className={`mapscene-env-pill${id === shownId ? ' selected' : ''}${id === data.id ? ' base' : ''}`}
+                        title={id === data.id ? 'the region you are standing in' : `region ${id >> 8}, ${id & 0xff}`}
+                        onClick={() => setEnvRegionId(id)}
+                      >
+                        {id >> 8},{id & 0xff}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {pending
+                  ? <p className="loading-text">Loading environment…</p>
+                  : (
+                    <RegionEnvironmentPanel
+                      env={shownEnv}
+                      regionId={shownId}
+                      editable={envEditable}
+                      onChange={(next) => onEdit?.(isBase ? { env: next } : { env: next, regionId: shownId })}
+                    />
+                  )}
+              </>
+            )
+          })()}
           {sideTab === 'terrain' && (
             <TerrainPanel
               brush={terrainBrush}
@@ -4683,21 +5074,22 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 onEdit?.({ objectDefs: next })
               }}
               onApply={onEdit ? (entry) => {
-                const base = objects ?? data.def.objects
+                // the selection's OWN region, which may be a neighbour
+                const base = listForRegion(selection.regionX, selection.regionY)
                 const next = base.map((o) => [...o] as LocEntry)
                 next[selection.index] = entry
                 setPreviewMorph(null)
                 setSelection(null)
-                onEdit({ objects: next })
+                onEdit({ objects: next, regionId: selection.regionId })
               } : undefined}
               onDelete={onEdit ? () => {
-                const base = objects ?? data.def.objects
+                const base = listForRegion(selection.regionX, selection.regionY)
                 const next = base
                   .filter((_, i) => i !== selection.index)
                   .map((o) => [...o] as LocEntry)
                 setPreviewMorph(null)
                 setSelection(null)
-                onEdit({ objects: next })
+                onEdit({ objects: next, regionId: selection.regionId })
               } : undefined}
             />
           )}

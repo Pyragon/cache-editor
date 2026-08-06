@@ -6,6 +6,7 @@ import { NumberInput } from './defFields'
 import { useZoom } from './useZoom'
 import { useConfirm } from './useConfirm'
 import MapSceneViewer from './MapSceneViewer'
+import type { RegionDraft } from './MapSceneViewer'
 import { loadRegionEnvironment, saveRegionEnvironment } from './mapScene'
 import type { ObjectDefJson, RegionEnvironment, RegionLight } from './mapScene'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
@@ -17,9 +18,10 @@ const ZOOM_LEVELS = [4, 6, 8, 10, 14]
 // world region picker view: canvas is a fixed 512px square, zoom levels are
 // px-per-region (2 = whole 256×256 world exactly fits)
 const PICKER_SIZE = 512
-/** Largest creatable area, in regions per side — arbitrary sanity cap (64×64
- *  regions = 4096×4096 tiles, a quarter of the whole 256×256 region grid). */
-const MAX_CREATE_SPAN = 64
+/** Cap on how many regions one selection may cover. The old create bar capped a
+ *  square area at 64×64 regions (4096×4096 tiles, a quarter of the world grid);
+ *  a free-form selection gets the same ceiling. */
+const MAX_SELECTION = 64 * 64
 const PICKER_ZOOMS = [2, 3, 4, 6, 8, 12, 16, 24, 32]
 
 function clampPickerView(scale: number, ox: number, oy: number) {
@@ -40,6 +42,24 @@ type SelectedTile = { x: number; y: number }
 type WorldCoords = { x: number; y: number; plane: number }
 
 const regionIdOf = (c: WorldCoords) => ((c.x >> 6) << 8) | (c.y >> 6)
+
+/** An inclusive rectangle of regions, in region coords. */
+export type RegionRect = { x0: number; y0: number; x1: number; y1: number }
+
+const rectFrom = (a: { rx: number; ry: number }, b: { rx: number; ry: number }): RegionRect => ({
+  x0: Math.min(a.rx, b.rx), y0: Math.min(a.ry, b.ry),
+  x1: Math.max(a.rx, b.rx), y1: Math.max(a.ry, b.ry),
+})
+const rectW = (r: RegionRect) => r.x1 - r.x0 + 1
+const rectH = (r: RegionRect) => r.y1 - r.y0 + 1
+const rectCount = (r: RegionRect) => rectW(r) * rectH(r)
+const rectHas = (r: RegionRect, rx: number, ry: number) => rx >= r.x0 && rx <= r.x1 && ry >= r.y0 && ry <= r.y1
+
+function rectIds(r: RegionRect): number[] {
+  const ids: number[] = []
+  for (let rx = r.x0; rx <= r.x1; rx++) for (let ry = r.y0; ry <= r.y1; ry++) ids.push((rx << 8) | ry)
+  return ids
+}
 
 // The maps entry's single world viewer: no per-region item list — it owns the
 // current position, loads the region containing it (the 3D view adds the 8
@@ -105,24 +125,62 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
   const [hoverObj, setHoverObj] = useState<{ x: number; y: number; text: string } | null>(null)
   const [search, setSearch] = useState('')
   const [searchMsg, setSearchMsg] = useState('')
-  // searched coords landed in a region that isn't in the cache — offer to
-  // create it (optionally pre-filled with a flat ground slab)
-  const [pendingCreate, setPendingCreate] = useState<{ rx: number; ry: number; target: WorldCoords } | null>(null)
   const [createFill, setCreateFill] = useState(true)
   // stored tile byte = underlay definition id + 1 (0 = none). 164 = underlay
   // 163, the Lumbridge grass (what's on the ground at world tile 3219, 3224).
   const [createUnderlay, setCreateUnderlay] = useState(164)
-  // Area size in REGIONS, the clicked cell being the south-west corner.
-  // 1×1 stays an in-memory draft (the normal dirty/Save flow); anything
-  // bigger is a bulk operation that writes the files to disk immediately,
-  // like the picker's right-click delete — a many-region draft has no place
-  // in the one-region draft/save model.
-  const [createW, setCreateW] = useState(1)
-  const [createH, setCreateH] = useState(1)
   const [createBusy, setCreateBusy] = useState(false)
-  // world-grid region picker: shows every existing region, click to visit or
-  // click a free cell to start creating there
+  // world-grid region picker: shows every existing region. Clicking SELECTS
+  // rather than navigating, so an area to create doesn't have to be a square —
+  // the footer acts on whatever is selected. Creation lives entirely in here;
+  // it used to close the picker and drop a "this region doesn't exist, create
+  // it?" bar onto the map, which said nothing the picker wasn't already showing.
   const [pickerOpen, setPickerOpen] = useState(false)
+  /**
+   * The selection, as a RECTANGLE of regions rather than a free set.
+   * Contiguity isn't a nicety here: picking 50,50 and 52,50 on their own would
+   * ask the viewer to load — or the creator to write — two islands with a hole
+   * between them. Spanning corners makes that unrepresentable, and it keeps the
+   * loaded set a plain rectangle, which is exactly what SceneMosaic wants.
+   */
+  const [selRect, setSelRect] = useState<RegionRect | null>(null)
+  /** An explicit region rectangle chosen in the picker. Null = follow the
+   *  default 3×3 around wherever you are (see `effectiveRect`). */
+  const [loadedRect, setLoadedRect] = useState<RegionRect | null>(null)
+  /**
+   * Placement drafts for LOADED regions other than the one you're standing in,
+   * keyed by region id. Every loaded region is editable, and each saves to its
+   * own `maps/<id>.json` — so this is a plain per-region draft store rather
+   * than anything cleverer. The base region keeps its own `objects` state.
+   */
+  /**
+   * Unsaved edits to LOADED regions other than the one you're standing in,
+   * keyed by region id. Every loaded region is editable — placements, terrain,
+   * point lights and environment alike — and each is its own pair of files, so
+   * one draft per region beats a map per field. It also makes an undo snapshot
+   * a single reference, since every update replaces the map.
+   */
+  const [regionDrafts, setRegionDrafts] = useState<Map<number, RegionDraft>>(() => new Map())
+
+  /**
+   * What the 3D view actually loads: the picker's rectangle when it covers
+   * where you are, otherwise the default 3×3 around the current region — which
+   * is what the client itself builds, and what the old span selector defaulted
+   * to. Walking out of an explicitly chosen rectangle falls back to the 3×3
+   * rather than leaving you standing outside the loaded set.
+   */
+  const effectiveRect = useMemo<RegionRect>(() => {
+    const rx = coords.x >> 6, ry = coords.y >> 6
+    if (loadedRect && rectHas(loadedRect, rx, ry)) return loadedRect
+    return {
+      x0: Math.max(0, rx - 1), y0: Math.max(0, ry - 1),
+      x1: Math.min(255, rx + 1), y1: Math.min(255, ry + 1),
+    }
+  }, [loadedRect, coords.x, coords.y])
+  /** first corner; the next click sets the opposite one */
+  const [selAnchor, setSelAnchor] = useState<{ rx: number; ry: number } | null>(null)
+  /** true between the two corner clicks — the hover preview draws in this state */
+  const awaitingCornerRef = useRef(false)
   // header slot the 3D view portals its graphics-settings dropdown into
   const [gfxSlot, setGfxSlot] = useState<HTMLElement | null>(null)
   const [usedRegions, setUsedRegions] = useState<Set<number> | null>(null)
@@ -174,7 +232,10 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
 
   // last-saved state, for Discard — kept out of `data` so saving doesn't
   // change the scene viewer's data prop (which would force a full rebuild)
-  type Snapshot = { terrain: MapData['terrain']; objects: LocEntry[]; lights: RegionLight[] | null; envSettings: RegionEnvironment | null; objectDefs: Map<number, ObjectDefJson> }
+  type Snapshot = { terrain: MapData['terrain']; objects: LocEntry[]; lights: RegionLight[] | null; envSettings: RegionEnvironment | null; objectDefs: Map<number, ObjectDefJson>
+    /** every OTHER loaded region's drafts at this point — absent on the
+     *  baseline, which predates any region being edited */
+    regionDrafts?: Map<number, RegionDraft> }
   const baselineRef = useRef<Snapshot | null>(null)
   // per-step undo/redo over the drafts. Snapshots are references (every edit
   // path copies the arrays it changes), so pushing them is free.
@@ -202,10 +263,40 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
 
   // Single entry point for every 3D-view edit (brush strokes, loc edits,
   // placements, stamps). `coalesce` folds drag-stroke steps into one undo.
-  function applyEdit(patch: { terrain?: MapData['terrain']; objects?: LocEntry[]; lights?: RegionLight[]; env?: RegionEnvironment; objectDefs?: Map<number, ObjectDefJson>; coalesce?: boolean }) {
+  /** One point in the undo stack: the base region's drafts PLUS every other
+   *  loaded region's. `regionDrafts` is replaced wholesale on each edit, so
+   *  holding the reference is enough to restore it. */
+  const snapshot = (t: MapData['terrain'], o: LocEntry[]): Snapshot =>
+    ({ terrain: t, objects: o, lights, envSettings, objectDefs, regionDrafts })
+
+  function applyEdit(patch: { terrain?: MapData['terrain']; objects?: LocEntry[]; lights?: RegionLight[]; env?: RegionEnvironment; objectDefs?: Map<number, ObjectDefJson>; coalesce?: boolean; regionId?: number }) {
     if (!terrain || !objects) return
+    // An edit to a NEIGHBOUR region: drafted in its own slot and saved to its
+    // own file. Everything else in the patch belongs to the base region, so a
+    // neighbour patch only ever carries `objects`.
+    if (patch.regionId !== undefined && patch.regionId !== data?.id) {
+      const id = patch.regionId
+      if (!patch.coalesce) {
+        historyRef.current.past.push(snapshot(terrain, objects))
+        if (historyRef.current.past.length > 60) historyRef.current.past.shift()
+        historyRef.current.future = []
+      }
+      setRegionDrafts((prev) => {
+        const next = new Map(prev)
+        next.set(id, {
+          ...(prev.get(id) ?? {}),
+          ...(patch.objects ? { objects: patch.objects } : {}),
+          ...(patch.terrain ? { terrain: patch.terrain } : {}),
+          ...(patch.lights ? { lights: patch.lights } : {}),
+          ...(patch.env ? { env: patch.env } : {}),
+        })
+        return next
+      })
+      setIsDirty(true)
+      return
+    }
     if (!patch.coalesce) {
-      historyRef.current.past.push({ terrain, objects, lights, envSettings, objectDefs })
+      historyRef.current.past.push(snapshot(terrain, objects))
       if (historyRef.current.past.length > 60) historyRef.current.past.shift()
       historyRef.current.future = []
     }
@@ -223,24 +314,26 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
   undoRef.current = () => {
     const prev = historyRef.current.past.pop()
     if (!prev || !terrain || !objects) return
-    historyRef.current.future.push({ terrain, objects, lights, envSettings, objectDefs })
+    historyRef.current.future.push(snapshot(terrain, objects))
     setTerrain(prev.terrain)
     setObjects(prev.objects)
     setLights(prev.lights)
     setEnvSettings(prev.envSettings)
     setObjectDefs(prev.objectDefs)
+    setRegionDrafts(prev.regionDrafts ?? new Map())
     setIsDirty(true)
   }
   const redoRef = useRef(() => {})
   redoRef.current = () => {
     const next = historyRef.current.future.pop()
     if (!next || !terrain || !objects) return
-    historyRef.current.past.push({ terrain, objects, lights, envSettings, objectDefs })
+    historyRef.current.past.push(snapshot(terrain, objects))
     setTerrain(next.terrain)
     setObjects(next.objects)
     setLights(next.lights)
     setEnvSettings(next.envSettings)
     setObjectDefs(next.objectDefs)
+    setRegionDrafts(next.regionDrafts ?? new Map())
     setIsDirty(true)
   }
 
@@ -403,6 +496,34 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     setIsSaving(true)
     const next = { ...data, def: { ...data.def, objects }, terrain }
     await saveRegion(world.mapsDir, next)
+    // Every OTHER loaded region that was edited. Each is its own file, so this
+    // is one saveRegion per region — re-read from disk first so a placement
+    // edit doesn't clobber whatever else that file holds.
+    for (const [id, draft] of regionDrafts) {
+      if (id === data.id) continue
+      try {
+        if (draft.objects || draft.terrain) {
+          // re-read first: a placement edit must not clobber whatever else
+          // that region's file holds
+          const region = await loadRegion(world.mapsDir, world.rootHandle, id)
+          await saveRegion(world.mapsDir, {
+            ...region,
+            def: { ...region.def, objects: draft.objects ?? region.def.objects },
+            terrain: draft.terrain ?? region.terrain,
+          })
+        }
+        if ((draft.env || draft.lights) && world.rootHandle) {
+          const base = draft.env ?? await loadRegionEnvironment(world.rootHandle, id) ?? {}
+          const rec: RegionEnvironment = { ...base, ...(draft.lights ? { lights: draft.lights } : {}) }
+          if (!rec.lights?.length) delete rec.lights
+          await saveRegionEnvironment(world.rootHandle, id, rec)
+        }
+      } catch (e) {
+        console.error(`failed saving region ${id}`, e)
+        setSearchMsg(`couldn't save region ${id >> 8}, ${id & 0xff} — see console`)
+      }
+    }
+    setRegionDrafts(new Map())
     // a draft-created region is now on disk — from here it's a normal region
     if (unsavedNewRef.current === data.id) {
       unsavedNewRef.current = null
@@ -452,6 +573,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       // there's no baseline to restore; go back to where creation started
       unsavedNewRef.current = null
       historyRef.current = { past: [], future: [] }
+      setRegionDrafts(new Map())
       setIsDirty(false)
       setCoords(prevCoordsRef.current ?? HOME)
       prevCoordsRef.current = null
@@ -462,6 +584,9 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     setLights(baselineRef.current?.lights ?? null)
     setEnvSettings(baselineRef.current?.envSettings ?? null)
     setObjectDefs(baselineRef.current?.objectDefs ?? new Map())
+    // neighbour regions' drafts go back to what's on disk too — the scene
+    // rebuilds each of those cells off the cleared map
+    setRegionDrafts(new Map())
     historyRef.current = { past: [], future: [] }
     setIsDirty(false)
   }
@@ -487,8 +612,21 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       try {
         await world.mapsDir.getFileHandle(`${targetRegion}.json`)
       } catch {
-        setSearchMsg('')
-        setPendingCreate({ rx: x >> 6, ry: y >> 6, target })
+        // Not in the cache. Rather than answering with a bar on the map, open
+        // the picker on that cell with it selected — the picker already shows
+        // what exists around it, which is the context you need to decide how
+        // much to create.
+        const rx = x >> 6, ry = y >> 6
+        setSearchMsg(`region ${rx}, ${ry} isn't in the cache — create it from here`)
+        // seed it as the anchor so a second click can span an area out from it
+        setSelAnchor({ rx, ry })
+        setSelRect({ x0: rx, y0: ry, x1: rx, y1: ry })
+        awaitingCornerRef.current = true
+        setPickerView(() => {
+          const scale = 8
+          return clampPickerView(scale, PICKER_SIZE / 2 - (rx + 0.5) * scale, PICKER_SIZE / 2 - (255 - ry + 0.5) * scale)
+        })
+        void openRegionPicker()
         return
       }
       if (isDirty) {
@@ -501,7 +639,6 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       }
     }
     setSearchMsg('')
-    setPendingCreate(null)
     setCoords(target)
   }
 
@@ -532,10 +669,46 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       if (x + scale < 0 || x > PICKER_SIZE || y + scale < 0 || y > PICKER_SIZE) continue
       ctx.fillRect(x, y, scale, scale)
     }
-    // regions created this session (in pendingCreate flow they appear after
-    // creation via the load effect, so mark the current region specially)
-    ctx.fillStyle = '#2f8fff'
-    ctx.fillRect((regionId >> 8) * scale + ox, (255 - (regionId & 0xff)) * scale + oy, scale, scale)
+    const drawRect = (r: RegionRect, style: string) => {
+      ctx.fillStyle = style
+      const x = r.x0 * scale + ox
+      const y = (255 - r.y1) * scale + oy
+      ctx.fillRect(x, y, rectW(r) * scale, rectH(r) * scale)
+    }
+    // EVERY loaded region, not just the base one — with a whole rectangle in
+    // the scene, "what am I looking at" is the useful thing to see here
+    const loaded = effectiveRect
+    drawRect(loaded, '#2f8fff')
+    // selection sits over the exists/loaded colours, so a selected region that
+    // is already loaded still reads as selected
+    if (selRect) drawRect(selRect, '#7fc4ff')
+    // live preview of the rectangle the second corner would span, so the
+    // in-between regions are visible BEFORE committing to them
+    if (selAnchor && awaitingCornerRef.current && pickerHover) {
+      drawRect(rectFrom(selAnchor, pickerHover), 'rgba(127, 196, 255, 0.45)')
+    }
+    // "you are here" — the base (editable) region, marked rather than coloured
+    // so it stays readable on top of loaded/selected fills
+    {
+      const bx = (regionId >> 8) * scale + ox
+      const by = (255 - (regionId & 0xff)) * scale + oy
+      ctx.strokeStyle = '#ff4d4d'
+      if (scale >= 5) {
+        const pad = Math.max(1, scale * 0.18)
+        ctx.lineWidth = Math.max(1.5, scale / 7)
+        ctx.lineCap = 'round'
+        ctx.beginPath()
+        ctx.moveTo(bx + pad, by + pad)
+        ctx.lineTo(bx + scale - pad, by + scale - pad)
+        ctx.moveTo(bx + scale - pad, by + pad)
+        ctx.lineTo(bx + pad, by + scale - pad)
+        ctx.stroke()
+      } else {
+        // too small for an X to read — outline the cell instead
+        ctx.lineWidth = 1
+        ctx.strokeRect(bx + 0.5, by + 0.5, Math.max(1, scale - 1), Math.max(1, scale - 1))
+      }
+    }
     // faint region-boundary grid, once cells are big enough for it to read
     if (scale >= 4) {
       ctx.fillStyle = `rgba(255, 255, 255, ${scale >= 8 ? 0.09 : 0.05})`
@@ -550,7 +723,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
         if (y >= gy0 && y <= gy1) ctx.fillRect(gx0, y, gx1 - gx0, 1)
       }
     }
-  }, [pickerOpen, usedRegions, regionId, pickerView])
+  }, [pickerOpen, usedRegions, regionId, pickerView, selRect, selAnchor, pickerHover, effectiveRect])
 
   // wheel-zoom toward the cursor. Native listener because React registers
   // wheel as passive, and we need preventDefault to keep the page still.
@@ -609,7 +782,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     e.currentTarget.style.cursor = ''
     if (!drag || drag.moved || e.button !== 0) return
     const cell = pickerCell(e)
-    if (cell) void pickerSelect(cell)
+    if (cell) pickerClick(cell, e.shiftKey)
   }
 
   // Right-click deletes a region file, after an are-you-sure. Unlike edits
@@ -644,24 +817,72 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     })
   }
 
-  async function pickerSelect(cell: { rx: number; ry: number; used: boolean }) {
-    const target: WorldCoords = { x: cell.rx * 64 + 32, y: cell.ry * 64 + 32, plane: 0 }
-    if (cell.used) {
-      if (isDirty && regionIdOf(target) !== regionId) {
-        const ok = await confirmDialog('You have unsaved changes in this region. Discard them and jump?', {
-          title: 'Unsaved changes',
-          confirmLabel: 'Discard',
-          danger: true,
-        })
-        if (!ok) return
-      }
-      setPickerOpen(false)
-      setPendingCreate(null)
-      setCoords(target)
-    } else {
-      setPickerOpen(false)
-      setPendingCreate({ rx: cell.rx, ry: cell.ry, target })
+  /** Jump to a region, honouring the unsaved-changes guard. False = cancelled. */
+  async function pickerGoTo(rx: number, ry: number): Promise<boolean> {
+    const target: WorldCoords = { x: rx * 64 + 32, y: ry * 64 + 32, plane: 0 }
+    if (isDirty && regionIdOf(target) !== regionId) {
+      const ok = await confirmDialog('You have unsaved changes in this region. Discard them and jump?', {
+        title: 'Unsaved changes',
+        confirmLabel: 'Discard',
+        danger: true,
+      })
+      if (!ok) return false
     }
+    setPickerOpen(false)
+    setCoords(target)
+    return true
+  }
+
+  /**
+   * Load the selected rectangle into the 3D view. The BASE region — the one
+   * that stays editable — is the current one when it falls inside the
+   * selection, so loading more around where you're working doesn't move you;
+   * otherwise it's the middle of the rectangle.
+   */
+  async function loadSelection() {
+    if (!selRect) return
+    const inside = rectHas(selRect, regionId >> 8, regionId & 0xff)
+    const brx = inside ? regionId >> 8 : Math.floor((selRect.x0 + selRect.x1) / 2)
+    const bry = inside ? regionId & 0xff : Math.floor((selRect.y0 + selRect.y1) / 2)
+    const rect = selRect
+    if (!(await pickerGoTo(brx, bry))) return
+    setLoadedRect(rect)
+    clearSelection()
+  }
+
+  /**
+   * Click toggles a cell; shift+click fills the rectangle back to the last
+   * plain-clicked one. Selecting is deliberately non-destructive — nothing
+   * happens to the cache until the footer's Create/Load is pressed — so an
+   * existing region can be selected alongside free ones without navigating
+   * away mid-selection. Double-click still jumps straight to a region.
+   */
+  function pickerClick(cell: { rx: number; ry: number }, shift: boolean) {
+    // shift always re-spans from the existing anchor, so you can keep adjusting
+    // the far corner without restarting the rectangle
+    if (selAnchor && (shift || awaitingCornerRef.current)) {
+      const rect = rectFrom(selAnchor, cell)
+      if (rectCount(rect) > MAX_SELECTION) {
+        setPickerMsg(`that would be ${rectCount(rect)} regions — the cap is ${MAX_SELECTION}`)
+        return
+      }
+      setSelRect(rect)
+      setPickerMsg('')
+      awaitingCornerRef.current = false
+      return
+    }
+    // first corner — collapses to a single region, and the next click spans to it
+    setSelAnchor(cell)
+    setSelRect(rectFrom(cell, cell))
+    setPickerMsg('')
+    awaitingCornerRef.current = true
+  }
+
+  function clearSelection() {
+    setSelRect(null)
+    setSelAnchor(null)
+    awaitingCornerRef.current = false
+    setPickerMsg('')
   }
 
   // Create the pending region as an in-memory draft: nothing touches disk
@@ -672,10 +893,26 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
   // written to disk immediately, after a confirm — like the picker's
   // right-click delete, a bulk file operation has no place in the one-region
   // draft/save model. Existing regions inside the area are left untouched.
-  async function handleCreateRegion() {
-    if (!pendingCreate || createBusy) return
+  /**
+   * Creates every selected region that doesn't already exist. Existing ones in
+   * the selection are left untouched — selecting a mix is how you say "fill in
+   * the gaps around here", which is what proc-gen will want to regenerate a
+   * hole while its neighbours constrain it.
+   *
+   * A lone new region stays an in-memory draft on the normal dirty/Save/Discard
+   * flow. Creating SEVERAL writes their files to disk immediately, like the
+   * picker's right-click delete: a many-region draft has no place in the
+   * one-region draft/save model.
+   */
+  async function createSelected() {
+    if (createBusy) return
+    const missing = selIds
+      .filter((id) => !usedRegions?.has(id))
+      .map((id) => ({ rx: id >> 8, ry: id & 0xff }))
+      .sort((a, b) => (a.rx - b.rx) || (a.ry - b.ry))
+    if (missing.length === 0) return
     if (isDirty) {
-      const ok = await confirmDialog('You have unsaved changes in this region. Discard them and create the new region?', {
+      const ok = await confirmDialog('You have unsaved changes in this region. Discard them and create?', {
         title: 'Unsaved changes',
         confirmLabel: 'Discard',
         danger: true,
@@ -683,11 +920,10 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       if (!ok) return
     }
     const fill = createFill ? { underlayId: createUnderlay } : undefined
-    const w = Math.max(1, Math.min(MAX_CREATE_SPAN, createW))
-    const h = Math.max(1, Math.min(MAX_CREATE_SPAN, createH))
+    const first = missing[0]
 
-    if (w === 1 && h === 1) {
-      const def = createRegionDef(pendingCreate.rx, pendingCreate.ry, fill)
+    if (missing.length === 1) {
+      const def = createRegionDef(first.rx, first.ry, fill)
       const created = await newRegionData(world.rootHandle, def)
       // Discard returns here; creating on top of another unsaved creation keeps
       // the original return point (the abandoned draft is no place to go back to)
@@ -696,44 +932,33 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       envRef.current = null
       setEnv(null)
       setData(created)
-      const target = pendingCreate.target
-      setPendingCreate(null)
-      setCoords(target)
+      clearSelection()
+      setPickerOpen(false)
+      setCoords({ x: first.rx * 64 + 32, y: first.ry * 64 + 32, plane: 0 })
       return
     }
 
-    // Bulk path. The clicked cell is the SW corner; cells that already exist
-    // (or fall off the 0-255 grid) are skipped, never overwritten.
-    const cells: { rx: number; ry: number }[] = []
-    let skipped = 0
-    for (let dx = 0; dx < w; dx++) {
-      for (let dy = 0; dy < h; dy++) {
-        const rx = pendingCreate.rx + dx
-        const ry = pendingCreate.ry + dy
-        if (rx > 255 || ry > 255 || usedRegions?.has((rx << 8) | ry)) { skipped++; continue }
-        cells.push({ rx, ry })
-      }
-    }
+    const already = selIds.length - missing.length
     const ok = await confirmDialog(
-      `Write ${cells.length} new region files to the maps folder now?` +
-      (skipped > 0 ? ` ${skipped} cell${skipped === 1 ? '' : 's'} of the area already exist (or fall off the map) and will be left untouched.` : '') +
-      ' Unlike a single new region, a multi-region area is written to disk immediately rather than staged for Save.',
-      { title: `Create ${w}×${h} area`, confirmLabel: `Create ${cells.length} regions` },
+      `Write ${missing.length} new region files to the maps folder now?` +
+      (already > 0 ? ` ${already} selected region${already === 1 ? '' : 's'} already exist${already === 1 ? 's' : ''} and will be left untouched.` : '') +
+      ' Unlike a single new region, several are written to disk immediately rather than staged for Save.',
+      { title: `Create ${missing.length} regions`, confirmLabel: `Create ${missing.length} regions` },
     )
     if (!ok) return
     setCreateBusy(true)
     try {
       const createdIds: number[] = []
-      for (let i = 0; i < cells.length; i++) {
+      for (let i = 0; i < missing.length; i++) {
         // createRegionDef returns the encoded, JSON-ready def — the same
         // shape saveRegion writes
-        const def = createRegionDef(cells[i].rx, cells[i].ry, fill)
+        const def = createRegionDef(missing[i].rx, missing[i].ry, fill)
         const fh = await world.mapsDir.getFileHandle(`${def.id}.json`, { create: true })
         const writable = await fh.createWritable()
         await writable.write(JSON.stringify(def))
         await writable.close()
         createdIds.push(def.id)
-        if ((i + 1) % 16 === 0 || i === cells.length - 1) setSearchMsg(`creating regions… ${i + 1}/${cells.length}`)
+        if ((i + 1) % 16 === 0 || i === missing.length - 1) setPickerMsg(`creating regions… ${i + 1}/${missing.length}`)
       }
       setUsedRegions((prev) => {
         if (!prev) return prev
@@ -741,14 +966,21 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
         for (const id of createdIds) next.add(id)
         return next
       })
-      setSearchMsg(`created ${createdIds.length} regions${skipped > 0 ? ` (${skipped} skipped)` : ''}`)
-      const target = pendingCreate.target
-      setPendingCreate(null)
-      setCoords(target)
+      setSearchMsg(`created ${createdIds.length} regions${already > 0 ? ` (${already} already existed)` : ''}`)
+      clearSelection()
+      setPickerOpen(false)
+      setCoords({ x: first.rx * 64 + 32, y: first.ry * 64 + 32, plane: 0 })
     } finally {
       setCreateBusy(false)
     }
   }
+
+  // how many of the selected cells don't exist yet — drives the footer's action
+  const selIds = useMemo(() => (selRect ? rectIds(selRect) : []), [selRect])
+  const selMissing = useMemo(
+    () => selIds.filter((id) => !usedRegions?.has(id)).length,
+    [selIds, usedRegions],
+  )
 
   // stable identity for the 3D viewer — an inline object would rebuild the
   // whole scene on every re-render (e.g. typing in the search bar). The
@@ -809,16 +1041,24 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
       </div>
 
       {pickerOpen && (
-        <div className="map-picker-overlay" onClick={() => setPickerOpen(false)}>
+        <div className="map-picker-overlay" onClick={() => { setPickerOpen(false); setPickerMsg('') }}>
           <div className="map-picker" onClick={(e) => e.stopPropagation()}>
             <div className="map-picker-head">
               <span className="enum-title map-picker-title">World regions</span>
               <span className="map-picker-legend">
-                <span className="map-picker-key" style={{ background: '#2f6b46' }} /> exists — click to visit
-                <span className="map-picker-key" style={{ background: '#0c0e14' }} /> free — click to create
-                <span className="map-picker-key" style={{ background: '#2f8fff' }} /> you are here
+                <span className="map-picker-key" style={{ background: '#2f6b46' }} /> exists
+                <span className="map-picker-key" style={{ background: '#0c0e14' }} /> free
+                <span className="map-picker-key" style={{ background: '#2f8fff' }} /> loaded
+                <span className="map-picker-key" style={{ background: '#7fc4ff' }} /> selected
+                <span className="map-picker-key map-picker-key-here" /> you are here
               </span>
-              <button type="button" className="mapscene-info-close" onClick={() => setPickerOpen(false)}>×</button>
+              <button
+                type="button"
+                className="map-picker-close"
+                onClick={() => { setPickerOpen(false); setPickerMsg('') }}
+              >
+                Close
+              </button>
             </div>
             {usedRegions ? (
               <canvas
@@ -831,13 +1071,17 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
                 onPointerUp={handlePickerPointerUp}
                 onPointerCancel={() => { pickerDragRef.current = null }}
                 onMouseLeave={() => setPickerHover(null)}
+                onDoubleClick={(e) => {
+                  const cell = pickerCell(e)
+                  if (cell?.used) void pickerGoTo(cell.rx, cell.ry)
+                }}
                 onContextMenu={handlePickerContextMenu}
               />
             ) : (
               <p className="loading-text">Scanning regions…</p>
             )}
             {usedRegions && (
-              <div className="map-picker-hint">scroll to zoom · drag (or middle-drag) to pan · right-click a region to delete it · north is up</div>
+              <div className="map-picker-hint">click to select · shift+click to select a rectangle · double-click to open · scroll to zoom · drag to pan · right-click deletes · north is up</div>
             )}
             {pickerMsg && <div className="map-picker-msg">{pickerMsg}</div>}
             <div className="map-picker-status">
@@ -845,43 +1089,50 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
                 ? `region ${pickerHover.rx}, ${pickerHover.ry} — world ${pickerHover.rx * 64}, ${pickerHover.ry * 64} ${pickerHover.used ? '(exists)' : '(free)'}`
                 : usedRegions ? `${usedRegions.size} regions in the cache` : ''}
             </div>
+            {selRect && (
+              <div className="map-picker-actions">
+                <span className="map-picker-selcount">
+                  {rectW(selRect)}×{rectH(selRect)} — {selRect.x0},{selRect.y0} to {selRect.x1},{selRect.y1}
+                  {selMissing > 0 && <> · <strong>{selMissing} free</strong></>}
+                  {selIds.length - selMissing > 0 && <> · {selIds.length - selMissing} existing</>}
+                </span>
+                {selMissing > 0 && (
+                  <>
+                    <label className="mapscene-toggle">
+                      <input type="checkbox" checked={createFill} onChange={(e) => setCreateFill(e.target.checked)} />
+                      fill plane 0 with flat ground
+                    </label>
+                    {createFill && (
+                      <label className="map-create-underlay" title="Stored tile byte — underlay definition id + 1. Default 164 = underlay 163, Lumbridge grass.">
+                        <span className="item-field-label">underlay</span>
+                        <NumberInput value={createUnderlay} onChange={setCreateUnderlay} min={0} max={255} digits={3} />
+                      </label>
+                    )}
+                  </>
+                )}
+                <button type="button" className="save-bar-discard" disabled={createBusy} onClick={clearSelection}>
+                  Clear
+                </button>
+                {selMissing > 0 ? (
+                  <button type="button" className="save-bar-save" disabled={createBusy} onClick={() => void createSelected()}>
+                    {createBusy ? 'Creating…' : `Create ${selMissing} region${selMissing === 1 ? '' : 's'}`}
+                  </button>
+                ) : (
+                  <button type="button" className="save-bar-save" onClick={() => void loadSelection()}>
+                    {selIds.length === 1 ? 'Load region' : `Load ${selIds.length} regions`}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
-        </div>
-      )}
-
-      {pendingCreate && (
-        <div className="map-create-bar">
-          <span className="map-create-msg">
-            {createW === 1 && createH === 1
-              ? <>Region {pendingCreate.rx}, {pendingCreate.ry} isn't in the cache — create it?</>
-              : <>Create a {createW}×{createH} region area — SW corner {pendingCreate.rx}, {pendingCreate.ry}, NE corner {Math.min(255, pendingCreate.rx + createW - 1)}, {Math.min(255, pendingCreate.ry + createH - 1)}?</>}
-          </span>
-          <label className="map-create-underlay" title="Area size in regions — the clicked cell is the south-west corner. 1×1 is staged in memory until Save; anything bigger writes the region files to disk immediately (existing regions inside the area are never overwritten).">
-            <span className="item-field-label">regions</span>
-            <NumberInput value={createW} onChange={setCreateW} min={1} max={MAX_CREATE_SPAN} digits={2} />
-            <span className="item-field-label">×</span>
-            <NumberInput value={createH} onChange={setCreateH} min={1} max={MAX_CREATE_SPAN} digits={2} />
-          </label>
-          <label className="mapscene-toggle">
-            <input type="checkbox" checked={createFill} onChange={(e) => setCreateFill(e.target.checked)} />
-            fill plane 0 with flat ground
-          </label>
-          {createFill && (
-            <label className="map-create-underlay" title="Stored tile byte — underlay definition id + 1. Default 164 = underlay 163, Lumbridge grass.">
-              <span className="item-field-label">underlay</span>
-              <NumberInput value={createUnderlay} onChange={setCreateUnderlay} min={0} max={255} />
-            </label>
-          )}
-          <button type="button" className="save-bar-save" disabled={createBusy} onClick={() => void handleCreateRegion()}>
-            {createBusy ? 'Creating…' : createW === 1 && createH === 1 ? 'Create region' : `Create ${createW * createH} regions`}
-          </button>
-          <button type="button" className="save-bar-discard" disabled={createBusy} onClick={() => setPendingCreate(null)}>Cancel</button>
         </div>
       )}
 
       {(viewMode === '3d' || viewMode === 'pov') && sceneData && (
         <MapSceneViewer
           data={sceneData}
+          regionRect={effectiveRect}
+          regionDrafts={regionDrafts}
           focus={sceneFocus}
           objects={objects ?? undefined}
           terrain={terrain ?? undefined}

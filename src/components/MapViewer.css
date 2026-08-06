@@ -123,7 +123,6 @@
   align-items: center;
   gap: 14px;
   margin-bottom: 10px;
-  padding-right: 20px;
 }
 
 .map-picker-title {
@@ -176,41 +175,62 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* create-missing-region bar (from the coordinate search) */
-.map-create-bar {
+/* Acts on the current selection. Sits at the bottom of the picker with the
+   buttons pushed right, so Create lands where a dialog's confirm belongs. */
+.map-picker-actions {
   display: flex;
   align-items: center;
+  gap: 10px;
   flex-wrap: wrap;
-  gap: 12px;
-  padding: 8px 12px;
-  margin-bottom: 8px;
-  border: 1px solid rgba(47, 143, 255, 0.4);
-  border-radius: 8px;
-  background: rgba(0, 102, 255, 0.08);
-  font-size: 12px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #2a2f3a);
 }
 
-.map-create-msg {
-  color: var(--text);
+.map-picker-selcount {
+  font-size: 12px;
+  color: var(--text-dim, #8a90a0);
+  font-variant-numeric: tabular-nums;
+}
+
+.map-picker-selcount strong {
+  color: #7fc4ff;
   font-weight: 600;
 }
 
+/* everything after this is right-aligned */
+.map-picker-actions .save-bar-discard {
+  margin-left: auto;
+}
+
+/* creation controls, now inside the picker's footer */
 .map-create-underlay {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-/* the shared label style ellipsizes under flex pressure ("UND…") — here it
+/* Optical alignment against the row's other text. The flex row centres BOXES
+   correctly, but this group's label is 10px all-caps — no descenders, so its
+   glyphs sit high in their line box — while "fill plane 0 with flat ground"
+   beside it is 12px lowercase whose descenders pull its visible mass below its
+   box centre. Centred boxes therefore read ~1px apart; this nudges the group to
+   match what the eye expects. */
+.map-picker-actions .map-create-underlay {
+  position: relative;
+  top: 2px;
+}
+
+/* The input is sized by NumberInput's `digits` prop, not from here — a width
+   override would fight the shared sizing and leave the field background-less.
+
+   the shared label style ellipsizes under flex pressure ("UND…") — here it
    sits in a roomy bar, so let it keep its natural width */
 .map-create-underlay .item-field-label {
   flex: 0 0 auto;
   overflow: visible;
 }
 
-.map-create-underlay .item-field-input {
-  width: 70px;
-}
 
 /* 2D/3D mode toggle */
 .map-mode-toggle {
@@ -231,5 +251,42 @@
 .map-mode-toggle button.selected {
   color: #fff;
   background: rgba(0, 102, 255, 0.18);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+/* legend swatch for the "you are here" marker — a red X, matching the cross
+   drawn on the base region rather than a flat colour */
+.map-picker-key-here {
+  position: relative;
+  background: transparent;
+  border: 1px solid #ff4d4d;
+}
+.map-picker-key-here::before,
+.map-picker-key-here::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-top: 1.5px solid #ff4d4d;
+  transform-origin: center;
+}
+.map-picker-key-here::before { transform: rotate(45deg); }
+.map-picker-key-here::after { transform: rotate(-45deg); }
+
+/* Picker header's close control — a labelled button rather than a bare ×,
+   which read as decoration next to the legend. Pushed to the right edge; the
+   header's padding-right existed for the old absolutely-positioned ×. */
+.map-picker-close {
+  margin-left: auto;
+  padding: 4px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-dim, #8a90a0);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.map-picker-close:hover {
+  color: var(--text);
   border-color: var(--electric-blue-bright, #2f8fff);
 }

@@ -79,6 +79,42 @@ under "Lighting".
 
 ---
 
+## Multi-region lighting gotchas (2026-08-06) — READ BEFORE RETUNING ANYTHING
+
+The viewer loads and edits an arbitrary RECTANGLE of regions now, and two
+things about that will silently skew any lighting comparison if you forget
+them. Neither is a tuning problem; retuning constants to "fix" either will make
+the single-region case wrong.
+
+**1. Point lights do not spill across a region border.** Each built region gets
+its own `buildLightGrid` from its own `lights[]` records, in region-LOCAL tile
+coords, clipped to 0..63. A torch a tile inside one region's east edge lights
+nothing in the region next to it. **The client keeps ONE scene-wide grid, so it
+does spill.** Consequence: interiors and torch-lit streets near a seam render
+darker than the client, and there can be a faint lighting discontinuity along
+region borders. If you are comparing a screenshot pair taken near a border,
+that difference is this, not the sun/ambient/material maths.
+
+Fixing it means either a scene-wide grid, or shifting neighbouring regions'
+records into each cell's local space. The fiddly part of the latter: a light's
+`y` is a height ABOVE the tile it stands on, so a shifted record's
+`lightScenePos` still needs the OWNING region's heights, not the borrowing
+one's.
+
+**2. Only BUILT regions load their lights.** The mosaic decodes one ring beyond
+what it builds so heights and underlays blend seam-free; that ring deliberately
+skips `loadRegionEnvironment`, because those regions are never rendered. If you
+ever widen what gets built (or start rendering the ring), that skip has to move
+with it or the new regions will render with no point lights at all — which
+looks exactly like a lighting regression and isn't one.
+
+Related: every built region bakes its own lights, and a rebuild resolves them
+as explicit payload → that region's draft → what it was built with. That last
+fallback is load-bearing: without it, rebuilding a neighbour after a placement
+edit drops its lighting entirely.
+
+---
+
 ## Where the compression actually lives
 
 `clientBloom.ts`'s composite already applies the client's tone map:

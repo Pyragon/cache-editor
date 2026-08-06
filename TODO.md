@@ -399,6 +399,67 @@ real cache, in rough risk order:
 - **World map preview** — render a visual of the area's rects (game-world rectangles → their map placement) so you can see what region of the world an area covers instead of reading raw coordinates. Could start as a simple 2D canvas plotting the rects to scale, and eventually underlay actual map tiles.
 - **Revisit world-map icons (2026-07-25).** `map_areas/static_elements` pins were being drawn on the 3D view's minimap behind a "World-map icons" toggle; the toggle is now gone and they're simply not drawn, because the quest markers among them (icon sprite 1692 — every "Start of …"/"Route to …", all `displayedOnMinimap: false`) are 52×52 cyan crosses that bury the map. Lumbridge alone stacks ten around the castle. They still deserve a home, just not there — the natural one is the **world map preview** above, which is what they're actually indexed for. Note the set is mixed: of Lumbridge's 24 static elements, 14 *are* flagged `displayedOnMinimap: true` (bank/altar-style pins, several with `defaultIconArchive: -1` and so no icon at all), so whatever surfaces them should split the two rather than showing the lot. `MapSceneViewer.tsx`'s copy of the loader (`staticElements`/`staticBitmaps` — scanned `map_areas/static_elements`, filtered to the centre region, resolved each `areaId` to its icon) went with the draw; recover it from git history if it's useful. The `AreaViewer` page still loads the same data independently via `map_areas.ts`'s `staticElementsDir`, so nothing else regressed.
 
+## Multi-region editing (BUILT 2026-08-06 — untested in the browser)
+
+Everything LOADED is editable: placements, terrain, point lights, environment,
+with undo/redo across all of them.
+
+Every LOADED region is editable now, not just the one you're standing in. Four
+parts, all landed; `tsc`/lint/build green, none of it clicked through yet.
+
+1. **`rebuildCenterImpl` → `rebuildCellImpl(dx, dy, …)`.** Rebuilds any loaded
+   cell in place, with the centre-only work (minimap, POV heights, light grid
+   and gizmos, marker list) guarded behind `isCentre`. Meshes now carry their
+   owning cell (`Tagged.dx/dy`, `AnimLocRecord.dx/dy`) so a rebuild disposes
+   exactly one region's. The rebuild queue is keyed per cell — latest-wins per
+   region, so edits to different regions can't coalesce into each other.
+   `rebuildCenterRef` still exists and forwards to (0, 0).
+2. **Edits are region-addressed.** `EditPatch.regionId` (absent = base region);
+   picks resolve their index against the OWNING region's list via
+   `listForRegion`, so `editable` is no longer `isCenter && …`.
+3. **`MapViewer` drafts per region** — `objectDrafts` / `envDrafts`, keyed by
+   region id. Save writes the base region as before, then one `saveRegion` per
+   edited neighbour (re-read from disk first so a placement edit doesn't clobber
+   the rest of that file) and one `saveRegionEnvironment` per edited env.
+   Discard clears both.
+4. **Env tab pills.** One per loaded region; neighbours' records load lazily on
+   first open (`envCache`) since the parent only holds the base region's.
+
+5. **Undo/redo spans every region.** The drafts were unified into one
+   `regionDrafts: Map<regionId, RegionDraft>` (objects/terrain/lights/env),
+   replaced wholesale on each edit, so a history snapshot is one extra
+   reference. Undo/redo restore it alongside the base region's state.
+6. **Terrain brushes cross region borders.** `applyBrush` takes ABSOLUTE tile
+   coords, buckets its circular footprint by owning region, and emits one patch
+   per region — so a stroke on a border paints both sides instead of being
+   clipped. `vEffAt` resolves the region too, so smooth/raise sample across the
+   seam rather than clamping at it.
+7. **Point lights follow the Env tab's region pill** — list, edit, gizmos and
+   save all act on the selected region, since a light record lives in that
+   region's environment file. Gizmos for a neighbour are offset and sampled
+   against that region's own heights.
+
+8. **Every loaded region bakes its OWN point lights.** Each built cell loads
+   its environment's `lights[]` during the decode pass (the outer decode ring
+   is skipped — it exists for height/underlay blending only) and builds its own
+   `buildLightGrid` against its own heights. Rebuilds do the same, preferring an
+   explicit payload, then that region's draft, then what it was built with, so a
+   rebuild can't silently drop them. Before this, `isCenter ? lightGrid :
+   undefined` meant a neighbour's torches lit nothing at all.
+9. **The light selection ring follows its region.** `highlightLight` offsets by
+   the gizmo cell and samples that region's heights, captured when the gizmos
+   were built (the mosaic isn't in scope that early in the effect).
+
+**Still base-region-only:**
+- **The minimap** — deferred by Cody, he has other minimap questions first.
+- **Point lights don't spill ACROSS a region border.** Each region's grid is
+  built from its own records in region-local tile coords and clipped to 0..63,
+  so a torch beside the east edge of one region doesn't reach the locs a tile
+  away in the next. The client keeps ONE scene-wide grid, so it does. Fixing it
+  means either a scene-wide grid or shifting neighbouring records into each
+  cell's local space — and a shifted record's `lightScenePos` would need the
+  owning region's heights, which is the fiddly part.
+
 ## Lighting (paused 2026-08-06 — close, not exact)
 
 Read `docs/lighting.md` §§4-6 first; four traced bugs were fixed this session and

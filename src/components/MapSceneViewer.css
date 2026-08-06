@@ -1211,3 +1211,48 @@ span.mapscene-loclist-thumb.empty {
   font-size: 12px;
   color: var(--text-dim, #8a90a0);
 }
+
+/* Readout of the loaded region rectangle — replaces the old span dropdown;
+   the picker owns the choice now, so this only reports it. */
+.mapscene-region-readout {
+  cursor: default;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Env tab: one pill per loaded region, since each has its own
+   maps/environments/<id>.json rather than sharing the base region's. */
+.mapscene-env-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.mapscene-env-pill {
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #2a2f3a);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-dim, #8a90a0);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.mapscene-env-pill:hover {
+  color: var(--text);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.mapscene-env-pill.selected {
+  color: #fff;
+  background: rgba(0, 102, 255, 0.18);
+  border-color: var(--electric-blue-bright, #2f8fff);
+}
+
+/* the region you're standing in — the only one whose terrain/lights are also
+   editable here, so it reads differently even when not selected */
+.mapscene-env-pill.base {
+  font-weight: 600;
+}
