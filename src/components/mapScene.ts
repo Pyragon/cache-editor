@@ -867,21 +867,23 @@ const GROUND_BACKLIGHT = DEFAULT_MODEL_SUN.antiSunColour[0] // 1.2
  *  approximated by the scene-wide sunColour tint — the true HIGH ground is
  *  shader-lit per channel, a later step of the lighting-detail work. */
 export type GroundSun = { ambient: number; light: number; backlight: number; dir: [number, number, number] }
-function computeVertexLightGrid(heights: Int32Array, verts: number, brightness = 1, gs?: GroundSun): Float32Array {
+function computeVertexLightGrid(heights: Int32Array, verts: number, brightness = 1, gs?: GroundSun, vertsY = verts): Float32Array {
   const dir = gs?.dir ?? DEFAULT_MODEL_SUN.dir
   const sl = Math.hypot(dir[0], dir[1], dir[2]) || 1
   const sdx = dir[0] / sl, sdy = dir[1] / sl, sdz = dir[2] / sl
   const amb = gs?.ambient ?? GROUND_AMBIENT
   const sunL = gs?.light ?? GROUND_SUN
   const back = gs?.backlight ?? GROUND_BACKLIGHT
-  const light = new Float32Array(verts * verts)
+  // `verts` is the X extent and `vertsY` the Y one (row stride) — equal for the
+  // square single-region grid, different once a mosaic covers a non-square set
+  const light = new Float32Array(verts * vertsY)
   for (let x = 0; x < verts; x++) {
-    for (let y = 0; y < verts; y++) {
+    for (let y = 0; y < vertsY; y++) {
       // client computes 1..size-1 only; clamp neighbours so edges get lit too
       const xm = Math.max(x - 1, 0), xp = Math.min(x + 1, verts - 1)
-      const ym = Math.max(y - 1, 0), yp = Math.min(y + 1, verts - 1)
-      const dhx = heights[xp * verts + y] - heights[xm * verts + y]
-      const dhy = heights[x * verts + yp] - heights[x * verts + ym]
+      const ym = Math.max(y - 1, 0), yp = Math.min(y + 1, vertsY - 1)
+      const dhx = heights[xp * vertsY + y] - heights[xm * vertsY + y]
+      const dhy = heights[x * vertsY + yp] - heights[x * vertsY + ym]
       // GL ground normal from the height surface (positions are (x, −h, −y)):
       // n = normalize(dhx, 1024, −dhy) → flat ground points +y (up).
       const len = Math.hypot(dhx, 1024, dhy) || 1
@@ -890,7 +892,7 @@ function computeVertexLightGrid(heights: Int32Array, verts: number, brightness =
       // The client Brightness preference scales ONLY the ambient term:
       // Class239:141 — IA((0.7 + brightness·0.1) · 1.1523438). Default 3 → ×1.
       const ndl = sdx * nx + sdy * ny + sdz * nz
-      light[x * verts + y] = amb * brightness + ndl * (ndl > 0 ? sunL : back)
+      light[x * vertsY + y] = amb * brightness + ndl * (ndl > 0 ? sunL : back)
     }
   }
   return light
@@ -931,19 +933,25 @@ function lightAt(light: Float32Array, sceneX: number, sceneY: number): number {
 // ---------------------------------------------------------------------------
 
 export class SceneMosaic {
-  private heights: Int32Array[] = [] // per plane, mverts²
+  private heights: Int32Array[] = [] // per plane, mvertsX * mvertsY
   private lights: Float32Array[] = []
   private sliceCache = new Map<string, { heights: Int32Array[]; lights: Float32Array[] }>()
-  /** regions[dx+radius][dy+radius]; null when that neighbour isn't dumped. */
+  /** regions[dx+offX][dy+offY]; null when that neighbour isn't dumped. */
   private regions: (MapTerrain | null)[][]
   private regionX: number
   private regionY: number
   private configs: SceneConfigs
-  /** regions each side of the centre — (span − 1) / 2 */
-  private radius: number
-  /** mosaic width in tiles / vertices */
-  private tiles: number
-  private mverts: number
+  /** Grid index of the BASE region, i.e. what a (dx, dy) of (0, 0) means. The
+   *  mosaic used to be an odd square centred on the base, so this was a single
+   *  `radius`; a picker-driven region set is an arbitrary rectangle whose base
+   *  can sit anywhere in it. */
+  private offX: number
+  private offY: number
+  /** mosaic extent in tiles / vertices, per axis */
+  private tilesX: number
+  private tilesY: number
+  private mvertsX: number
+  private mvertsY: number
 
   constructor(
     regions: (MapTerrain | null)[][],
@@ -953,22 +961,28 @@ export class SceneMosaic {
     sun: SunConfig = DEFAULT_SUN,
     /** client Brightness preference factor (0.7 + 0.1·pref); ambient only */
     brightness = 1,
+    /** base region's grid index; defaults to the centre of a square grid */
+    offX = (regions.length - 1) / 2,
+    offY = ((regions[0]?.length ?? regions.length) - 1) / 2,
   ) {
     this.regions = regions
     this.regionX = regionX
     this.regionY = regionY
     this.configs = configs
-    this.radius = (regions.length - 1) / 2
-    this.tiles = regions.length * SIZE
-    this.mverts = this.tiles + 1
-    const { tiles, mverts } = this
+    this.offX = offX
+    this.offY = offY
+    this.tilesX = regions.length * SIZE
+    this.tilesY = (regions[0]?.length ?? regions.length) * SIZE
+    this.mvertsX = this.tilesX + 1
+    this.mvertsY = this.tilesY + 1
+    const { tilesX, tilesY, mvertsX, mvertsY } = this
     for (let plane = 0; plane < 4; plane++) {
-      const h = new Int32Array(mverts * mverts)
+      const h = new Int32Array(mvertsX * mvertsY)
       const prev = plane > 0 ? this.heights[plane - 1] : null
-      for (let gx = 0; gx < mverts; gx++) {
-        for (let gy = 0; gy < mverts; gy++) {
-          const tx = Math.min(gx, tiles - 1)
-          const ty = Math.min(gy, tiles - 1)
+      for (let gx = 0; gx < mvertsX; gx++) {
+        for (let gy = 0; gy < mvertsY; gy++) {
+          const tx = Math.min(gx, tilesX - 1)
+          const ty = Math.min(gy, tilesY - 1)
           const rdx = Math.floor(tx / SIZE)
           const rdy = Math.floor(ty / SIZE)
           const terrain = this.regions[rdx]?.[rdy]
@@ -982,15 +996,15 @@ export class SceneMosaic {
           let out: number
           if (presence) {
             if (value === 1) value = 0
-            out = plane === 0 ? -((value * 8) << 2) : prev![gx * mverts + gy] - ((value * 8) << 2)
+            out = plane === 0 ? -((value * 8) << 2) : prev![gx * mvertsY + gy] - ((value * 8) << 2)
           } else if (plane === 0) {
-            const absX = (this.regionX - this.radius) * 64 + gx
-            const absY = (this.regionY - this.radius) * 64 + gy
+            const absX = (this.regionX - this.offX) * 64 + gx
+            const absY = (this.regionY - this.offY) * 64 + gy
             out = -calculateTileHeight(absX + 932731, absY + 556238) * 8 << 2
           } else {
-            out = prev![gx * mverts + gy] - 960
+            out = prev![gx * mvertsY + gy] - 960
           }
-          h[gx * mverts + gy] = out
+          h[gx * mvertsY + gy] = out
         }
       }
       this.heights.push(h)
@@ -999,7 +1013,7 @@ export class SceneMosaic {
       const gs: GroundSun | undefined = sun.light !== undefined
         ? { ambient: sun.ambient, light: sun.light, backlight: sun.backlight ?? 1.2, dir: [sun.x, -sun.y, -sun.z] }
         : undefined
-      this.lights.push(computeVertexLightGrid(h, mverts, brightness, gs))
+      this.lights.push(computeVertexLightGrid(h, mvertsX, brightness, gs, mvertsY))
     }
   }
 
@@ -1008,9 +1022,9 @@ export class SceneMosaic {
     const key = `${dx},${dy}`
     let cached = this.sliceCache.get(key)
     if (cached) return cached
-    const { mverts } = this
-    const baseX = (dx + this.radius) * SIZE
-    const baseY = (dy + this.radius) * SIZE
+    const { mvertsY } = this
+    const baseX = (dx + this.offX) * SIZE
+    const baseY = (dy + this.offY) * SIZE
     const heights: Int32Array[] = []
     const lights: Float32Array[] = []
     for (let plane = 0; plane < 4; plane++) {
@@ -1018,8 +1032,8 @@ export class SceneMosaic {
       const l = new Float32Array(VERTS * VERTS)
       for (let x = 0; x < VERTS; x++) {
         for (let y = 0; y < VERTS; y++) {
-          h[x * VERTS + y] = this.heights[plane][(baseX + x) * mverts + baseY + y]
-          l[x * VERTS + y] = this.lights[plane][(baseX + x) * mverts + baseY + y]
+          h[x * VERTS + y] = this.heights[plane][(baseX + x) * mvertsY + baseY + y]
+          l[x * VERTS + y] = this.lights[plane][(baseX + x) * mvertsY + baseY + y]
         }
       }
       heights.push(h)
@@ -1036,12 +1050,12 @@ export class SceneMosaic {
    *  vertices blend between the palettes of the 4 tiles meeting there
    *  (addUnderlayTiles), so consumers need one tile beyond the region. */
   paletteFor(dx: number, dy: number, plane: number): Int32Array {
-    const baseX = (dx + this.radius) * SIZE
-    const baseY = (dy + this.radius) * SIZE
+    const baseX = (dx + this.offX) * SIZE
+    const baseY = (dy + this.offY) * SIZE
     const palette = new Int32Array(VERTS * VERTS).fill(-1)
     const fluCache = new Map<number, { hue: number; saturation: number; lightness: number; divisor: number }>()
     const compAt = (gx: number, gy: number) => {
-      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return null
+      if (gx < 0 || gy < 0 || gx >= this.tilesX || gy >= this.tilesY) return null
       const rdx = Math.floor(gx / SIZE)
       const rdy = Math.floor(gy / SIZE)
       const terrain = this.regions[rdx]?.[rdy]
@@ -1090,11 +1104,11 @@ export class SceneMosaic {
    *  blurred palette (the client's calculateOverlayDisplay slot machinery) —
    *  this is what melts roads/mud patches into the surrounding ground. */
   overlayCornerFor(dx: number, dy: number, plane: number): Int32Array {
-    const baseX = (dx + this.radius) * SIZE
-    const baseY = (dy + this.radius) * SIZE
+    const baseX = (dx + this.offX) * SIZE
+    const baseY = (dy + this.offY) * SIZE
     const out = new Int32Array(VERTS * VERTS).fill(-1)
     const tileAt = (gx: number, gy: number): number => {
-      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return 0
+      if (gx < 0 || gy < 0 || gx >= this.tilesX || gy >= this.tilesY) return 0
       const rdx = Math.floor(gx / SIZE)
       const rdy = Math.floor(gy / SIZE)
       const terrain = this.regions[rdx]?.[rdy]
@@ -1144,12 +1158,12 @@ export class SceneMosaic {
    *  skip-empties rule, but sampling neighbour regions through the mosaic so
    *  region borders don't seam. -1 = tile has no underlay (stays black). */
   underlayRgbBlurFor(dx: number, dy: number, plane: number): Int32Array {
-    const baseX = (dx + this.radius) * SIZE
-    const baseY = (dy + this.radius) * SIZE
+    const baseX = (dx + this.offX) * SIZE
+    const baseY = (dy + this.offY) * SIZE
     const out = new Int32Array(SIZE * SIZE).fill(-1)
     const rgbCache = new Map<number, number>()
     const rgbAt = (gx: number, gy: number): number => {
-      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return -1
+      if (gx < 0 || gy < 0 || gx >= this.tilesX || gy >= this.tilesY) return -1
       const rdx = Math.floor(gx / SIZE)
       const rdy = Math.floor(gy / SIZE)
       const terrain = this.regions[rdx]?.[rdy]
@@ -1190,13 +1204,13 @@ export class SceneMosaic {
    *  the tile whose origin sits at that corner (addUnderlayTiles), which the
    *  splatting passes crossfade between. */
   underlayCornerFor(dx: number, dy: number, plane: number): Int32Array {
-    const baseX = (dx + this.radius) * SIZE
-    const baseY = (dy + this.radius) * SIZE
+    const baseX = (dx + this.offX) * SIZE
+    const baseY = (dy + this.offY) * SIZE
     const out = new Int32Array(VERTS * VERTS)
     for (let x = 0; x < VERTS; x++) {
       for (let y = 0; y < VERTS; y++) {
-        const gx = Math.min(baseX + x, this.tiles - 1)
-        const gy = Math.min(baseY + y, this.tiles - 1)
+        const gx = Math.min(baseX + x, this.tilesX - 1)
+        const gy = Math.min(baseY + y, this.tilesY - 1)
         const rdx = Math.floor(gx / SIZE)
         const rdy = Math.floor(gy / SIZE)
         const terrain = this.regions[rdx]?.[rdy]
@@ -1219,12 +1233,12 @@ export class SceneMosaic {
    *  region borders. Region-local coords for cell (dx, dy); anything outside
    *  the mosaic (or in an undumped region) reads as no-overlay. */
   overlayTileBeyondFor(dx: number, dy: number): (plane: number, tx: number, ty: number) => number {
-    const baseX = (dx + this.radius) * SIZE
-    const baseY = (dy + this.radius) * SIZE
+    const baseX = (dx + this.offX) * SIZE
+    const baseY = (dy + this.offY) * SIZE
     return (plane, tx, ty) => {
       const gx = baseX + tx
       const gy = baseY + ty
-      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return 0
+      if (gx < 0 || gy < 0 || gx >= this.tilesX || gy >= this.tilesY) return 0
       const rdx = Math.floor(gx / SIZE)
       const rdy = Math.floor(gy / SIZE)
       const terrain = this.regions[rdx]?.[rdy]
@@ -1236,14 +1250,14 @@ export class SceneMosaic {
   }
 
   overlayPerimeterFor(dx: number, dy: number, plane: number): Int32Array | null {
-    const centre = this.regions[dx + this.radius]?.[dy + this.radius]
+    const centre = this.regions[dx + this.offX]?.[dy + this.offY]
     if (!centre) return null
-    const baseX = (dx + this.radius) * SIZE
-    const baseY = (dy + this.radius) * SIZE
+    const baseX = (dx + this.offX) * SIZE
+    const baseY = (dy + this.offY) * SIZE
     return computeOverlayPerimeter(centre, plane, this.configs, (tx, ty) => {
       const gx = baseX + tx
       const gy = baseY + ty
-      if (gx < 0 || gy < 0 || gx >= this.tiles || gy >= this.tiles) return null
+      if (gx < 0 || gy < 0 || gx >= this.tilesX || gy >= this.tilesY) return null
       const rdx = Math.floor(gx / SIZE)
       const rdy = Math.floor(gy / SIZE)
       const terrain = this.regions[rdx]?.[rdy]
