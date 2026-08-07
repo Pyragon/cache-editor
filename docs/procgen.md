@@ -1,115 +1,218 @@
-# Procedural region generation — design
+# Procedural region generation
 
-Status: PLANNED (2026-08-05). Nothing here is built yet. The foundations it
-needs shipped the same day: the 3D view builds an N×N region span (the
-"Regions" selector, `SceneMosaic` generalized past 3×3), and the world map's
-create flow can lay down W×H region areas up to 64×64 (bulk files written to
-disk; existing regions inside the area are never overwritten).
+Status: **BUILT 2026-08-06** — generator, planner, UI and Claude layer.
+The generator is verified by running it; the UI and the Claude call have never
+been exercised in a browser. Read "The determination" first — it answers the question
+that shaped everything else.
 
-The goal: type a seed (or, later, a sentence), get a believable landscape —
-mountains, flat plots where buildings could go, paths connecting the plots,
-grass or snow or anything the underlay palette can express. Buildings
-themselves are OUT of scope for the generator: it produces *plots*, and a
-separate prefab system fills them later (Cody has his own notes on prefabs —
-do not design that here).
+---
 
-## Phase 1 — the deterministic generator
+## The determination: dials, or a generator Claude actually changes?
 
-A pure function: `(area, seed, knobs) → terrain edits`. No AI, no network.
-Everything below writes the same data the terrain brush already writes
-(heights, underlay ids, overlay ids + shapes), so Save/repack needs nothing
-new.
+Cody asked, given a wishlist of tree species, barriers around a forest, lamps
+along paths in dark areas, environment dimming, fountains, stony Varrock-like
+areas and mines: *can a basic proc-gen with dials plus Claude adjusting those
+dials do all this, or does the generator itself need to change based on what
+Claude says?*
 
-Pipeline, in order:
+**Neither. The answer is a third thing, and it is why this was built the way it
+was.**
 
-1. **Heightmap.** A few octaves of seeded simplex noise with domain warping
-   over the WHOLE area (not per region — one continuous field, split into
-   per-region files only at write time). Knobs: mountain amplitude, feature
-   scale, warp strength, sea/valley floor level. Heights quantize to the
-   stored per-tile byte (`heightValue`, 8-unit steps; value 1 = explicit 0 —
-   see the create-region fill for the sentinel).
-2. **Zoning.** Slope analysis finds candidate flat areas; picks N plots
-   (knob: plot count/density, plot size range), flattens each plot outward
-   with a smoothstep skirt so it melts into the hillside instead of terracing.
-   Plots are tagged with a purpose (village core, outlying hut, landmark) —
-   the tags matter to the AI layer and to prefabs later, not to the terrain.
-3. **Paths.** A* between plots (and optionally to the area edge), cost =
-   slope + a bonus for reusing existing path, so routes converge into a
-   network rather than N disjoint lines. Painted as an overlay a few tiles
-   wide (knob: path overlay id — a grey/dirt one; the ported blending melts
-   the edges). Where a path must climb steeply, carve the heights toward the
-   path line (switchback feel) rather than letting it stripe up a cliff.
-4. **Biome paint.** Underlay per tile from height/slope/moisture noise:
-   the theme is literally a palette map (knob: grass set vs snow set vs
-   custom list of underlay ids with weight ranges). Rock overlays above a
-   slope threshold, water overlay below the water level. Snow line as a
-   height threshold with a noisy edge.
-5. **Write-back.** Split the area field into per-region `MapTerrain`s and
-   hand them to the normal draft/save path. Multi-region saves write each
-   region file like the bulk create does.
+Dials are genuinely not enough, and it is worth being precise about why. A dial
+is a magnitude. Every one of the interesting asks is a *relationship*:
 
-UI sketch: a "Generate" panel on the map page — seed, the knobs above,
-Preview (renders into the loaded scene without saving) and Apply. With the
-Regions span selector the whole generated area is visible at once.
+| The ask | Why a dial can't express it |
+|---|---|
+| "a village surrounded by forest so you're trapped" | a ring that FOLLOWS a zone's boundary, with a controlled number of ways through. There is no scalar for "enclosed but not sealed". |
+| "lights along the paths" | placement RELATIVE to a computed path network that doesn't exist until the generator has routed it |
+| "a gloomy area" | dead trees *and* a dimmed sun *and* heavier fog — three unrelated subsystems that have to agree on a mood |
+| "an area with resources, like a mine" | a zone, sunk into the ground, seeded with ore-bearing rocks, with rubble around it |
 
-### Regenerating ONE region inside a generated area
+But the opposite extreme — Claude emitting tiles, or Claude rewriting generator
+code — is worse. Tiles would be megabytes of output with no determinism and no
+guarantee the result is even renderable. Generated code is unreviewable and
+unsafe to run against someone's cache.
 
-Wanted: select a region, hit "regenerate just this one", and have it mesh
-seamlessly with its (possibly hand-edited) neighbours. Design:
+So the contract is a **plan**: a small, closed vocabulary of ENTITIES that
+Claude authors and a deterministic generator executes.
 
-- The generator takes optional **boundary constraints**: the 65-vertex border
-  heights (and border-tile underlays) of each existing neighbour are FIXED.
-- Regenerate the region from a new seed as usual, then blend the outer K
-  tiles (K ≈ 8) toward the fixed borders with a smoothstep falloff — same
-  trick as the plot skirts.
-- Paths: any path that touches the border of a neighbour is a fixed entry
-  point the new region's path network must connect to.
-- This is also exactly the mechanism for "extend the world": generate a new
-  region next to an existing coastline/city edge and it grows out of it
-  rather than butting against it.
+```
+  a sentence ─► Claude ─┐
+                        ├─► ProcPlan (json) ─► generator ─► terrain + locs + env
+  presets/dials ────────┘
+```
 
-## Phase 2 — prefabs (DEFERRED, not this doc's job)
+Claude chooses the *structure* — which zones exist, where they are, what grows
+in them, where the barrier goes and how many gaps it has, whether the sun dims.
+That is meaningfully "the generator changes based on what Claude says": a plan
+can describe places the preset themes never anticipated. What it cannot do is
+produce something unrenderable, non-deterministic, or unreviewable.
 
-The generator only makes plots. Stamping buildings onto plots is the prefab
-system — Cody has separate notes with ideas for it. The only contract the
-generator promises: a plot is flat, tagged with a purpose, and records its
-rect + orientation so a stamper can consume it later.
+Three properties fall out of this that are worth protecting:
 
-## Phase 3 — the Claude layer (BYOK)
+1. **The AI is not a separate code path.** The built-in planner emits the same
+   `ProcPlan`. Everything works with no API key; Claude is just a better
+   planner. There is exactly one generator to debug.
+2. **Same plan + same seed = same place**, forever, offline. Verified in
+   testing (terrain and placements byte-identical across runs).
+3. **A plan is reviewable json.** You can read what it is about to do before it
+   touches the cache, hand-edit it, diff two of them, or keep one beside the
+   region it produced.
 
-Optional, additive: the user pastes their own Anthropic API key and describes
-the region in words; Claude turns the description into the generator's knob
-settings. **Claude never generates tiles** — it fills in the same spec the
-sliders edit, so output is always renderable and iteration is stable (same
-seed + tweaked spec = same landscape, adjusted).
+The one real cost: the vocabulary is a ceiling. Claude cannot ask for something
+`types.ts` has no word for. Adding "rivers that flow downhill to the sea" means
+adding a concept to the plan and code to execute it — Claude cannot invent it.
+I think that is the right trade (it is also what keeps the output safe), but it
+is the thing to revisit if it ever feels limiting. **See the questions at the
+bottom.**
 
-- **Client-only**: official SDK with `dangerouslyAllowBrowser: true`; the key
-  goes only to Anthropic. Keep it in memory by default; localStorage only
-  behind an explicit opt-in with a "stored on this machine" note. Suggest a
-  workspace-scoped key with a spend limit.
-- **Context doc**: generated once from the opened cache — underlay/overlay
-  ids with their colours/texture names, the knob schema with ranges and
-  effects, area size, and (later) the prefab library. Sent as the system
-  prompt with `cache_control` so repeat generations are cheap.
-- **The call**: `claude-opus-5`, structured outputs (`output_config.format`
-  with a JSON schema of the spec) so the reply is guaranteed-valid. A
-  generation is a few cents at Opus pricing; say so in the UI.
-- **Iteration**: keep the conversation; "make it snowier" is a follow-up turn
-  that returns a revised spec. The single-region-regenerate flow above works
-  here too — "redo just this region as a quarry" sends the boundary
-  constraints along.
-- Safety/UX rules per the upload-safety conventions: the key is data, never
-  logged; clear cost disclosure; a visible "AI generated — review before
-  saving" note on results.
+---
 
-## Open questions
+## What is built and tested
 
-- Water: real water needs the underwater (`um`) tail for depth-faded shores —
-  generated regions would get flat-colour water until we also generate a
-  simple depth field. Probably fine for v1.
-- Region environments: should the generator also write a
-  `maps/environments/<id>.json` (sun/fog/skybox theme per biome)? Cheap win,
-  slots into the same spec.
-- The stored-height quirk: absent height + plane 0 rolls the client's Perlin
-  default — generated terrain must always write explicit heights (the create
-  fill already does).
+`src/procgen/`:
+
+| file | what it is |
+|---|---|
+| `types.ts` | the plan vocabulary — the contract, and the long-form version of the reasoning above |
+| `rng.ts` | seeded RNG, value noise, domain-warped fbm, weighted picks |
+| `scenery.ts` | species vocabulary → real object ids, by NAME, from the opened cache |
+| `generate.ts` | the deterministic executor |
+| `planner.ts` | 8 built-in themes + dials → a plan (no API key needed) |
+| `claude.ts` | BYOK: a sentence → a plan, via tool-use so the reply is schema-valid |
+
+Pipeline order inside `generate.ts` (order matters, and is commented in place):
+heightmap → zones (flatten with a skirt) → plots → paths (A\* with slope cost
+and route reuse) → ground bands → resources → props → **path lighting** →
+barriers → scatter → split into per-region files.
+
+Lighting deliberately runs BEFORE scatter. It didn't at first, and the result
+was zero lamps on every dark theme: scatter had already claimed every verge
+tile. The deliberate things go down first and the filler fits around them.
+
+### Verified by running it (not by reading it)
+
+Across all 8 themes over a 3×2 region area:
+
+- 35-220 ms per generation; 800-3800 placements depending on theme
+- terrain byte-identical across two runs of the same plan ✓
+- placements byte-identical across two runs ✓
+- **zero plane-0 tiles missing an explicit height** ✓ — critical, because an
+  absent height makes the client roll its own Perlin default and silently
+  discard the heightmap
+- barrier ring around a village: 446 placements in the ring band, filling
+  70 of 72 angular sectors, with exactly 2 empty sectors — i.e. it encloses,
+  and the two gaps are real ✓
+- lit paths on the dark themes: 18 lamps placed along the routed network ✓
+- environment record written for `gloomy_woods` and `wasteland` ✓
+
+### Covering the wishlist
+
+| Ask | Status |
+|---|---|
+| tree species (oak/willow/maple/yew/magic/evergreen/palm) | ✓ vocabulary + name matching |
+| dead trees, burnt, stumps, fallen/broken | ✓ |
+| rocks, boulders, rubble | ✓ |
+| ferns, plants, flowers, bushes, reeds, mushrooms, grass tufts | ✓ |
+| "gloomy → dead trees specifically" | ✓ `gloomy_woods` theme, and Claude can do it from a sentence |
+| barriers so you're trapped | ✓ `BarrierRing`, gaps enforced by the sanitizer |
+| lights along paths in dark areas | ✓ `PathLighting`, incl. emitting real point-light records |
+| environment dimmed for dark areas | ✓ `EnvironmentSpec` written per region |
+| fountains (and wells, statues, benches…) | ✓ `PropPlacement` with a levelled pad |
+| stony areas like Varrock/Falador | ✓ `stony_highland` (ridged terrain, stone bands, rock overlays) |
+| mines / resource areas | ✓ `ResourceNode` — sinks a pit and seeds ore rocks |
+| works across every region being created | ✓ generates one continuous field over the whole rectangle, splits at write time |
+
+---
+
+## Not done yet
+
+- ~~UI.~~ **Built, unclicked.** Select a rectangle in the world picker →
+  "Generate…" → theme pills, seed, three sliders, or a prompt box if a key is
+  set → Apply. Apply routes through the multi-region draft path, so a
+  generation is previewed in the 3D view, is undoable, and writes nothing until
+  Save. The API key lives in Settings → AI generation.
+  **Nothing in this UI has been exercised in a browser.**
+- ~~The scenery index has never been built against the real cache.~~
+  **DONE — validated against all 73,913 objects in cryogen-cache, and it found
+  three real bugs** (see "What validation caught" below). 51 of 52 species now
+  resolve, and the preferred match for each is the plain one: `tree` → "Tree",
+  `tree_oak` → "Oak", `rock_large` → "Rock", `fountain` → "Fountain",
+  `crate` → "Crate". The one gap is `stalagmite`, which resolves but is a cave
+  prop nothing currently scatters. The index itself has still never been built
+  through the UI (it needs an opened cache), only through an offline harness
+  running the same matching logic.
+- **Claude layer is untested against the live API** (no key here). The request
+  shape, tool schema and error handling are written; nobody has watched a real
+  response come back.
+- **Prefabs.** Unchanged: the generator makes plots, tags them and reports
+  them. Stamping buildings is your separate notes.
+- **Single-region regenerate with boundary constraints** (the old phase-1
+  design, still wanted) — `preserveRegions` exists in the plan type as the
+  hook, and nothing reads it yet.
+
+---
+
+## What validation caught
+
+Running the matcher over the real dump was worth more than any amount of
+re-reading it. Three bugs, none of which type-checking or a unit test on
+invented data would have found:
+
+1. **Substring matching planted the wrong things.** "Conse**crate**d pet house"
+   matched `crate`, "Je**well**ery box" matched `well`, "Timber de**fence**"
+   matched `fence`, "En**grave**d sarcophagus" matched `gravestone`. Matching is
+   now anchored on non-letter boundaries.
+2. **Word anchoring then broke every plural** — `rock` stopped matching "Coal
+   rocks", `reed` stopped matching "Reeds", and five ore species silently
+   vanished. Terms now tolerate one trailing `s`.
+3. **`ore_coal` and `ore_clay` were being eaten by `rock_small`**, because the
+   generic "rocks" pattern ran first and only "<metal> **ore** rocks" tripped
+   its exclusion. Ore species are now ordered ahead of generic rock.
+
+Also fixed while looking: `ore_adamant` needed "adamantite" spelled out;
+`ore_essence` has to precede `ore_rune` or "Rune essence rock" is claimed as
+runite; and a species now prefers its plainest-named member, because a cache
+holds one "Oak" and a dozen "Diseased Oak"/"Evil oak tree" variants and a
+forest of diseased oaks is not what "oak" meant.
+
+## Questions for you
+
+Answer any of these and I'll act on them; where you don't, I'll use the
+judgement noted.
+
+1. **Is the vocabulary ceiling acceptable?** Claude can only use concepts
+   `types.ts` defines. The alternative — letting it emit small sandboxed
+   scripts — is much more powerful and much harder to trust. *My judgement:
+   keep the vocabulary, grow it when something is missing.*
+
+2. **Underlay/overlay ids are guesses.** Everything except 164 (grass, from the
+   create-region fill) is a placeholder: dirt 22, sand 33, stone 47, snow 59,
+   path overlay 4, water 6, rock 15. If you tell me the real ids for a few
+   ground types I'll set them as the defaults; otherwise the panel will expose
+   them so you can fix them per-generation.
+
+3. **How much should Generate overwrite?** Right now a plan rewrites every tile
+   and replaces the placement list of every region in the rectangle. For
+   *creating* new regions that's obviously right. For running it over regions
+   that already have content it is destructive. *My judgement: Generate is
+   offered on the create flow and on empty regions freely; over existing
+   content it needs an explicit confirm naming the regions it will overwrite.*
+
+4. **Should generated point lights be written?** Path lighting can emit real
+   light records into the environment file. They cost a rebuild and they bake
+   into loc colours. Cheap to leave on for dark themes only, which is what it
+   does now.
+
+5. **Scatter density feels high to me.** A dense forest currently lands ~580
+   placements per region. Real regions run a few hundred. It looks right in the
+   numbers but I have not seen it rendered — if it reads as a wall of trunks,
+   the density scale needs halving across every theme.
+
+6. **Water.** Still the old open question: real water wants the underwater
+   (`um`) tail for depth-faded shores, which we don't generate. `coastal`
+   paints a flat water overlay below a height threshold. Fine for v1?
+
+7. **Where should the Generate UI live** — the picker footer (my plan), a tab
+   in the map side panel, or its own page? The picker footer means "select the
+   area you want, then describe it", which reads well to me.
