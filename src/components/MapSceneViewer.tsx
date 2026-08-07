@@ -2273,6 +2273,23 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         animLocsRef.current = []
         emitterPosesRef.current.clear()
         sortCentreRef.current = []
+        // These two describe WHAT THIS BUILD LOADED, and the build below
+        // repopulates them per cell. Carrying the previous build's entries over
+        // made them a record of "some scene once had this region", which is not
+        // the question anything asks of them — a draft for a region left behind
+        // by a camera move then looked loaded and was rebuilt against a grid it
+        // has no cell in.
+        cellObjectsRef.current.clear()
+        cellTerrainRef.current.clear()
+        // Same reasoning, and the same bug it caused: this records which drafts
+        // have already been applied TO THE SCENE, so it is only meaningful for
+        // the build that applied them. A rebuild reloads every neighbour from
+        // disk, and a surviving record made the draft effect skip them as
+        // "already built" — every edited neighbour silently reverted to its
+        // on-disk state on any full rebuild (a graphics-setting change was
+        // enough), while the base region kept its edits because it renders from
+        // the `terrain` prop rather than through a draft.
+        lastBuiltDraftsRef.current.clear()
         const mapsDir = await resolveEntryHandle(data.rootHandle, getEntryPath('maps'))
 
         // one particle runtime per scene build; its per-plane groups hang off
@@ -2325,10 +2342,24 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // One extra ring is DECODED around them so the outermost built regions
         // still have neighbours to blend heights/lighting against.
         const baseRx = data.def.regionX, baseRy = data.def.regionY
-        const dxMin = regionRect ? regionRect.x0 - baseRx : 0
-        const dxMax = regionRect ? regionRect.x1 - baseRx : 0
-        const dyMin = regionRect ? regionRect.y0 - baseRy : 0
-        const dyMax = regionRect ? regionRect.y1 - baseRy : 0
+        // The rectangle MUST contain the base region: `offX/offY` below place
+        // the base at the grid origin, so a rectangle that excludes it produces
+        // negative indices and the first write blows up the whole build.
+        //
+        // Not hypothetical — the parent sets its rectangle and its coordinates
+        // in one go, but `data` only catches up once that region's file has
+        // loaded, so every jump-and-load has a render where the NEW rectangle
+        // is paired with the OLD base region. Falling back to the base alone
+        // for that render costs one cheap build and is self-correcting: `data`
+        // arrives, the rectangle contains it, and the effect reruns for real.
+        const buildRect = regionRect
+          && baseRx >= regionRect.x0 && baseRx <= regionRect.x1
+          && baseRy >= regionRect.y0 && baseRy <= regionRect.y1
+          ? regionRect : null
+        const dxMin = buildRect ? buildRect.x0 - baseRx : 0
+        const dxMax = buildRect ? buildRect.x1 - baseRx : 0
+        const dyMin = buildRect ? buildRect.y0 - baseRy : 0
+        const dyMax = buildRect ? buildRect.y1 - baseRy : 0
         // grid index of the base region = where offset 0 lands once the decode
         // ring has pushed the origin out by one
         const offX = 1 - dxMin
@@ -2351,7 +2382,15 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 const id = ((data.def.regionX + dx) << 8) | (data.def.regionY + dy)
                 const file = await (await mapsDir.getFileHandle(`${id}.json`)).getFile()
                 const def = JSON.parse(await file.text()) as MapRegionDef
-                const terrain = decodeTerrain(def)
+                // A neighbour with an unsaved draft enters the grid AS DRAFTED,
+                // exactly as its objects and lights already do below. Vertex
+                // heights are SHARED across a region boundary, so a cell meshed
+                // while its neighbour is still the on-disk version disagrees
+                // with that neighbour about the shared edge — which draws as a
+                // trench along every seam. Draft-first here means one mosaic
+                // that already describes the whole area, instead of a sequence
+                // of mosaics that each learn about one more region.
+                const terrain = regionDraftsRef.current?.get(id)?.terrain ?? decodeTerrain(def)
                 // only regions we actually BUILD need lights; the outer decode
                 // ring exists for height/underlay blending alone
                 const inBuild = dx >= dxMin && dx <= dxMax && dy >= dyMin && dy <= dyMax
@@ -2885,6 +2924,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           // placement-only rebuild of it later
           cellObjectsRef.current.set((def.regionX << 8) | def.regionY, objList)
           cellTerrainRef.current.set((def.regionX << 8) | def.regionY, terrain)
+          // This cell was just built FROM that draft, so record it as applied:
+          // the draft effect compares by identity and would otherwise rebuild
+          // every drafted cell a second time, serially, undoing the single
+          // whole-area mosaic the build just established.
+          const builtFrom = regionDraftsRef.current?.get((def.regionX << 8) | def.regionY)
+          if (builtFrom) lastBuiltDraftsRef.current.set((def.regionX << 8) | def.regionY, builtFrom)
           const locBuilds: (Awaited<ReturnType<typeof buildLocsMesh>> | null)[] = [null, null, null, null]
           for (let plane = 0; plane < 4; plane++) {
             if (def.hasLocations && objList.length > 0) {
@@ -3542,8 +3587,34 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
          * The centre additionally owns scene-wide state (minimap, POV heights,
          * the light grid and gizmos, the marker list), so those stay guarded.
          */
+        // Rebuild progress. The loading overlay is driven off `status`, but only
+        // the initial build ever drove `setLoadProgress` — so a rebuild showed
+        // the bar pinned at 0% for its whole run, which on a generated area is
+        // minutes across many regions. Rebuilds are serialized one cell at a
+        // time, so the batch counters below turn "some cell is busy" into
+        // "region 3 of 25, three quarters through its terrain".
+        let batchTotal = 0
+        let batchDone = 0
+        const REBUILD_PHASES = 10
+        const rebuildStatus = (text: string) => setStatus(
+          batchTotal > 1 ? `${text} · region ${Math.min(batchDone + 1, batchTotal)} of ${batchTotal}` : text,
+        )
+        /** phase 0..REBUILD_PHASES within the current cell, scaled into the batch */
+        const rebuildProgress = (phase: number) => {
+          const span = 100 / Math.max(1, batchTotal)
+          setLoadProgress(Math.min(99, batchDone * span + (phase / REBUILD_PHASES) * span))
+        }
         const rebuildCellImpl = async (cellDx: number, cellDy: number, nextTerrain: MapTerrain, nextObjects: LocEntry[], nextLights?: RegionLight[]) => {
           if (disposed) return
+          // Bounds are the grid's own question, so ask the grid — not a
+          // side record of what is loaded. Anything outside the BUILT extents
+          // has no cell to rebuild, and indexing `regionGrid` for it throws out
+          // of the build chain and strands the loading overlay.
+          if (cellDx < dxMin || cellDx > dxMax || cellDy < dyMin || cellDy > dyMax) {
+            console.warn(`ignoring rebuild of region ${cellDx},${cellDy} — outside the built extents `
+              + `(${dxMin}..${dxMax}, ${dyMin}..${dyMax})`)
+            return
+          }
           const isCentre = cellDx === 0 && cellDy === 0
           const offsetX = cellDx * REGION_UNITS
           const offsetZ = -cellDy * REGION_UNITS
@@ -3582,13 +3653,25 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             setSceneLights(nextLights)
           }
           clearLocHighlight()
-          setStatus('recomputing…')
+          rebuildStatus('recomputing…')
+          rebuildProgress(0)
           await new Promise((resolve) => setTimeout(resolve, 0)) // let the status paint
           // base-indexed CENTRE — [1][1] was the 3×3 grid's centre and
           // in a wider grid it's a real neighbour: writing there both clobbered
           // that neighbour's terrain in the mosaic and rebuilt the centre
           // against stale border values (seams, gaps, dead blending)
           regionGrid[cellDx + offX][cellDy + offY] = nextTerrain
+          // Every rebuild still QUEUED lands in the grid now, not when its own
+          // turn comes. Vertex heights are shared across a region boundary, so
+          // a cell meshed before its queued neighbours are in the grid
+          // disagrees with them about the shared edge and leaves a trench along
+          // the seam — and applying a generation queues every region at once,
+          // which is exactly that case. Their meshes are still built on their
+          // own turn; this only makes each mosaic describe the whole change.
+          for (const job of queuedRebuilds.values()) {
+            const gx = job.dx + offX, gy = job.dy + offY
+            if (gx >= 0 && gx < gridW && gy >= 0 && gy < gridH) regionGrid[gx][gy] = job.t
+          }
           const nextMosaic = new SceneMosaic(regionGrid, data.def.regionX, data.def.regionY, configs, sunNow, assets.brightness, offX, offY)
           if (disposed) return
           // later cell builds/rebuilds must see the edited heights too
@@ -3638,14 +3721,16 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             for (let plane = 0; plane < 4; plane++) {
               locBuilds[plane] = await buildLocsMesh(
                 nextTerrain, nextObjects, plane, cellHeights, assets,
-                (done, total) => setStatus(`updating objects (plane ${plane}): ${done}/${total}`),
+                (done, total) => rebuildStatus(`updating objects (plane ${plane}): ${done}/${total}`),
                 isCentre ? lightGrid : buildLightGrid(cellLights, cellHeights),
                 undefined,
                 envSunNow,
               )
               if (disposed) return
+              rebuildProgress(1 + plane)
             }
           }
+          rebuildProgress(5)
           // refresh the centre's raw grid and recompose — an edit must keep
           // the cross-region border shadows the initial build established
           cellRawShadows.set(shadowKey(cellDx, cellDy), locBuilds.map((b) => b?.shadows))
@@ -3668,7 +3753,8 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             ? computeRiverbedHeights(cellHeights, uwDepthCenter) : undefined
           const rebuiltTerrain: THREE.Mesh[] = []
           for (let plane = 0; plane < 4; plane++) {
-            setStatus(`rebuilding terrain (plane ${plane})…`)
+            rebuildStatus(`rebuilding terrain (plane ${plane})…`)
+            rebuildProgress(6 + plane)
             if (uwCenter && riverbedCenter) {
               const bed = await buildTerrainMesh(uwCenter, plane, riverbedCenter, configs, assets)
               if (disposed) return
@@ -3828,10 +3914,26 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
           const idle = !queuedRebuilds.has(key)
           queuedRebuilds.set(key, { dx, dy, t, o, l })
           if (!idle) return buildChain.then(() => undefined) // the queued rebuild picks this payload up
+          // a coalesced repeat is NOT new work, so only a fresh cell counts —
+          // otherwise applying a generation inflates the denominator and the
+          // bar crawls towards a total that never arrives
+          batchTotal++
           return enqueueBuild(async () => {
             const job = queuedRebuilds.get(key)!
             queuedRebuilds.delete(key)
-            await rebuildCellImpl(job.dx, job.dy, job.t, job.o, job.l)
+            try {
+              await rebuildCellImpl(job.dx, job.dy, job.t, job.o, job.l)
+            } catch (e) {
+              // `enqueueBuild` swallows rejections to keep the chain alive, and
+              // the happy-path `setStatus('')` is the only thing that clears the
+              // overlay — so a throw left the loading bar frozen at whatever
+              // percentage it had reached, indistinguishable from a hang.
+              console.error(`rebuild of region ${job.dx},${job.dy} failed`, e)
+              setStatus(`scene build failed: ${e instanceof Error ? e.message : e}`)
+            } finally {
+              batchDone++
+              if (batchDone >= batchTotal) { batchDone = 0; batchTotal = 0 }
+            }
           })
         }
         rebuildCenterRef.current = (t, o, l) => rebuildCellRef.current!(0, 0, t, o, l)
@@ -4074,8 +4176,16 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       // that do (sun direction/ambient) come through as a terrain/objects edit
       if (!draft.objects && !draft.terrain && !draft.lights) continue
       if (lastBuiltDraftsRef.current.get(id) === draft) continue
-      const terrainForCell = draft.terrain ?? cellTerrainRef.current.get(id)
-      if (!terrainForCell) continue // that region isn't loaded
+      // Loadedness is the SCENE's record, not the draft's: `draft.terrain ??
+      // cellTerrainRef…` short-circuited whenever the draft carried terrain, so
+      // this never actually tested whether the region was built. Hand edits hid
+      // it (you can only edit what you can see), but a generation drafts every
+      // region in the picker rectangle — including ones far outside the loaded
+      // grid — and rebuilding those indexed `regionGrid` out of bounds and threw
+      // the whole build chain. Skipping is right: the draft still saves, and
+      // navigating there builds it from the draft.
+      if (!cellTerrainRef.current.has(id)) continue
+      const terrainForCell = draft.terrain ?? cellTerrainRef.current.get(id)!
       lastBuiltDraftsRef.current.set(id, draft)
       void rebuildCell(
         (id >> 8) - data.def.regionX, (id & 0xff) - data.def.regionY,
@@ -4843,7 +4953,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 <div className="rs-loading-bar">
                   <div className="rs-loading-fill" style={{ width: `${loadProgress}%` }} />
                 </div>
-                <p className="rs-loading-sub">{Math.round(loadProgress)}%</p>
+                {/* the overlay covers the status bar, so carry the stage here
+                    too — otherwise a multi-region rebuild is a bare percentage
+                    with no sign of which region it is on */}
+                <p className="rs-loading-sub">
+                  {Math.round(loadProgress)}%{status ? ` · ${status}` : ''}
+                </p>
               </div>
             </div>
           )}
