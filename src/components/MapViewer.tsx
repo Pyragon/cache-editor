@@ -6,6 +6,11 @@ import { NumberInput } from './defFields'
 import { useZoom } from './useZoom'
 import { useConfirm } from './useConfirm'
 import MapSceneViewer from './MapSceneViewer'
+import GeneratePanel from './GeneratePanel'
+import type { GenerationResult, ProcPlan } from '../procgen/types'
+import { generate } from '../procgen/generate'
+import { sanitizePlan } from '../procgen/claude'
+import type { SceneryIndex } from '../procgen/scenery'
 import type { RegionDraft } from './MapSceneViewer'
 import { loadRegionEnvironment, saveRegionEnvironment } from './mapScene'
 import type { ObjectDefJson, RegionEnvironment, RegionLight } from './mapScene'
@@ -161,6 +166,69 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
    * a single reference, since every update replaces the map.
    */
   const [regionDrafts, setRegionDrafts] = useState<Map<number, RegionDraft>>(() => new Map())
+  /** read-through for the region-load effect, which must see the CURRENT drafts
+   *  without taking `regionDrafts` as a dependency (that would re-seed the base
+   *  region's state on every unrelated neighbour edit) */
+  const regionDraftsRef = useRef(regionDrafts)
+  regionDraftsRef.current = regionDrafts
+  /** the procedural generator, opened from the picker on a selected rectangle */
+  const [generating, setGenerating] = useState(false)
+  /** The plan behind what's currently on screen, so it can be re-rolled. Held
+   *  rather than the dials because it also covers a plan Claude authored —
+   *  re-seeding a plan needs no key, no request and no money. */
+  const [lastPlan, setLastPlan] = useState<ProcPlan | null>(null)
+  const lastIndexRef = useRef<SceneryIndex | null>(null)
+  const [objectsDir, setObjectsDir] = useState<FileSystemDirectoryHandle | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      if (!world.rootHandle) return
+      const dir = await resolveEntryHandle(world.rootHandle, getEntryPath('objects')).catch(() => null)
+      if (!cancelled) setObjectsDir(dir)
+    })()
+    return () => { cancelled = true }
+  }, [world.rootHandle])
+
+  /**
+   * Take a generated area into the normal draft flow rather than writing it:
+   * the base region through its own state, every other region through
+   * `regionDrafts`. Nothing touches disk until Save, so a generation is
+   * reviewable in the 3D view and Discard throws it away.
+   */
+  function applyGeneration(result: GenerationResult, plan: ProcPlan, index?: SceneryIndex | null) {
+    // opening the panel may have just moved us into the area; say so rather
+    // than dropping the generation on the floor
+    if (!data) { setSearchMsg('still loading the area — press Apply again in a moment'); return }
+    historyRef.current.past.push(snapshot(terrain ?? data.terrain, objects ?? data.def.objects))
+    historyRef.current.future = []
+    setRegionDrafts((prev) => {
+      const next = new Map(prev)
+      for (const [id, t] of result.terrain) {
+        if (id === data.id) continue
+        next.set(id, {
+          ...(next.get(id) ?? {}),
+          terrain: t,
+          objects: result.objects.get(id) ?? [],
+          ...(result.environment.get(id) ? { env: result.environment.get(id) as RegionEnvironment } : {}),
+        })
+      }
+      return next
+    })
+    const baseTerrain = result.terrain.get(data.id)
+    if (baseTerrain) setTerrain(baseTerrain)
+    const baseObjects = result.objects.get(data.id)
+    if (baseObjects) setObjects(baseObjects)
+    const baseEnv = result.environment.get(data.id)
+    if (baseEnv) setEnvSettings({ ...(envSettings ?? {}), ...(baseEnv as RegionEnvironment) })
+    setIsDirty(true)
+    setGenerating(false)
+    setPickerOpen(false)
+    clearSelection()
+    setLastPlan(plan)
+    if (index !== undefined) lastIndexRef.current = index
+    setSearchMsg(`generated ${result.report.regions} regions (seed ${plan.seed}) — review, then Save`)
+  }
 
   /**
    * What the 3D view actually loads: the picker's rectangle when it covers
@@ -247,15 +315,29 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     // environment file back to; otherwise the 3D view shows them read-only.
     const initialLights = world.rootHandle ? (env?.lights ?? []) : null
     const initialEnv = env ? withoutLights(env) : null
+    // the baseline is always what's ON DISK — Discard returns there, whether or
+    // not an unsaved draft was carried in below
     baselineRef.current = { terrain: data.terrain, objects: data.def.objects, lights: initialLights, envSettings: initialEnv, objectDefs: new Map() }
     historyRef.current = { past: [], future: [] }
-    setTerrain(data.terrain)
-    setObjects(data.def.objects)
-    setLights(initialLights)
-    setEnvSettings(initialEnv)
+    // Walking INTO a region that already holds an unsaved draft — generated, or
+    // edited as a neighbour and then navigated to. Seed from the draft rather
+    // than disk: `handleSave` skips `data.id` when it walks `regionDrafts` and
+    // writes the base from THIS state, so seeding from disk silently dropped
+    // the edit on save.
+    //
+    // The draft entry is deliberately LEFT in place. While you stand on the
+    // region it is inert (the save loop skips it, and the scene's neighbour
+    // rebuild skips the base id too), and leaving it means walking back out
+    // still saves the edit — deleting it would turn a navigate-through that is
+    // lossless today into a discard prompt that drops the work.
+    const draft = regionDraftsRef.current.get(data.id)
+    setTerrain(draft?.terrain ?? data.terrain)
+    setObjects(draft?.objects ?? data.def.objects)
+    setLights(draft?.lights ?? initialLights)
+    setEnvSettings(draft?.env ? withoutLights(draft.env) : initialEnv)
     setObjectDefs(new Map())
     // a just-created region starts dirty — it doesn't exist on disk until saved
-    setIsDirty(unsavedNewRef.current === data.id)
+    setIsDirty(!!draft || unsavedNewRef.current === data.id)
     setSelected(null)
     setPlane(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -851,6 +933,87 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
   }
 
   /**
+   * Re-roll the area on screen: same plan, same rectangle, new seed.
+   *
+   * Variety is the thing you can only judge by seeing several, and re-opening
+   * the picker to set the same dials again is enough friction that nobody
+   * does. Re-seeding the PLAN rather than re-running the planner is what makes
+   * this free even for an area Claude designed — the plan is already here, and
+   * the generator is deterministic on (plan, seed).
+   */
+  function regenerate() {
+    if (!lastPlan || !data) return
+    const seed = Math.floor(Math.random() * 999999)
+    // the scenery index was built when the area was first generated, and is
+    // cached per cache — this never re-reads 74k object files
+    const { plan: safe } = sanitizePlan({ ...lastPlan, seed })
+    applyGeneration(generate(safe, lastIndexRef.current), safe)
+  }
+
+  /**
+   * Open the generator on the selection — after loading that rectangle into
+   * the 3D view.
+   *
+   * Loading FIRST is load-bearing, not a nicety. `applyGeneration` routes the
+   * base region through its own terrain/objects state and every other region
+   * through `regionDrafts`, and `handleSave` skips the base id when it walks
+   * the drafts. With the camera outside the rectangle, the base is a region
+   * the generation never touched and the whole result lands in drafts for
+   * regions the scene never built: invisible to review, and it used to throw
+   * the scene's rebuild chain outright. Putting the base inside the area up
+   * front means the existing apply and save paths are already correct.
+   *
+   * Unlike `loadSelection` this keeps the picker open and the selection intact
+   * — the panel renders inside the picker and reads `selRect` as its area.
+   */
+  async function openGenerate() {
+    if (!selRect || createBusy) return
+    const rect = selRect
+    const inside = rectHas(rect, regionId >> 8, regionId & 0xff)
+    // Free slots have to become real files FIRST. Generating into a region
+    // that isn't on disk can't work end to end: there's nothing to navigate
+    // to, and `handleSave` re-reads each drafted region before writing it, so
+    // the generation would be dropped at save with a per-region error.
+    const missing = missingInSelection()
+    if (isDirty && (!inside || missing.length > 0)) {
+      const ok = await confirmDialog('You have unsaved changes in this region. Discard them and move to the area you want to generate?', {
+        title: 'Unsaved changes',
+        confirmLabel: 'Discard',
+        danger: true,
+      })
+      if (!ok) return
+    }
+    if (missing.length > 0) {
+      const n = missing.length
+      const ok = await confirmDialog(
+        `${n} of the selected region${n === 1 ? " doesn't" : "s don't"} exist yet. Write ${n} new region file${n === 1 ? '' : 's'} to the maps folder now? `
+        + 'They are created blank and written immediately — the generated terrain and scenery on top of them still goes through the normal Save.',
+        { title: `Create ${n} region${n === 1 ? '' : 's'}`, confirmLabel: 'Create and generate' },
+      )
+      if (!ok) return
+      setCreateBusy(true)
+      try {
+        await writeNewRegions(missing, createFill ? { underlayId: createUnderlay } : undefined)
+      } catch (e) {
+        setPickerMsg(`couldn't create the regions — ${e instanceof Error ? e.message : e}`)
+        return
+      } finally {
+        setCreateBusy(false)
+      }
+    }
+    if (!inside) {
+      setCoords({
+        x: Math.floor((rect.x0 + rect.x1) / 2) * 64 + 32,
+        y: Math.floor((rect.y0 + rect.y1) / 2) * 64 + 32,
+        plane: 0,
+      })
+    }
+    setPickerMsg('')
+    setLoadedRect(rect)
+    setGenerating(true)
+  }
+
+  /**
    * Click toggles a cell; shift+click fills the rectangle back to the last
    * plain-clicked one. Selecting is deliberately non-destructive — nothing
    * happens to the cache until the footer's Create/Load is pressed — so an
@@ -904,12 +1067,44 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
    * picker's right-click delete: a many-region draft has no place in the
    * one-region draft/save model.
    */
-  async function createSelected() {
-    if (createBusy) return
-    const missing = selIds
+  /**
+   * Write blank region files for `missing` and fold them into `usedRegions`.
+   * Shared by the picker's Create button and by Generate, which needs the free
+   * regions on disk before it can load the area for review.
+   */
+  async function writeNewRegions(missing: { rx: number; ry: number }[], fill?: { underlayId: number }) {
+    const createdIds: number[] = []
+    for (let i = 0; i < missing.length; i++) {
+      // createRegionDef returns the encoded, JSON-ready def — the same
+      // shape saveRegion writes
+      const def = createRegionDef(missing[i].rx, missing[i].ry, fill)
+      const fh = await world.mapsDir.getFileHandle(`${def.id}.json`, { create: true })
+      const writable = await fh.createWritable()
+      await writable.write(JSON.stringify(def))
+      await writable.close()
+      createdIds.push(def.id)
+      if ((i + 1) % 16 === 0 || i === missing.length - 1) setPickerMsg(`creating regions… ${i + 1}/${missing.length}`)
+    }
+    setUsedRegions((prev) => {
+      if (!prev) return prev
+      const next = new Set(prev)
+      for (const id of createdIds) next.add(id)
+      return next
+    })
+    return createdIds
+  }
+
+  /** the selected regions that don't exist on disk yet, in creation order */
+  function missingInSelection() {
+    return selIds
       .filter((id) => !usedRegions?.has(id))
       .map((id) => ({ rx: id >> 8, ry: id & 0xff }))
       .sort((a, b) => (a.rx - b.rx) || (a.ry - b.ry))
+  }
+
+  async function createSelected() {
+    if (createBusy) return
+    const missing = missingInSelection()
     if (missing.length === 0) return
     if (isDirty) {
       const ok = await confirmDialog('You have unsaved changes in this region. Discard them and create?', {
@@ -948,24 +1143,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     if (!ok) return
     setCreateBusy(true)
     try {
-      const createdIds: number[] = []
-      for (let i = 0; i < missing.length; i++) {
-        // createRegionDef returns the encoded, JSON-ready def — the same
-        // shape saveRegion writes
-        const def = createRegionDef(missing[i].rx, missing[i].ry, fill)
-        const fh = await world.mapsDir.getFileHandle(`${def.id}.json`, { create: true })
-        const writable = await fh.createWritable()
-        await writable.write(JSON.stringify(def))
-        await writable.close()
-        createdIds.push(def.id)
-        if ((i + 1) % 16 === 0 || i === missing.length - 1) setPickerMsg(`creating regions… ${i + 1}/${missing.length}`)
-      }
-      setUsedRegions((prev) => {
-        if (!prev) return prev
-        const next = new Set(prev)
-        for (const id of createdIds) next.add(id)
-        return next
-      })
+      const createdIds = await writeNewRegions(missing, fill)
       setSearchMsg(`created ${createdIds.length} regions${already > 0 ? ` (${already} already existed)` : ''}`)
       clearSelection()
       setPickerOpen(false)
@@ -1018,6 +1196,16 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
           <button type="button" className="map-regions-btn" onClick={openRegionPicker} title="World region map — visit a region or pick a free slot to create">
             Regions
           </button>
+          {lastPlan && (
+            <button
+              type="button"
+              className="map-regions-btn"
+              onClick={regenerate}
+              title={`Re-roll this area with a new seed — same theme, dials and rectangle. Current seed ${lastPlan.seed}. Replaces the unsaved generation on screen; Discard still returns to what's on disk.`}
+            >
+              Re-roll
+            </button>
+          )}
           {/* the 3D view's Client graphics settings dropdown portals in here so
               it sits beside Regions while its state stays in MapSceneViewer */}
           <span className="map-header-gfx" ref={(el) => setGfxSlot(el)} />
@@ -1089,7 +1277,18 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
                 ? `region ${pickerHover.rx}, ${pickerHover.ry} — world ${pickerHover.rx * 64}, ${pickerHover.ry * 64} ${pickerHover.used ? '(exists)' : '(free)'}`
                 : usedRegions ? `${usedRegions.size} regions in the cache` : ''}
             </div>
-            {selRect && (
+            {selRect && generating && (
+              <GeneratePanel
+                area={selRect}
+                regionCount={selIds.length}
+                objectsDir={objectsDir}
+                rootHandle={world.rootHandle}
+                cacheFingerprint={String(usedRegions?.size ?? 0)}
+                onApply={(result, plan, index) => applyGeneration(result, plan, index)}
+                onClose={() => setGenerating(false)}
+              />
+            )}
+            {selRect && !generating && (
               <div className="map-picker-actions">
                 <span className="map-picker-selcount">
                   {rectW(selRect)}×{rectH(selRect)} — {selRect.x0},{selRect.y0} to {selRect.x1},{selRect.y1}
@@ -1110,6 +1309,17 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
                     )}
                   </>
                 )}
+                <button
+                  type="button"
+                  className="save-bar-discard"
+                  disabled={createBusy}
+                  title={selMissing > 0
+                    ? 'Generate terrain and scenery for the selected area (creates the free regions too)'
+                    : 'Generate over the selected regions — this REPLACES their terrain and placements'}
+                  onClick={() => void openGenerate()}
+                >
+                  Generate…
+                </button>
                 <button type="button" className="save-bar-discard" disabled={createBusy} onClick={clearSelection}>
                   Clear
                 </button>

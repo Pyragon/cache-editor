@@ -290,3 +290,90 @@
   color: var(--text);
   border-color: var(--electric-blue-bright, #2f8fff);
 }
+
+/* Procedural generation panel — replaces the picker's action row while it is
+   open, so the map stays visible above it and you can see the area you picked. */
+.procgen-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #2a2f3a);
+  max-width: 512px;
+}
+
+.procgen-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.procgen-head .map-picker-close {
+  margin-left: auto;
+}
+
+.procgen-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.procgen-themes {
+  gap: 4px;
+}
+
+/* Label and value share a line above the track, so the number sits with the
+   thing it describes and the tracks still line up in a row. */
+.procgen-sliders {
+  align-items: flex-start;
+}
+
+.procgen-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.procgen-slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.procgen-slider-value {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums; /* the row must not twitch while dragging */
+  opacity: 0.75;
+}
+
+.procgen-slider input[type="range"] {
+  width: 112px;
+  margin: 0;
+}
+
+.procgen-ai {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border, #2a2f3a);
+}
+
+.procgen-prompt {
+  width: 100%;
+  margin: 4px 0 8px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.procgen-error {
+  color: #ff8080;
+}
+
+.procgen-result {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #2a2f3a);
+}

@@ -135,6 +135,7 @@
    .mapscene-gfx is listed separately because the graphics dropdown portals
    into the page header, outside .mapscene. */
 .mapscene input[type='range'],
+.procgen-panel input[type='range'],
 .mapscene-gfx input[type='range'] {
   -webkit-appearance: none;
   appearance: none;
@@ -144,6 +145,7 @@
 }
 
 .mapscene input[type='range']::-webkit-slider-runnable-track,
+.procgen-panel input[type='range']::-webkit-slider-runnable-track,
 .mapscene-gfx input[type='range']::-webkit-slider-runnable-track {
   height: 3px;
   border-radius: 999px;
@@ -151,6 +153,7 @@
 }
 
 .mapscene input[type='range']::-webkit-slider-thumb,
+.procgen-panel input[type='range']::-webkit-slider-thumb,
 .mapscene-gfx input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
@@ -164,12 +167,15 @@
 
 .mapscene input[type='range']:hover::-webkit-slider-thumb,
 .mapscene input[type='range']:focus-visible::-webkit-slider-thumb,
+.procgen-panel input[type='range']:hover::-webkit-slider-thumb,
+.procgen-panel input[type='range']:focus-visible::-webkit-slider-thumb,
 .mapscene-gfx input[type='range']:hover::-webkit-slider-thumb,
 .mapscene-gfx input[type='range']:focus-visible::-webkit-slider-thumb {
   background: #6bb2ff;
 }
 
 .mapscene input[type='range']::-moz-range-track,
+.procgen-panel input[type='range']::-moz-range-track,
 .mapscene-gfx input[type='range']::-moz-range-track {
   height: 3px;
   border-radius: 999px;
@@ -177,6 +183,7 @@
 }
 
 .mapscene input[type='range']::-moz-range-thumb,
+.procgen-panel input[type='range']::-moz-range-thumb,
 .mapscene-gfx input[type='range']::-moz-range-thumb {
   width: 12px;
   height: 12px;
@@ -186,6 +193,7 @@
 }
 
 .mapscene input[type='range']:focus,
+.procgen-panel input[type='range']:focus,
 .mapscene-gfx input[type='range']:focus {
   outline: none;
 }
