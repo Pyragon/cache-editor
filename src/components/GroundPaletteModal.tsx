@@ -1,16 +1,15 @@
 // Binding the generator's ground-material roles to real ids in THIS cache.
 //
 // The cache does not name its ground materials — `config/underlays/163.json`
-// is an rgb, a texture id and a scale. So which underlay is "dead grass" is a
-// judgement only someone looking at it can make, and the generator's shipped
-// numbers are guesses (see `procgen/palette.ts`). This is where they get
-// replaced, once per cache.
+// is an rgb, a texture id and a scale. The defaults are measured rather than
+// guessed (see `procgen/palette.ts` and `docs/procgen-reference.md`); this is
+// where they get re-pointed for a cache that numbers things differently.
 //
 // The swatch shows the TEXTURE, not just the colour, because for a textured
 // material the colour is a tint and choosing by it is actively misleading:
-// underlay 163 — the one id known to be right — has an ORANGE rgb and renders
-// as green grass. Materials with no texture do draw as their flat colour, and
-// those show the chip alone.
+// underlay 163's rgb is a near-black brown and the tile reads as packed town
+// earth, while the create-region fill's 163 renders green. Materials with no
+// texture do draw as their flat colour, and those show the chip alone.
 import { useEffect, useMemo, useState } from 'react'
 import TextureThumb from './TextureThumb'
 import {
@@ -87,7 +86,7 @@ export default function GroundPaletteModal({
     const info = ROLE_INFO[role]
     const id = palette[role]
     const mat = overlay ? byId.o.get(id) : byId.u.get(id)
-    const isGuess = palette[role] === DEFAULT_PALETTE[role] && role !== 'grass'
+    const isGuess = palette[role] === DEFAULT_PALETTE[role]
     return (
       <div key={role} className="gpal-row">
         <Swatch rootHandle={rootHandle} mat={mat} />
@@ -97,7 +96,7 @@ export default function GroundPaletteModal({
         </span>
         <span className="map-picker-selcount gpal-id">
           {mat ? `id ${id}` : `id ${id} — not in this cache`}
-          {isGuess && <span className="gpal-guess" title="Still the shipped guess — nobody has looked at it"> guess</span>}
+          {isGuess && <span className="gpal-guess" title="Still the surveyed default — measured from the real map, but nobody has checked it against THIS cache"> default</span>}
         </span>
         <button type="button" className="save-bar-discard" onClick={() => { setChoosing(role); setFilter('') }}>
           Choose…
@@ -124,10 +123,11 @@ export default function GroundPaletteModal({
         {mats && !choosing && (
           <>
             <p className="tex-op-note">
-              The generator plans in words — “dirt”, “dead grass” — and these bindings
-              turn them into ids for this cache. The cache names none of its ground
-              materials, so only you can say which is which. Saved per cache; you only
-              do this once.
+              The generator plans in words — “dirt”, “town ground” — and these
+              bindings turn them into ids. The defaults were measured from the real
+              map (15 settlements, ~550k tiles; see docs/procgen-reference.md), so
+              they should already be close. Change any that read wrong here. Saved
+              per cache; you only do this once.
             </p>
             <div className="gpal-list">
               {UNDERLAY_ROLES.map((r) => roleRow(r, false))}

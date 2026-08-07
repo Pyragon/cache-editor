@@ -5,10 +5,12 @@
  * `tree_oak` rather than an object id (see `scenery.ts`). Ids differ between
  * caches, mean nothing to a language model, and make a plan unportable.
  *
- * What a role binds to is a judgement only a human looking at the material can
- * make: the cache's own data does not say which underlay is "dead grass". The
- * shipped numbers are therefore GUESSES with one exception, and the picker
- * exists so they can be replaced by real choices, once per cache.
+ * The cache does not say which underlay is "dead grass" — it says rgb, texture
+ * and scale. So the bindings were MEASURED rather than guessed: 15 settlements
+ * and their surrounding countryside were surveyed straight from the map dumps,
+ * and each role given the material that actually fills that job in the game.
+ * The working is in `docs/procgen-reference.md`. The picker exists to re-point
+ * them for a cache that numbers things differently.
  *
  * ## Definition ids, not stored bytes
  *
@@ -22,10 +24,11 @@ import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
 
 /** Roles backed by an UNDERLAY — the base material of a tile. */
 export const UNDERLAY_ROLES = [
-  'grass', 'grassDead', 'dirt', 'mud', 'sand', 'gravel', 'stone', 'snow',
+  'grass', 'grassLush', 'grassMid', 'grassDark', 'grassDead',
+  'dirt', 'mud', 'townEarth', 'trackEarth', 'sand', 'gravel', 'stone', 'snow',
 ] as const
 /** Roles backed by an OVERLAY — drawn on top of the underlay, often shaped. */
-export const OVERLAY_ROLES = ['path', 'water', 'rock'] as const
+export const OVERLAY_ROLES = ['path', 'pathDirt', 'water', 'rock'] as const
 
 export type UnderlayRole = typeof UNDERLAY_ROLES[number]
 export type OverlayRole = typeof OVERLAY_ROLES[number]
@@ -39,37 +42,52 @@ export type GroundPalette = Record<PaletteRole, number>
  * this text is the only thing telling you what you are choosing.
  */
 export const ROLE_INFO: Record<PaletteRole, { label: string; blurb: string }> = {
-  grass: { label: 'Grass', blurb: 'Living green grass. The default ground of a healthy area.' },
-  grassDead: { label: 'Dead grass', blurb: 'Dry, yellowed or blighted grass. The ground of gloomy and burnt places.' },
-  dirt: { label: 'Dirt', blurb: 'Bare earth. Worn ground, clearings, and the floor of a settlement.' },
-  mud: { label: 'Mud', blurb: 'Wet, dark earth. Low ground, hollows, swamp and marsh.' },
+  grass: { label: 'Grass', blurb: 'The workhorse green. Measured as the most consistent ground across every surveyed settlement.' },
+  grassLush: { label: 'Lush grass', blurb: 'A brighter, greener relative. Used sparingly in the mix to keep a field from reading as one flat colour.' },
+  grassMid: { label: 'Mid grass', blurb: 'The third green. The real map leans on near-identical variants of the same colour to stop ground repeating, and this is one of them.' },
+  grassDark: { label: 'Dark grass', blurb: 'The deepest green. Commonest single underlay in the real map; the base of most open country.' },
+  grassDead: { label: 'Dry grass', blurb: 'Parched, yellowed grass. Hot and rough country, and the ground of blighted places.' },
+  dirt: { label: 'Dirt', blurb: 'Mid-brown bare earth. Worn ground, clearings and field edges.' },
+  mud: { label: 'Mud', blurb: 'Dark wet earth. Hollows and low ground - and in the real map, also what shows on steep slopes.' },
+  trackEarth: { label: 'Track earth', blurb: 'The bare brown ground a country track is worn into. In the real map an unpaved road is this underlay with no overlay at all - not a paved surface.' },
+  townEarth: { label: 'Town ground', blurb: 'The packed earth of a settlement floor. Three times commoner inside a town than outside one, so it is what marks somewhere as built-up.' },
   sand: { label: 'Sand', blurb: 'Loose pale sand. Beaches, shores and dunes.' },
-  gravel: { label: 'Gravel', blurb: 'Loose stone chips. Quarry floors and hard standing.' },
-  stone: { label: 'Stone', blurb: 'Solid rock. Cliffs, steep slopes and highland tops.' },
-  snow: { label: 'Snow', blurb: 'Snow or ice.' },
-  path: { label: 'Path', blurb: 'The worn track a route is drawn with. In the wilds this wants to be dirt, not paving.' },
-  water: { label: 'Water', blurb: 'Water surface, painted below the plan\'s water level.' },
+  gravel: { label: 'Gravel', blurb: 'Loose stone chips. Quarry floors, hard standing and reserved building plots.' },
+  stone: { label: 'Stone', blurb: 'Bare rocky ground. Coastal rock, highland tops and cliff shoulders.' },
+  snow: { label: 'Snow', blurb: 'Snow or ice, for high ground.' },
+  path: { label: 'Path', blurb: 'The main road surface. Wants to be one that blends into the ground at its edges rather than cutting a hard border.' },
+  pathDirt: { label: 'Dirt track', blurb: 'The rougher, shorter-run road surface - what a track in open country is made of, as opposed to a road through a town.' },
+  water: { label: 'Water', blurb: "Water surface, painted below the plan's water level." },
   rock: { label: 'Exposed rock', blurb: 'Rock face showing through on steep ground.' },
 }
 
 /**
- * Shipped guesses. **Only `grass` is known right** — 163 is what the
- * create-region fill writes (as byte 164) and it is Lumbridge grass. Every
- * other number is a placeholder that happened to be plausible, and is exactly
- * what the picker is for.
+ * MEASURED, not guessed. Every id below was read out of the real map dumps -
+ * 15 settlements and their surrounding countryside, ~550k tiles - and picked
+ * as the material that actually fills that role in the game. The working is in
+ * `docs/procgen-reference.md`.
+ *
+ * They remain defaults rather than constants: another cache or revision can
+ * number these differently, which is what the picker is for.
  */
 export const DEFAULT_PALETTE: GroundPalette = {
-  grass: 163,
-  grassDead: 163,
-  dirt: 21,
-  mud: 21,
-  sand: 32,
-  gravel: 46,
-  stone: 46,
-  snow: 58,
-  path: 3,
-  water: 5,
-  rock: 14,
+  grass: 48,        // #58680b olive - 11-20% of every zone surveyed
+  grassLush: 47,    // #35720a brighter green
+  grassMid: 160,    // #29380f - third commonest underlay in the real map (10.7% of open)
+  grassDark: 162,   // #20250a - the commonest single underlay in the real map
+  grassDead: 49,    // #78680b dry yellow-olive - 56% of built Brimhaven
+  dirt: 63,         // #644e1e mid brown
+  mud: 62,          // #3d2b0b dark brown - also the steep-slope material
+  townEarth: 163,   // #1c1813 - 18.5% of built tiles vs 5.9% of open
+  trackEarth: 64,   // #654d0b tex 510 - long thin runs, 75% of them away from buildings
+  sand: 61,         // #d0c074 - 28% of open Brimhaven
+  gravel: 95,       // #4b3e14
+  stone: 54,        // #767676 - 19% of open Rimmington, the rocky coast
+  snow: 25,         // #e6e6eb - the high ground above Catherby and Taverley
+  path: 235,        // #35302d tex 928, blends - 96 components, mean span 33 tiles
+  pathDirt: 187,    // #4e4329 tex 441, blends - the rougher track
+  water: 111,       // #60769a
+  rock: 81,         // #5c5444 - 17% of overlays on slopes above 10
 }
 
 /** A material as the picker shows it. */
@@ -109,10 +127,12 @@ export function savePalette(fingerprint: string, palette: GroundPalette) {
   } catch { /* storage blocked — the palette still applies for this session */ }
 }
 
-/** Which roles are still on their shipped guess, for the "unset" warning. */
+/** Roles nobody has looked at for THIS cache - still on the surveyed default.
+ *  Not wrong, just unreviewed: the defaults were measured from the real map,
+ *  so they are a good starting point rather than a placeholder. */
 export function unboundRoles(palette: GroundPalette): PaletteRole[] {
   return (Object.keys(ROLE_INFO) as PaletteRole[])
-    .filter((r) => palette[r] === DEFAULT_PALETTE[r] && r !== 'grass')
+    .filter((r) => palette[r] === DEFAULT_PALETTE[r])
 }
 
 async function readAll(dir: FileSystemDirectoryHandle): Promise<Record<string, unknown>[]> {

@@ -307,6 +307,9 @@ function bakedSunOf(env: RegionEnvironment | null): string {
 export type RegionDraft = {
   objects?: LocEntry[]
   terrain?: MapTerrain
+  /** the riverbed under this region's water. Without it the water shader's
+   *  alpha is 0 and the sea renders invisible — see `computeWaterDepth`. */
+  underwater?: MapTerrain
   lights?: RegionLight[]
   env?: RegionEnvironment
 }
@@ -821,7 +824,11 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
   const [brightnessPref, setBrightnessPref] = useState(3)
   const brightnessMulRef = useRef(1)
   brightnessMulRef.current = 0.7 + 0.1 * brightnessPref
-  const [fogOn, setFogOn] = useState(true)
+  // Off by default while the generator is being worked on: fog hides the far
+  // half of an area, which is exactly what you need to see when judging
+  // whether a path reaches the far side or an island has a coastline. It is a
+  // live knob (no rebuild), so turning it back on in Graphics costs nothing.
+  const [fogOn, setFogOn] = useState(false)
   const [fogTiles, setFogTiles] = useState(40)
   // refs so the build effect can apply the current values without depending on
   // them (a fog tweak must not rebuild the scene)
@@ -2370,7 +2377,12 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
         // edits survive a 2D/3D toggle); `let` because brush rebuilds swap it
         let currentTerrain = terrainPropRef.current ?? data.terrain
         lastBuiltTerrainRef.current = terrainPropRef.current
-        const cells: Cell[] = [{ dx: 0, dy: 0, def: data.def, terrain: currentTerrain, underwater: data.underwaterTerrain }]
+        const baseRegionId = (data.def.regionX << 8) | data.def.regionY
+        const baseDraftUw = regionDraftsRef.current?.get(baseRegionId)?.underwater
+        const cells: Cell[] = [{
+          dx: 0, dy: 0, def: data.def, terrain: currentTerrain,
+          underwater: baseDraftUw ?? data.underwaterTerrain,
+        }]
         const regionGrid: (Cell['terrain'] | null)[][] =
           Array.from({ length: gridW }, () => Array<Cell['terrain'] | null>(gridH).fill(null))
         regionGrid[offX][offY] = currentTerrain
@@ -2397,7 +2409,13 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
                 const cellEnv = inBuild && data.rootHandle
                   ? await loadRegionEnvironment(data.rootHandle, id).catch(() => null)
                   : null
-                cells.push({ dx, dy, def, terrain, underwater: decodeUnderwaterTerrain(def), lights: cellEnv?.lights })
+                cells.push({
+                  dx, dy, def, terrain,
+                  // as with `terrain` above: a drafted region enters the build
+                  // as DRAFTED, or its generated sea has no bed and vanishes
+                  underwater: regionDraftsRef.current?.get(id)?.underwater ?? decodeUnderwaterTerrain(def),
+                  lights: cellEnv?.lights,
+                })
                 regionGrid[dx + offX][dy + offY] = terrain
               } catch { /* neighbour not dumped */ }
             }
@@ -3747,7 +3765,10 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
             setMinimapVersion((v) => v + 1)
           }
 
-          const uwCenter = isCentre ? data.underwaterTerrain : cellRec?.underwater
+          const rebuildId = (data.def.regionX + cellDx) << 8 | (data.def.regionY + cellDy)
+          const draftUw = regionDraftsRef.current?.get(rebuildId)?.underwater
+          const uwCenter = draftUw ?? (isCentre ? data.underwaterTerrain : cellRec?.underwater)
+          if (cellRec && draftUw) cellRec.underwater = draftUw
           const uwDepthCenter = uwCenter ? computeWaterDepth(uwCenter) : undefined
           const riverbedCenter = uwCenter && uwDepthCenter
             ? computeRiverbedHeights(cellHeights, uwDepthCenter) : undefined
@@ -4174,7 +4195,7 @@ export default function MapSceneViewer({ data, focus, objects, terrain, lights, 
       if (id === baseId) continue
       // env-only edits (fog/bloom/sun colour) don't need a rebake; the ones
       // that do (sun direction/ambient) come through as a terrain/objects edit
-      if (!draft.objects && !draft.terrain && !draft.lights) continue
+      if (!draft.objects && !draft.terrain && !draft.lights && !draft.underwater) continue
       if (lastBuiltDraftsRef.current.get(id) === draft) continue
       // Loadedness is the SCENE's record, not the draft's: `draft.terrain ??
       // cellTerrainRef…` short-circuited whenever the draft carried terrain, so

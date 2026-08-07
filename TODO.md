@@ -399,6 +399,43 @@ real cache, in rough risk order:
 - **World map preview** — render a visual of the area's rects (game-world rectangles → their map placement) so you can see what region of the world an area covers instead of reading raw coordinates. Could start as a simple 2D canvas plotting the rects to scale, and eventually underlay actual map tiles.
 - **Revisit world-map icons (2026-07-25).** `map_areas/static_elements` pins were being drawn on the 3D view's minimap behind a "World-map icons" toggle; the toggle is now gone and they're simply not drawn, because the quest markers among them (icon sprite 1692 — every "Start of …"/"Route to …", all `displayedOnMinimap: false`) are 52×52 cyan crosses that bury the map. Lumbridge alone stacks ten around the castle. They still deserve a home, just not there — the natural one is the **world map preview** above, which is what they're actually indexed for. Note the set is mixed: of Lumbridge's 24 static elements, 14 *are* flagged `displayedOnMinimap: true` (bank/altar-style pins, several with `defaultIconArchive: -1` and so no icon at all), so whatever surfaces them should split the two rather than showing the lot. `MapSceneViewer.tsx`'s copy of the loader (`staticElements`/`staticBitmaps` — scanned `map_areas/static_elements`, filtered to the centre region, resolved each `areaId` to its icon) went with the draw; recover it from git history if it's useful. The `AreaViewer` page still loads the same data independently via `map_areas.ts`'s `staticElementsDir`, so nothing else regressed.
 
+## Learning the real map (planned 2026-08-07 — read `docs/map-learning.md` FIRST)
+
+The full plan, Cody's stated goals, and every supporting measurement live in
+`docs/map-learning.md`. Do not redesign any of this without reading it — the
+measurements are real and several of them overturn intuitions.
+
+Headline: proc-gen currently picks objects by **name substring**, so it places
+objects the game itself never places (5 of 9 probed ids appear **nowhere** in
+the map: three Torches, Beanstump, Ivy stump, Rock 11634). 27% of the object
+table — 20,329 of 73,913 — is never placed anywhere.
+
+- **Frequency prior — BUILT 2026-08-07, untested in the browser.** Reads
+  `maps/` once per cache; drops never-placed and ≥80%-indoor candidates, then
+  samples by `uses × (1 − indoor)`. See `docs/map-learning.md` §11 for the
+  measured before/after. **Needs a browser run**: the maps scan is 2,413 files
+  and has only been verified offline. Watch the one-off index time.
+- **The mine** — all 2,413 regions, **all planes** (every survey so far read
+  plane 0 only, ignoring 29% of the map). Emits: the context model, the WFC
+  wall grammar, footprint vocabulary, room stats, relational path stats, and
+  the trunk→canopy id map.
+- **Context-driven species selection** — replaces name matching. This is what
+  fixes the wrong torches / snowy rocks / rainforest stumps on the island.
+- **Building synthesis (NOT prefabs)** — Cody asked three times for buildings
+  deduced from the corpus, never stamped copies. Six layers; WFC covers only
+  wall realization. Grammar already measured: 50 structure cells, 12 covering
+  95%, 708 adjacencies (14% permissive), median 4 wall object ids per building.
+- **Furnishing** — nearly free; the wall-distance distributions are already
+  measured (armour 98% against a wall, lamps 94%, pillars 0%, benches 9%).
+- **Two-part trees — BUILT 2026-08-07, untested in the browser.** Oak, yew,
+  evergreen and tropical trees now emit their plane-1 canopy (a different
+  object id) alongside the trunk, same shape and rotation. Map harvested from
+  the real map at 97-100% pair rates.
+- **Vertical / upper storeys** — BLOCKED on an unknown: how the cache
+  represents an upper-storey floor or opening is untraced. Verify against
+  darkan-bot-refactor before designing on top of it. This blocks *buildings*
+  only — canopies needed no floor concept and are done.
+
 ## Multi-region editing (BUILT 2026-08-06 — untested in the browser)
 
 Everything LOADED is editable: placements, terrain, point lights, environment,

@@ -48,8 +48,14 @@ export type SpeciesId =
   // trees
   | 'tree' | 'tree_oak' | 'tree_willow' | 'tree_maple' | 'tree_yew' | 'tree_magic'
   | 'tree_dead' | 'tree_burnt' | 'tree_stump' | 'tree_fallen' | 'tree_evergreen' | 'tree_palm'
+  // Jungle/tropical variants are their own species, not members of the generic
+  // buckets. Karamja is dense enough that weighting by real usage made tropical
+  // trees ~30% of ALL trees and jungle grass 77% of all grass tufts — so a
+  // snowfield grew jungle. See `docs/map-learning.md`.
+  | 'tree_tropical'
   // undergrowth
   | 'bush' | 'fern' | 'plant' | 'flowers' | 'reeds' | 'grass_tuft' | 'mushroom'
+  | 'grass_jungle' | 'plant_jungle'
   // stone
   | 'rock_small' | 'rock_large' | 'boulder' | 'rubble' | 'stalagmite'
   // ore-bearing
@@ -123,8 +129,14 @@ export type ScatterRule = {
   clustering?: number
   /** minimum tiles between two placements */
   spacing?: number
-  /** don't place on these */
+  /** don't place on these. `zone` means EVERY zone; for "everywhere except the
+   *  quarry" use `avoidZoneIds` instead */
   avoid?: ('path' | 'plot' | 'water' | 'zone' | 'barrier')[]
+  /** zones this rule must stay OUT of, by id. Without it a forest rule happily
+   *  fills a mine pit with trees and mushrooms — the only controls were "this
+   *  one zone only" or "no zones at all", neither of which is what a wood
+   *  growing around a quarry needs. */
+  avoidZoneIds?: string[]
   /** only place where the ground qualifies */
   maxSlope?: number
   minHeight?: number
@@ -167,8 +179,17 @@ export type PathLighting = {
 }
 
 export type PathSpec = {
-  /** overlay painted along the route */
-  overlayId: number
+  /** overlay painted along the route. Optional: a country track in the real
+   *  map is an UNDERLAY with no overlay at all — the overlays that survived a
+   *  long-and-thin search are paved roads, which is why an unpaved woodland
+   *  track drawn with one looked like tarmac. */
+  overlayId?: number
+  /** underlay under the PAVED part of the route. Measured: 57% of the tiles
+   *  under a real path overlay are town earth. */
+  underlayId?: number
+  /** underlay for the route where it runs OUTSIDE a zone, drawn with no
+   *  overlay at all — which is what a country track is in the real map. */
+  openUnderlayId?: number
   /** tiles across in open country */
   width?: number
   /** tiles across INSIDE a zone — a road is only wide where the traffic and
@@ -283,6 +304,22 @@ export type TerrainSpec = {
   ridged?: boolean
   /** normalized height below which water overlay is painted */
   waterLevel?: number
+  /**
+   * The SHAPE of the landmass, as opposed to its texture.
+   *
+   * Without this, `waterLevel` is just a percentile of fractal noise, and
+   * fractal basins are scattered — so "coastal" produced up to 23 disconnected
+   * ponds and a water share that swung from 3% to 25% between seeds of the
+   * same theme. That is a marsh, not a shore, and an island cannot be
+   * expressed at all because nothing pushes water to the OUTSIDE.
+   *
+   * `coast` biases the land along `coastAngle`; `island` biases it radially.
+   * The noise still perturbs the result, so the shoreline wanders rather than
+   * being a clean line or circle.
+   */
+  landform?: 'inland' | 'coast' | 'island' | 'lakes'
+  /** degrees; the direction the open sea lies in for `coast`. 0 = east. */
+  coastAngle?: number
 }
 
 export type ProcPlan = {
@@ -309,6 +346,15 @@ export type ProcPlan = {
 
 /** Everything a generation produced, ready for the normal draft/save path. */
 export type GenerationResult = {
+  /**
+   * The underwater ("um") layer, per region — the riverbed under the water
+   * overlay. Not decoration: the water shader's alpha is derived ENTIRELY from
+   * depth (`shore` and `depthFade` both come from it), so water with no
+   * underwater layer renders at alpha 0 and you see through the sea to the
+   * skybox. The real map pairs them everywhere — Port Sarim has 2,333 water
+   * tiles and 2,279 underwater heights.
+   */
+  underwater: Map<number, import('../loaders/maps').MapTerrain>
   /** region id → its new terrain */
   terrain: Map<number, import('../loaders/maps').MapTerrain>
   /** region id → its new placements */
@@ -319,6 +365,8 @@ export type GenerationResult = {
   report: {
     regions: number
     placements: number
+    /** plane-1 canopy locs emitted alongside two-part trees */
+    canopies?: number
     zones: { id: string; kind: ZoneKind; tiles: number }[]
     plots: { zoneId: string; x: number; y: number; w: number; h: number; purpose?: string }[]
     unresolved: SpeciesId[]

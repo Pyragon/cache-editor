@@ -43,6 +43,8 @@ type Field = {
   /** material byte a reserved plot pad is paved with; 0 = leave the ground */
   plotMat: Uint8Array
   isWater: Uint8Array
+  /** tiles from the nearest land, for water only; 0 on land */
+  waterDist: Uint16Array
   occupied: Uint8Array
   /** zone index + 1 per tile, 0 = none */
   zoneAt: Uint16Array
@@ -89,8 +91,36 @@ function buildHeights(plan: ProcPlan, f: Field) {
   const t = plan.terrain
   const scale = Math.max(4, t.featureScale)
   const base = t.baseHeight ?? 40
+  const form = t.landform ?? 'inland'
+  const shaped = form === 'coast' || form === 'island'
+  const ang = ((t.coastAngle ?? 0) * Math.PI) / 180
+  const sx = Math.cos(ang), sy = Math.sin(ang)
+  const halfW = f.w / 2, halfH = f.h / 2
+  const reach = Math.max(halfW, halfH)
+
+  /**
+   * How much LAND there should be here, 1 inland to 0 out at sea.
+   *
+   * This is the whole difference between "there is some water" and "this is an
+   * island". `waterLevel` alone is a percentile of fractal noise, and fractal
+   * basins are scattered, so it yields ponds wherever the noise happens to dip
+   * — never a coherent shore, and never a landmass with sea all round it.
+   */
+  const landMask = (x: number, y: number): number => {
+    if (form === 'coast') {
+      // signed distance along the sea direction, -1 (open sea) to 1 (inland)
+      const proj = ((x - halfW) * sx + (y - halfH) * sy) / reach
+      return smoothstep(-0.9, 0.2, proj)
+    }
+    // island: radial, on the ellipse of the area so a non-square area still
+    // gets an island rather than a stripe
+    const r = Math.hypot((x - halfW) / halfW, (y - halfH) / halfH)
+    return 1 - smoothstep(0.62, 1.15, r)
+  }
+
   let min = Infinity
   let max = -Infinity
+  const unitField = shaped ? new Float32Array(f.w * f.h) : null
   for (let x = 0; x < f.w; x++) {
     for (let y = 0; y < f.h; y++) {
       const n = warpedFbm(plan.seed, x / scale, y / scale, t.warp ?? 0.5, {
@@ -99,15 +129,33 @@ function buildHeights(plan: ProcPlan, f: Field) {
         ridged: t.ridged,
       })
       // ridged fbm is already 0..1; plain fbm is -1..1
-      const unit = t.ridged ? n : (n + 1) / 2
+      let unit = t.ridged ? n : (n + 1) / 2
+      const i = idx(f, x, y)
+      if (shaped) {
+        const m = landMask(x, y)
+        // The noise stays in play so the shoreline WANDERS: a mask alone would
+        // give a ruled coast or a perfect circle, which is its own tell.
+        unit = unit * (0.35 + 0.65 * m) - (1 - m) * 0.6
+        unitField![i] = unit
+        unit = Math.max(0, unit)
+      }
       const v = base + unit * t.amplitude
-      f.height[idx(f, x, y)] = v
+      f.height[i] = v
       if (v < min) min = v
       if (v > max) max = v
     }
   }
-  const span = Math.max(1, max - min)
-  for (let i = 0; i < f.height.length; i++) f.norm[i] = (f.height[i] - min) / span
+  if (shaped) {
+    // Absolute, not stretched to the area's own range: with a landform the
+    // water level has to mean the same depth on every seed, or the sea covers
+    // 3% of one island and 25% of the next.
+    for (let i = 0; i < f.norm.length; i++) {
+      f.norm[i] = Math.max(0, Math.min(1, unitField![i]))
+    }
+  } else {
+    const span = Math.max(1, max - min)
+    for (let i = 0; i < f.height.length; i++) f.norm[i] = (f.height[i] - min) / span
+  }
 }
 
 function computeSlopes(f: Field) {
@@ -332,15 +380,23 @@ function routePath(
     if (cur === goal) break
     const cx = Math.floor(cur / f.h)
     const cy = cur % f.h
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    // 8-connected. With only four moves the cheapest route between two points
+    // is a staircase of right angles no matter what the cost field says — the
+    // router simply has no way to express "head north-east". Diagonals cost
+    // their true length so a straight run is still preferred over a zigzag.
+    for (const [dx, dy] of [
+      [1, 0], [-1, 0], [0, 1], [0, -1],
+      [1, 1], [1, -1], [-1, 1], [-1, -1],
+    ] as const) {
       const nx = cx + dx
       const ny = cy + dy
       if (!inBounds(f, nx, ny)) continue
       const ni = idx(f, nx, ny)
       if (seen[ni]) continue
+      const diag = dx !== 0 && dy !== 0
       const climb = Math.abs(f.height[ni] - f.height[cur])
       // water is crossable but expensive; a bridge is a prefab problem
-      let step = 1 + climb * 0.9 + (f.isWater[ni] ? 12 : 0)
+      let step = (diag ? 1.414 : 1) + climb * 0.9 + (f.isWater[ni] ? 12 : 0)
       if (wander) step += wander[ni] * wanderStrength
       if (avoid && avoid[ni]) step += 8
       if (f.isPath[ni]) step *= 0.35 // braid into existing routes
@@ -361,6 +417,97 @@ function routePath(
   const out: number[] = []
   for (let i = goal; i !== -1; i = prev[i]) out.push(i)
   return out.reverse()
+}
+
+/**
+ * Which of a tile's four corners an overlay shape covers, per `MapLoader`'s
+ * own table (mirrored from `mapScene`'s OVERLAY_SHAPE_COVERS). Row = shape,
+ * column = vertex id 0-7; a rotation maps a corner to `(corner + 2*rot) & 7`.
+ */
+const SHAPE_COVERS: boolean[][] = [
+  [true, true, true, true, true, true, true, true],
+  [true, true, true, false, false, false, true, true],
+  [true, false, false, false, false, true, true, true],
+  [false, false, true, true, true, true, false, false],
+  [true, true, true, true, true, true, false, false],
+  [true, true, true, false, false, true, true, true],
+  [true, true, false, false, false, true, true, true],
+  [true, true, false, false, false, false, false, true],
+  [false, true, true, true, true, true, true, true],
+  [true, false, false, false, true, true, true, true],
+  [true, true, true, true, true, false, false, false],
+  [true, true, true, false, false, false, false, false],
+]
+
+/** corner ids in position space: 0=SW, 2=SE, 4=NE, 6=NW */
+const CORNERS = [0, 2, 4, 6] as const
+
+/**
+ * corner-set bitmask (bit i = CORNERS[i] is covered) -> the (shape, rotation)
+ * that draws exactly it. Built once; 0 and 15 are handled by the caller.
+ */
+const SHAPE_FOR_MASK: (number | null)[] = (() => {
+  const out: (number | null)[] = new Array(16).fill(null)
+  // prefer LOW shape ids and low rotations for stability, and skip shape 0
+  // (full tile) so it never wins a partial mask
+  for (let shape = 11; shape >= 1; shape--) {
+    for (let rot = 3; rot >= 0; rot--) {
+      let mask = 0
+      for (let c = 0; c < 4; c++) {
+        if (SHAPE_COVERS[shape]?.[(CORNERS[c] + 2 * rot) & 0x7]) mask |= 1 << c
+      }
+      if (mask !== 0 && mask !== 15) out[mask] = (shape << 2) | rot
+    }
+  }
+  return out
+})()
+
+/**
+ * Round the corners of a PAVED road.
+ *
+ * A route is a chain of tiles, and painting each as a full-tile overlay keeps
+ * every bend square. The real map paints only 57% of its path tiles full; the
+ * rest are diagonal halves and quarters, and that is what rounds a corner.
+ *
+ * Two things this deliberately does NOT do, both learned the hard way:
+ *
+ * - It never adds overlay to a tile that had none. An earlier version filled
+ *   the inside of a bend with a quarter-tile of paving, which on an unpaved
+ *   country track — underlay only, no overlay anywhere — stamped isolated grey
+ *   diamonds along a dirt road. And once routing went 8-connected almost every
+ *   step became diagonal, so that condition fired at nearly every neighbouring
+ *   tile and drew a chequerboard rather than the odd rounded corner.
+ * - It leaves underlay-only tracks alone entirely. Tile shapes belong to
+ *   overlays; an underlay is always a full tile, so a track's curve has to come
+ *   from the route, which is what the diagonal routing is for.
+ */
+function shapePathCorners(f: Field, spec: ProcPlan['paths']) {
+  if (!spec || spec.overlayId === undefined) return
+  const was = Uint8Array.from(f.isPath)
+  const at = (x: number, y: number) => (inBounds(f, x, y) ? was[idx(f, x, y)] : 0)
+  // corner c sits between these two orthogonal neighbours
+  const NB: readonly (readonly [number, number, number, number])[] = [
+    [-1, 0, 0, -1], // SW: W and S
+    [1, 0, 0, -1],  // SE: E and S
+    [1, 0, 0, 1],   // NE: E and N
+    [-1, 0, 0, 1],  // NW: W and N
+  ]
+  for (let x = 0; x < f.w; x++) {
+    for (let y = 0; y < f.h; y++) {
+      const i = idx(f, x, y)
+      // paved tiles only — an unpaved track has no overlay to shape
+      if (!was[i] || !f.overlay[i]) continue
+      let mask = 0
+      for (let c = 0; c < 4; c++) {
+        const [ax, ay, bx, by] = NB[c]
+        // keep the corner unless BOTH its edge neighbours are off the path
+        if (at(x + ax, y + ay) || at(x + bx, y + by)) mask |= 1 << c
+      }
+      if (mask === 15 || mask === 0) continue
+      const sr = SHAPE_FOR_MASK[mask]
+      if (sr != null) f.shapeRot[i] = sr
+    }
+  }
 }
 
 function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: GenerationResult): number[][] {
@@ -443,7 +590,15 @@ function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
           if (!inBounds(f, px, py)) continue
           const pi = idx(f, px, py)
           f.isPath[pi] = 1
-          f.overlay[pi] = materialByte(spec.overlayId)
+          // Paved only where the traffic is. `settled` is a property of the
+          // whole PLAN, so keying the surface off it paved every track in the
+          // area the moment one village existed — a dirt road through a wood
+          // came out as tarmac. This is the same per-tile zone test the width
+          // already uses.
+          const paved = f.zoneAt[pi] > 0
+          const under = paved ? spec.underlayId : spec.openUnderlayId ?? spec.underlayId
+          if (under !== undefined) f.underlay[pi] = materialByte(under)
+          f.overlay[pi] = paved && spec.overlayId !== undefined ? materialByte(spec.overlayId) : 0
           f.shapeRot[pi] = 0
         }
       }
@@ -556,7 +711,9 @@ function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
       const cx = Math.floor(cur / f.h)
       const cy = cur % f.h
       let next = -1
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      for (const [dx, dy] of [
+        [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1],
+      ] as const) {
         const nx = cx + dx
         const ny = cy + dy
         if (!inBounds(f, nx, ny)) continue
@@ -687,6 +844,7 @@ function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
     pads++
   }
 
+  shapePathCorners(f, spec)
   computeSlopes(f)
   return routes
 }
@@ -715,7 +873,10 @@ function paintGround(plan: ProcPlan, f: Field, rnd: () => number) {
       for (const band of plan.ground) {
         if (!bandMatches(band, x, y)) continue
         const pick = pickWeighted(band.underlay, rnd)
-        if (pick) f.underlay[i] = materialByte(pick.underlayId)
+        // paths are painted BEFORE the ground bands and carry their own
+        // underlay now (a country track IS its underlay), so the bands must
+        // not paint over them
+        if (pick && !f.isPath[i]) f.underlay[i] = materialByte(pick.underlayId)
         if (band.overlayId !== undefined && !f.isPath[i]) {
           f.overlay[i] = materialByte(band.overlayId)
           f.shapeRot[i] = 0
@@ -736,6 +897,18 @@ function paintGround(plan: ProcPlan, f: Field, rnd: () => number) {
       if (f.plotMat[i] && !f.isPath[i]) f.underlay[i] = f.plotMat[i]
     }
   }
+  // A band can paint the water overlay on tiles the water LEVEL never marked
+  // (its own maxHeight is a separate test), and those tiles then had no
+  // riverbed and rendered invisible. Anything wearing the water overlay is
+  // water — for the seabed, and for scatter avoidance.
+  const waterOverlayByte = (() => {
+    const b = plan.ground.find((g) => g.overlayId !== undefined && g.maxHeight !== undefined)
+    return b?.overlayId !== undefined ? materialByte(b.overlayId) : 0
+  })()
+  if (waterOverlayByte) {
+    for (let i = 0; i < f.overlay.length; i++) if (f.overlay[i] === waterOverlayByte) f.isWater[i] = 1
+  }
+
   // water last so nothing overwrites it
   const level = plan.terrain.waterLevel
   if (level !== undefined) {
@@ -745,6 +918,46 @@ function paintGround(plan: ProcPlan, f: Field, rnd: () => number) {
         f.isWater[i] = 1
         if (waterBand?.overlayId !== undefined) f.overlay[i] = materialByte(waterBand.overlayId)
       }
+    }
+    computeWaterDistance(f)
+  }
+}
+
+/**
+ * Tiles from the nearest LAND, for every water tile (multi-source BFS off the
+ * coastline). Drives the riverbed: real water is shallow at the shore and
+ * deepens offshore, which is what makes the shader fade a beach to clear and
+ * hold the open sea opaque.
+ */
+function computeWaterDistance(f: Field) {
+  const n = f.w * f.h
+  const q = new Int32Array(n)
+  let qh = 0
+  let qt = 0
+  f.waterDist.fill(0)
+  const seen = new Uint8Array(n)
+  // sources: land tiles that touch water
+  for (let x = 0; x < f.w; x++) {
+    for (let y = 0; y < f.h; y++) {
+      const i = idx(f, x, y)
+      if (f.isWater[i]) continue
+      seen[i] = 1
+      q[qt++] = i
+    }
+  }
+  while (qh < qt) {
+    const cur = q[qh++]
+    const cx = Math.floor(cur / f.h)
+    const cy = cur % f.h
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = cx + dx
+      const ny = cy + dy
+      if (!inBounds(f, nx, ny)) continue
+      const ni = idx(f, nx, ny)
+      if (seen[ni]) continue
+      seen[ni] = 1
+      f.waterDist[ni] = Math.min(65535, f.waterDist[cur] + 1)
+      q[qt++] = ni
     }
   }
 }
@@ -768,6 +981,10 @@ function eligible(f: Field, rule: ScatterRule, zones: Zone[], x: number, y: numb
   if (rule.zoneId) {
     const zi = zones.findIndex((z) => z.id === rule.zoneId)
     if (zi < 0 || f.zoneAt[i] !== zi + 1) return false
+  }
+  if (rule.avoidZoneIds?.length && f.zoneAt[i] > 0) {
+    const here = zones[f.zoneAt[i] - 1]
+    if (here && rule.avoidZoneIds.includes(here.id)) return false
   }
   return true
 }
@@ -910,26 +1127,91 @@ function runResources(
         for (let y = 0; y < f.h; y++) {
           const d = zoneEdgeDistance(zone, x, y)
           if (d > 4) continue
-          const w = 1 - smoothstep(-radius * 0.5, 4, d)
+          // Concentrate the drop at the RIM. Spreading it over half the zone
+          // (-radius*0.5) turned a 22-unit dig across a 10-tile radius into a
+          // ~14% grade — a shallow bowl you can walk over without noticing,
+          // not an excavation. A short wall a few tiles wide reads as a pit,
+          // and puts the ground steep enough that the slope bands paint stone
+          // on it and the path router routes around it.
+          const wall = Math.max(2.5, radius * 0.22)
+          const w = 1 - smoothstep(-wall, 1.5, d)
           f.height[idx(f, x, y)] -= node.depth * w
         }
       }
       computeSlopes(f)
     }
-    let placed = 0
-    for (let attempt = 0; attempt < node.count * 50 && placed < node.count; attempt++) {
-      const a = rnd() * Math.PI * 2
-      const r = Math.sqrt(rnd()) * radius
-      const x = Math.round(centre.x + Math.cos(a) * r)
-      const y = Math.round(centre.y + Math.sin(a) * r)
-      if (!inBounds(f, x, y)) continue
-      const i = idx(f, x, y)
-      if (f.occupied[i] || f.isPath[i] || f.isWater[i]) continue
-      const id = speciesId(index, node.species, rnd, missing)
-      if (id === null) break
-      out.push({ x, y, objectId: id, shape: 10, rotation: Math.floor(rnd() * 4) })
-      markOccupied(f, x, y, 1)
-      placed++
+    // Ore is not scattered — it is knotted. Measured over the 20 mining sites
+    // in the live map (regions 40-55 x 46-57):
+    //   the nearest rock of the SAME type is 1.4 tiles away (median) — they touch
+    //   one type forms a compact blob ~4x5 tiles, aspect 1.2, filling ~25% of it
+    //   the nearest OTHER type's blob centre is only 3.2 tiles away
+    //   a site carries 13-19 rocks across 1-8 types, median 4 of each type
+    //   about one rock in seven sits alone, away from any pocket of its own type
+    // So the ore body is one tight cluster of type-segregated pockets, much
+    // smaller than the pit around it, rather than an even fill of the zone.
+    const POCKET_R = 2.4    // blob radius: ~5 tiles across, as measured
+    const POCKET_GAP = 3.2  // measured distance between neighbouring pockets
+    const LONE_SHARE = 0.15
+
+    // One object id per ore type, resolved once, so a pocket is all one ore
+    // instead of the per-rock weighted pick that produced the even mixture.
+    const kinds: { id: number; weight: number }[] = []
+    for (const s of node.species) {
+      const weight = s.weight ?? 1
+      if (weight <= 0) continue
+      const id = speciesId(index, [{ species: s.species }], rnd, missing)
+      if (id === null) continue
+      kinds.push({ id, weight })
+    }
+    if (!kinds.length) continue
+
+    // Split the budget by weight, handing the remainder out by largest
+    // fractional part, then guarantee every named ore at least one rock —
+    // the smallest real pocket is one rock, not none.
+    const wsum = kinds.reduce((a, k) => a + k.weight, 0)
+    const share = kinds.map((k) => (node.count * k.weight) / wsum)
+    const counts = share.map((s) => Math.floor(s))
+    const order = share.map((_, i) => i).sort((a, b) => (share[b] % 1) - (share[a] % 1))
+    for (let left = node.count - counts.reduce((a, b) => a + b, 0), i = 0; left > 0; i++, left--) {
+      counts[order[i % order.length]]++
+    }
+    for (let i = 0; i < counts.length; i++) if (counts[i] === 0) counts[i] = 1
+
+    // Pocket centres on a small ring, sized so neighbours land the measured
+    // gap apart — the ring, not the zone, is how wide the ore body reads.
+    const ring = Math.min(radius * 0.55, (POCKET_GAP * kinds.length) / (2 * Math.PI) + 1)
+    const spin = rnd() * Math.PI * 2
+
+    for (let k = 0; k < kinds.length; k++) {
+      const a = spin + (k / kinds.length) * Math.PI * 2
+      const px = centre.x + Math.cos(a) * ring
+      const py = centre.y + Math.sin(a) * ring
+      for (let n = 0; n < counts[k]; n++) {
+        // the first rock always anchors the pocket; later ones may wander off
+        const lone = n > 0 && rnd() < LONE_SHARE
+        const spread = lone ? radius : POCKET_R
+        const ox = lone ? centre.x : px
+        const oy = lone ? centre.y : py
+        for (let attempt = 0; attempt < 40; attempt++) {
+          const t = rnd() * Math.PI * 2
+          // Widen slowly on repeated failure so a blocked pocket still lands.
+          // Tried capping this and shrinking POCKET_R to keep strays closer:
+          // both measured WORSE (more lone rocks, and the cap dropped a rock
+          // per mine outright). A pocket that can spill is what fills.
+          const r = Math.sqrt(rnd()) * spread * (1 + attempt * 0.05)
+          const x = Math.round(ox + Math.cos(t) * r)
+          const y = Math.round(oy + Math.sin(t) * r)
+          if (!inBounds(f, x, y)) continue
+          if (zoneEdgeDistance(zone, x, y) > 0) continue
+          const i = idx(f, x, y)
+          if (f.occupied[i] || f.isPath[i] || f.isWater[i]) continue
+          out.push({ x, y, objectId: kinds[k].id, shape: 10, rotation: Math.floor(rnd() * 4) })
+          // radius 0, not 1: real rocks sit orthogonally adjacent a quarter of
+          // the time, and a 1-tile keep-out forces every gap to 1.4 tiles.
+          markOccupied(f, x, y, 0)
+          break
+        }
+      }
     }
   }
 }
@@ -1055,17 +1337,27 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
     isPlot: new Uint8Array(tiles),
     plotMat: new Uint8Array(tiles),
     isWater: new Uint8Array(tiles),
+    waterDist: new Uint16Array(tiles),
     occupied: new Uint8Array(tiles),
     zoneAt: new Uint16Array(tiles),
   }
   const result: GenerationResult = {
     terrain: new Map(),
+    underwater: new Map(),
     objects: new Map(),
     environment: new Map(),
     report: { regions: regionsW * regionsH, placements: 0, zones: [], plots: [], unresolved: [], warnings: [] },
   }
   const rnd = makeRng(plan.seed ^ 0x9e3779b9)
   const missing = new Set<SpeciesId>()
+
+  // Riverbed materials. The plan speaks in ids, not roles, so take the sand
+  // from its own shore band where it has one and fall back to the surveyed
+  // defaults — a seabed is sand near the beach and stone out deep.
+  const shoreBand = plan.ground.find((b) => b.overlayId !== undefined && b.maxHeight !== undefined)
+  const sandRole = shoreBand?.underlay?.[0]?.underlayId ?? 61
+  const trackRole = 64
+  const stoneRole = 54
 
   buildHeights(plan, f)
   computeSlopes(f)
@@ -1092,6 +1384,8 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
     const ry = plan.area.y0 + Math.floor(ri / regionsW)
     const regionId = (rx << 8) | ry
     const terrain = emptyTerrain()
+    const underwater = emptyTerrain()
+    let anyWater = false
     const ox = (rx - plan.area.x0) * SIZE
     const oy = (ry - plan.area.y0) * SIZE
     for (let x = 0; x < SIZE; x++) {
@@ -1105,9 +1399,27 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
         // its own Perlin default, which would undo the whole heightmap
         terrain.heightValue[ti] = clampHeightByte(f.height[i])
         terrain.heightPresence[ti >> 3] |= 1 << (ti & 0x7)
+
+        // The riverbed under a water tile. `um` heights are stored POSITIVE
+        // and mean downward depth (client `i_13*8 << 2`), so this is a depth,
+        // not an elevation. Shallow at the shore and deepening offshore is
+        // what the shader's `shore`/`depthFade` terms read — the surveyed real
+        // map runs a median depth of 20 (Brimhaven) to 65 (Port Sarim).
+        if (f.isWater[i]) {
+          anyWater = true
+          const depth = Math.max(1, Math.min(120, Math.round(4 + f.waterDist[i] * 6)))
+          underwater.heightValue[ti] = depth
+          underwater.heightPresence[ti >> 3] |= 1 << (ti & 0x7)
+          // sandy close in, stone further out, matching what the real seabeds
+          // use (bytes 55/65 = stone and brown earth)
+          underwater.underlayIds[ti] = materialByte(
+            f.waterDist[i] <= 3 ? sandRole : f.waterDist[i] <= 9 ? trackRole : stoneRole,
+          )
+        }
       }
     }
     result.terrain.set(regionId, terrain)
+    if (anyWater) result.underwater.set(regionId, underwater)
     result.objects.set(regionId, [])
     if (plan.environment) result.environment.set(regionId, { ...plan.environment })
   }
@@ -1121,6 +1433,16 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
     if (!list) continue
     list.push([p.objectId, p.shape, p.rotation, p.x % SIZE, p.y % SIZE, 0] as LocEntry)
     result.report.placements++
+    // Two-part trees: an oak is a trunk on plane 0 and a separate canopy loc
+    // on plane 1, with a DIFFERENT object id. Emit only the trunk and you get
+    // a wood of bare poles. The real map pairs them at 97-100%, always on the
+    // same tile and — measured — with the same shape and the same rotation
+    // (99.3%), so the canopy is a straight copy one plane up.
+    const canopy = index?.canopies?.[p.objectId]
+    if (canopy) {
+      list.push([canopy, p.shape, p.rotation, p.x % SIZE, p.y % SIZE, 1] as LocEntry)
+      result.report.canopies = (result.report.canopies ?? 0) + 1
+    }
   }
 
   result.report.unresolved = [...missing]

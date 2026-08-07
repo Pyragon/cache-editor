@@ -139,6 +139,26 @@ export function encodeTerrain(def: MapRegionDef, terrain: MapTerrain): MapRegion
   }
 }
 
+/**
+ * Write the underwater ("um") layer back into a region def.
+ *
+ * Kept separate from `encodeTerrain` because most edits never touch it, and a
+ * region that genuinely has no water must not be given an empty um layer —
+ * `hasUnderwaterTerrain` is what tells the decoder there is a riverbed at all.
+ */
+export function encodeUnderwaterTerrain(def: MapRegionDef, underwater: MapTerrain): MapRegionDef {
+  return {
+    ...def,
+    hasUnderwaterTerrain: true,
+    uwUnderlayIds: bytesToB64(underwater.underlayIds),
+    uwOverlayIds: bytesToB64(underwater.overlayIds),
+    uwOverlayShapeRot: bytesToB64(underwater.overlayShapeRot),
+    uwTileFlags: bytesToB64(underwater.tileFlags),
+    uwHeightPresence: bytesToB64(underwater.heightPresence),
+    uwHeightValue: bytesToB64(underwater.heightValue),
+  }
+}
+
 /** Build a brand-new region def, optionally pre-filled with a flat plane-0
  *  ground slab (explicit height 0 + the given underlay), so there's a
  *  clickable surface to start building on. Without the fill the region is an

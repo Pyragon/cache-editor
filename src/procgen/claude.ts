@@ -11,7 +11,7 @@
  * nowhere else — never to a server of ours, never logged, never put in a plan.
  */
 
-import type { ProcPlan } from './types'
+import type { ProcPlan, SpeciesId } from './types'
 import { ALL_SPECIES } from './scenery'
 import { THEMES } from './planner'
 import { ROLE_INFO, type GroundPalette, type PaletteRole } from './palette'
@@ -88,7 +88,9 @@ function planSchema(): Record<string, unknown> {
           warp: { type: 'number' },
           roughness: { type: 'number' },
           ridged: { type: 'boolean', description: 'true reads as mountain chains' },
-          waterLevel: { type: 'number', description: '0..1 normalized height below which water is painted' },
+          waterLevel: { type: 'number', description: 'height below which water is painted. With a landform set this is an ABSOLUTE depth (sea sits at 0, so ~0.06 puts the shoreline just above it); without one it is a percentile of the area own range' },
+          landform: { type: 'string', enum: ['inland', 'coast', 'island', 'lakes'], description: 'the SHAPE of the landmass. `coast` puts open sea on one side (~30% water in one body), `island` puts sea all round (~40%). Without this, waterLevel alone only makes scattered ponds - it cannot make a shore or an island' },
+          coastAngle: { type: 'number', description: 'degrees; which way the open sea lies for `coast`. 0 = east' },
         },
         required: ['amplitude', 'featureScale'],
       },
@@ -139,7 +141,8 @@ function planSchema(): Record<string, unknown> {
       paths: {
         type: 'object',
         properties: {
-          overlayId: { type: 'integer' },
+          overlayId: { type: 'integer', description: 'paved surface, for a road through a settlement. LEAVE IT OUT for a country track: in the real map an unpaved road is bare underlay with no overlay, and drawing one with a paved overlay looks like tarmac through a wood' },
+          underlayId: { type: 'integer', description: 'ground the route is worn into. Town roads sit on town earth (57% of real path tiles do); a country track IS this material' },
           width: { type: 'integer', description: 'tiles across in open country; 1-2 is a track, 3+ a road' },
           settlementWidth: { type: 'integer', description: 'tiles across inside a zone. Keep it wider than `width` — a road broadens where the buildings are' },
           connectZones: { type: 'boolean' },
@@ -173,6 +176,7 @@ function planSchema(): Record<string, unknown> {
             density: { type: 'number', description: 'placements per 100 eligible tiles; 4 = sparse, 30 = thick forest' },
             clustering: { type: 'number' }, spacing: { type: 'number' },
             avoid: { type: 'array', items: { type: 'string', enum: ['path', 'plot', 'water', 'zone', 'barrier'] } },
+            avoidZoneIds: { type: 'array', items: { type: 'string' }, description: 'zone ids this rule must stay out of - use it to keep woodland out of a quarry or a graveyard rather than banning zones entirely' },
             maxSlope: { type: 'number' }, minHeight: { type: 'number' }, maxHeight: { type: 'number' },
             randomRotation: { type: 'boolean' },
           },
@@ -256,10 +260,14 @@ function systemPrompt(area: ProcPlan['area'], ctx: CacheContext): string {
     '- if you make somewhere dark and it has paths, light them: paths.lighting with lanterns or torches every ~7 tiles, emitsLight true.',
     '- paths: a straight line across the area is the strongest tell that a place was generated. Set paths.wander (0.3 surveyed road, 0.6+ wilderness track) and give it branches, so the route curves with the ground and turns off somewhere.',
     '- paths.coverage decides how much of the area the network actually SERVES, which is a separate question from how much it bends. A settled or travelled area wants 0.6-0.9; somewhere meant to feel remote or trackless wants 0-0.2. Leaving it out means only the branches you asked for.',
+    '- do NOT scatter fences, gates, hedges or walls. They only read as deliberate in a LINE around something; sprinkled individually they are orphaned railings standing in a field. Use a barrier ring if you want somewhere enclosed. The same goes for crates, barrels, benches and signposts unless the rule names a zone to keep them inside.',
+    '- keep scatter out of a working zone: a mine pit or a quarry full of trees, mushrooms and reeds reads as a bug. Put the zone id in the scatter rule avoidZoneIds.',
     '- reserve plots wherever something could be built later — zones[].plots inside a settlement, paths.waysidePlots out in the wilds — and give them an underlayId so the reserved ground is visible.',
     '',
     'Guidance that matters:',
-    '- density is placements per 100 eligible tiles. 3-6 is open grass, 12-20 is woodland, 25-40 is dense forest. Above 45 is a wall of trunks.',
+    '- density is placements per 100 eligible tiles, and the real map is MUCH sparser than intuition suggests. Measured across 15 settlements: the densest place in the game is 2.4 trees per 100 tiles, the median is about 1.1, and open country runs 0.5-1.0. All scenery together, buildings included, comes to under 4 per 100. Use 0.5-1.0 for open ground, 1.5-2.5 for woodland, 2.5-3.5 for a deliberately thick forest. A density of 10 is already a wall of trunks; 25 is a solid carpet.',
+    '- species mix, measured: plain tree 52%, dead tree 21%, oak 11%, evergreen 8%, willow 4%, stump 2%, maple 1%, yew 1%. Yew and maple are genuinely rare - a wood full of either is wrong. Dead trees are NOT gloom-only: they are two thirds of the trees around Barbarian Village and a quarter of a desert edge, so they read as rough or border country as much as haunted.',
+    '- resources[].count is the size of a whole ore BODY, not a fill for the zone. Real mining sites carry 13-19 rocks (median 17) across 1-8 ore types, median 4 of each type; single-ore sites of 18-34 coal exist too. Use 12-20 for an ordinary mine, 25+ only for somewhere the mine IS the place. You do not need to arrange them: the generator knots each ore type into its own compact pocket, sets the pockets ~3 tiles apart, and leaves about one rock in seven scattered outside — the measured shape of a real mine. Just pick the ore mix and the count.',
     '- flatten a town (~0.85) or buildings will sit on a slope. Give it plots so buildings can be stamped later.',
     '- give ground bands overlapping conditions; later bands win, so paint the general case first and the exceptions after.',
     `- available species in THIS cache: ${(ctx.availableSpecies ?? ALL_SPECIES).join(', ')}. Do not use any other.`,
@@ -373,6 +381,21 @@ export async function requestPlan(req: PlanRequest): Promise<PlanResponse> {
  * these catch the cases that would waste a user's time — an unreachable
  * enclosure, or a density that carpets the area in trunks.
  */
+/**
+ * Scenery that only reads as deliberate when it is PLACED, never when it is
+ * scattered. A fence is a LINE around a field; a rate of "0.4 fences per 100
+ * tiles" sprinkled as individual posts is just orphaned railings standing in
+ * open country. Enclosures belong to the barrier mechanism (or a future field
+ * feature), so these are stripped from any scatter rule.
+ */
+const NEVER_SCATTERED: SpeciesId[] = ['fence', 'fence_gate', 'hedge', 'wall_stone']
+
+/**
+ * Clutter that belongs INSIDE somewhere — a crate in a mining pit is fine, a
+ * crate alone in a meadow is not. Allowed only when the rule names a zone.
+ */
+const NEEDS_A_ZONE: SpeciesId[] = ['crate', 'barrel', 'bench', 'campfire', 'signpost']
+
 export function sanitizePlan(plan: ProcPlan): { plan: ProcPlan; notes: string[] } {
   const notes: string[] = []
   const next: ProcPlan = { ...plan }
@@ -384,10 +407,23 @@ export function sanitizePlan(plan: ProcPlan): { plan: ProcPlan; notes: string[] 
   }
 
   if (next.scatter) {
+    // strip structural scenery before anything else looks at the rules
+    next.scatter = next.scatter.flatMap((rule) => {
+      const banned = rule.zoneId ? NEVER_SCATTERED : [...NEVER_SCATTERED, ...NEEDS_A_ZONE]
+      const kept = rule.species.filter((s) => !banned.includes(s.species))
+      if (kept.length === rule.species.length) return [rule]
+      const dropped = rule.species.filter((s) => banned.includes(s.species)).map((s) => s.species)
+      notes.push(`dropped ${dropped.join(', ')} from a scatter rule — that scenery has to be placed deliberately, not sprinkled`)
+      return kept.length ? [{ ...rule, species: kept }] : []
+    })
     next.scatter = next.scatter.map((rule) => {
-      if (rule.density > 60) {
-        notes.push(`scatter density ${rule.density} capped to 60 — above that it is a solid wall of scenery`)
-        return { ...rule, density: 60 }
+      // The real map's densest place is 2.4 trees per 100 tiles, so anything
+      // past 12 is already unlike anything in the game rather than merely
+      // thick. Kept well above the plausible range so a deliberate choice
+      // still gets through — this catches the order-of-magnitude mistake.
+      if (rule.density > 12) {
+        notes.push(`scatter density ${rule.density} capped to 12 — the densest place in the real map is 2.4 per 100 tiles`)
+        return { ...rule, density: 12 }
       }
       return rule
     })

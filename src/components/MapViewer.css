@@ -298,6 +298,59 @@
   padding-top: 8px;
   border-top: 1px solid var(--border, #2a2f3a);
   max-width: 512px;
+  /* The picker sits above this and the whole thing has to fit a screen. Tabs
+     keep the three authoring modes from stacking, and this catches whatever is
+     left (a long theme row, a wall of warnings) rather than pushing Apply off
+     the bottom where it can't be reached. */
+  max-height: min(46vh, 460px);
+  overflow-y: auto;
+}
+
+/* The three authoring modes: theme+dials, a pasted plan, or a description.
+   These deliberately do NOT use .mapscene-env-pill — sat directly above 17
+   theme pills and 5 landform pills, a pill reads as one more option in the
+   same list rather than as the control that swaps the whole section. Tab
+   chrome (a rail, an underline on the active one, no button fill) is what
+   makes it obvious the panel has more than one page. */
+.procgen-tabs {
+  /* deliberately NOT .procgen-row as well: that rule is defined later in this
+     file, so at equal specificity it would win and put an 8px gap back between
+     the tabs, breaking the rail they are supposed to sit on */
+  display: flex;
+  align-items: flex-end;
+  gap: 0;
+  margin: 2px 0 10px;
+  padding: 0;
+  border-bottom: 1px solid var(--border, #2a2f3a);
+  flex-wrap: nowrap;
+}
+
+.procgen-tab {
+  padding: 7px 16px 6px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px; /* sit the underline ON the rail */
+  color: var(--text-dim, #8a90a0);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.procgen-tab:hover {
+  color: var(--text);
+  border-bottom-color: rgba(47, 143, 255, 0.4);
+}
+
+.procgen-tab.selected {
+  color: #fff;
+  border-bottom-color: var(--electric-blue-bright, #2f8fff);
+}
+
+.procgen-tab:focus-visible {
+  outline: 1px solid var(--electric-blue-bright, #2f8fff);
+  outline-offset: -2px;
 }
 
 .procgen-head {
@@ -321,6 +374,10 @@
 
 .procgen-themes {
   gap: 4px;
+  /* 17 themes wrap to several rows; cap it so the panel doesn't push its
+     Generate button off the bottom of the picker */
+  max-height: 96px;
+  overflow-y: auto;
 }
 
 /* Label and value share a line above the track, so the number sits with the

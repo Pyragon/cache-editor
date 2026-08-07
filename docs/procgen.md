@@ -209,9 +209,17 @@ judgement noted.
    numbers but I have not seen it rendered — if it reads as a wall of trunks,
    the density scale needs halving across every theme.
 
-6. **Water.** Still the old open question: real water wants the underwater
-   (`um`) tail for depth-faded shores, which we don't generate. `coastal`
-   paints a flat water overlay below a height threshold. Fine for v1?
+6. **Water.** ~~Still the old open question~~ **RESOLVED 2026-08-07.** The
+   generator now emits the underwater ("um") layer alongside the surface, so
+   `coastal`/`island` water actually renders. This was not cosmetic: the water
+   shader derives its alpha entirely from depth (`shore` and `depthFade` both
+   read `waterDepth`), so a sea with no riverbed draws at alpha 0 — invisible,
+   showing the skybox through it. The real map pairs them everywhere (Port
+   Sarim: 2,333 water tiles, 2,279 underwater heights). Generated depth runs
+   shallow at the shore and deepens offshore, median 70 against a surveyed
+   real median of 20-65, with sand/brown/stone seabeds matching the real
+   underlay bytes. Carried through `RegionDraft` and written by `handleSave`
+   via `encodeUnderwaterTerrain`.
 
 7. **Where should the Generate UI live** — the picker footer (my plan), a tab
    in the map side panel, or its own page? The picker footer means "select the

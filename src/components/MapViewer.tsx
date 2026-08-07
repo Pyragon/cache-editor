@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LocEntry, MapData, WorldMapData } from '../loaders/maps'
-import { PLANES, SIZE, tileIndex, loadRegion, saveRegion, createRegionDef, newRegionData, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS } from '../loaders/maps'
+import { PLANES, SIZE, tileIndex, loadRegion, saveRegion, createRegionDef, newRegionData, encodeUnderwaterTerrain, OBJECT_SLOTS, SLOT_COLORS, SLOT_LABELS } from '../loaders/maps'
 import { rgbToRenderedHex } from '../loaders/models'
 import { NumberInput } from './defFields'
 import { useZoom } from './useZoom'
@@ -205,10 +205,19 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     setRegionDrafts((prev) => {
       const next = new Map(prev)
       for (const [id, t] of result.terrain) {
-        if (id === data.id) continue
+        // The BASE region is the one exception elsewhere (it renders from its
+        // own state), but its riverbed has nowhere else to live — the scene
+        // reads `data.underwaterTerrain` otherwise, which is what was loaded
+        // from disk. So the draft carries underwater for every region.
+        const uw = result.underwater.get(id)
+        if (id === data.id) {
+          if (uw) next.set(id, { ...(next.get(id) ?? {}), underwater: uw })
+          continue
+        }
         next.set(id, {
           ...(next.get(id) ?? {}),
           terrain: t,
+          ...(uw ? { underwater: uw } : {}),
           objects: result.objects.get(id) ?? [],
           ...(result.environment.get(id) ? { env: result.environment.get(id) as RegionEnvironment } : {}),
         })
@@ -576,7 +585,15 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
   async function handleSave() {
     if (!data || !terrain || !objects) return
     setIsSaving(true)
-    const next = { ...data, def: { ...data.def, objects }, terrain }
+    const baseUw = regionDrafts.get(data.id)?.underwater
+    const next = {
+      ...data,
+      def: baseUw
+        ? encodeUnderwaterTerrain({ ...data.def, objects }, baseUw)
+        : { ...data.def, objects },
+      terrain,
+      ...(baseUw ? { underwaterTerrain: baseUw } : {}),
+    }
     await saveRegion(world.mapsDir, next)
     // Every OTHER loaded region that was edited. Each is its own file, so this
     // is one saveRegion per region — re-read from disk first so a placement
@@ -584,14 +601,21 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     for (const [id, draft] of regionDrafts) {
       if (id === data.id) continue
       try {
-        if (draft.objects || draft.terrain) {
+        if (draft.objects || draft.terrain || draft.underwater) {
           // re-read first: a placement edit must not clobber whatever else
           // that region's file holds
           const region = await loadRegion(world.mapsDir, world.rootHandle, id)
+          const def = draft.underwater
+            ? encodeUnderwaterTerrain(
+              { ...region.def, objects: draft.objects ?? region.def.objects },
+              draft.underwater,
+            )
+            : { ...region.def, objects: draft.objects ?? region.def.objects }
           await saveRegion(world.mapsDir, {
             ...region,
-            def: { ...region.def, objects: draft.objects ?? region.def.objects },
+            def,
             terrain: draft.terrain ?? region.terrain,
+            ...(draft.underwater ? { underwaterTerrain: draft.underwater } : {}),
           })
         }
         if ((draft.env || draft.lights) && world.rootHandle) {
@@ -1283,7 +1307,14 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
                 regionCount={selIds.length}
                 objectsDir={objectsDir}
                 rootHandle={world.rootHandle}
-                cacheFingerprint={String(usedRegions?.size ?? 0)}
+                // Identifies WHICH CACHE this is, and must not change when its
+                // contents do. It was the region count, so generating — which
+                // creates free regions — invalidated the scenery index and
+                // forced a full rescan of the objects and maps folders every
+                // single time. The folder name is stable across every edit;
+                // two caches sharing a name is what the panel's "rebuild
+                // index" button is for.
+                cacheFingerprint={world.rootHandle?.name || 'cache'}
                 onApply={(result, plan, index) => applyGeneration(result, plan, index)}
                 onClose={() => setGenerating(false)}
               />
