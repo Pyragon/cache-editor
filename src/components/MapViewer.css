@@ -198,9 +198,29 @@
   font-weight: 600;
 }
 
-/* everything after this is right-aligned */
+/* everything after this is right-aligned. Only the FIRST one takes the auto
+   margin — with several siblings flexbox splits the free space between all of
+   them, so each button added drifted further from its neighbours instead of
+   the group moving right as one. */
 .map-picker-actions .save-bar-discard {
   margin-left: auto;
+}
+
+.map-picker-actions .save-bar-discard ~ .save-bar-discard {
+  margin-left: 0;
+}
+
+/* Deleting is the one action here that touches disk irreversibly, so it reads
+   as dangerous. A modifier on the shared discard button rather than a restyle
+   of it — .save-bar-discard is used across every editable viewer. */
+.map-picker-delete {
+  border-color: rgba(255, 80, 80, 0.45);
+  color: #ff7070;
+}
+
+.map-picker-delete:hover:not(:disabled) {
+  background: rgba(255, 50, 50, 0.22);
+  color: #fff;
 }
 
 /* creation controls, now inside the picker's footer */

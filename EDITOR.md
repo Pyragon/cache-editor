@@ -2111,3 +2111,137 @@ and `WorldMapArea` are fixed-layout formats that correctly have none).
 After changing an encoder, the dump manifest (`<dump dir>/.manifest`,
 size+mtime per entry) will consider untouched JSON unchanged and skip
 re-encoding it. Delete that file to force the folder to repack.
+
+## Tile flags and plane heights — the upper-storey format (TRACED 2026-08-08)
+
+**What this answers:** how the cache represents an upper-storey floor. It does
+not — there is no explicit floor or opening concept. An upper storey is an
+ordinary terrain plane carrying material and a height. Full working and the
+supporting measurement over all 2,413 regions is in `docs/map-learning.md` §13.
+
+### The fields
+
+Both live in the region terrain archive, `maps/<id>.json`, as base64 channels
+indexed `plane * 4096 + x * 64 + y`:
+
+| dumped field | what it is |
+|---|---|
+| `tileFlags` | one byte per tile — a **5-bit value, 1..32** |
+| `heightPresence` | one BIT per tile (2,048 bytes): is a height stored here |
+| `heightValue` | one byte per tile, meaningful only where presence is set |
+
+`tileFlags` is written by map opcodes 50-81 as `opcode - 49`, which is why the
+range is 1..32. Bits 5, 6 and 7 are unused — confirmed at 0.0% of tiles on every
+plane across the whole map, so an editor can safely present it as five
+checkboxes rather than a raw byte.
+
+### The five bits (client names, `SettingsBits` / `MapLoader`)
+
+| bit | client meaning | plane 0 | plane 1 |
+|---|---|---|---|
+| `0x1` | **unwalkable** — collision only, no visual effect | 41.0% | 24.5% |
+| `0x2` | **bridge** — read from **plane 1 specifically**, drops the tile one render/collision plane | 1.6% | 1.6% |
+| `0x4` | **roof removal** — the per-tile mask the roof sweep flood-fills from | 4.4% | 2.2% |
+| `0x8` | **force collision plane 0** | **0.0%** | **5.2%** |
+| `0x10` | **hidden / not visible** | 0.3% | 0.1% |
+
+Two traps worth carrying into any UI:
+
+- **`SettingsBits.areRoofsHidden` is a misnomer** — it reads the BRIDGE bit
+  (`0x2`), not the roof bit. Don't label a checkbox from that method name.
+- **`0x8` is not a floor flag.** It is upper-plane-only and looks exactly like
+  the missing "there is a floor here" concept; it is collision, not structure.
+  The data alone pointed the wrong way here.
+
+### Heights are RELATIVE above plane 0
+
+From `MapLoader`'s tile decode:
+
+- **plane 0, no height stored** → the client's own procedural terrain noise
+  (`calculateTileheight`), NOT zero. Treating absent as flat invents cliffs at
+  every boundary between stored and procedural ground.
+- **plane > 0, no height stored** → exactly **960 below the plane beneath**, i.e.
+  one full storey up.
+- **plane > 0, height stored** → that delta below the plane beneath. So every
+  level needs its own value; they stack.
+- **a stored byte of 1 decodes to 0** (flush with the plane below).
+
+An editor showing a plane-1 height must therefore show it as *an offset from
+plane 0*, not as an absolute, and must distinguish "unset" from "0" — they mean
+a whole storey apart. This is the same rule the tree-canopy work hit from the
+other direction (`docs/map-learning.md` §11), where writing a height at one tile
+instead of the loc's four footprint vertices left canopies floating.
+
+### Editor status
+
+**Not editable from the 3D view at all** — `TODO.md`'s "Tile-field editing from
+the 3D view (the 2D view has it)" is this. Wanted: the five flag checkboxes, and
+a plane-height field that is honest about being a delta and about unset-vs-zero.
+
+## Loc SHAPE and ROTATION — what they mean on the ground (MEASURED 2026-08-09)
+
+Traced while building procedural dock and building synthesis
+(`docs/map-learning.md` §15/§16). This is the field pair every placement row
+carries — a dumped loc is `[id, shape, rotation, x, y, plane]` — and until now
+the editor has treated both as opaque numbers you type.
+
+**A wall occupies a tile EDGE, not the tile.** That single fact explains the
+whole table below, and it is why the same physical wall can be authored on
+either of the two tiles sharing it.
+
+### Straight wall, shape 0: the rotation IS the edge
+
+Measured across the 311 perfectly rectangular buildings in the cache (where
+which side a wall tile is on cannot be argued), 1,200-1,300 samples per side:
+
+| rotation | edge it occupies |
+|---|---|
+| 0 | **+x** (east) |
+| 1 | **−y** (south) |
+| 2 | **−x** (west) |
+| 3 | **+y** (north) |
+
+Each side's dominant rotation runs 71-75%, and **the entire remainder is the
+OPPOSITE rotation, never a perpendicular one** — that is the neighbouring tile
+carrying the same wall, not disagreement.
+
+### Corner, shape 1: rotation r covers edges r and (r+1)&3
+
+Exact at **100%** on all four corners, same edge numbering: ES→0, WS→1, NW→2,
+EN→3. Shape 2 is the same corner at r+2 (a different anchor) and shape 9 tracks
+shape 2, both also at 96-100%.
+
+### What this is worth to the editor
+
+- A **wall-drawing tool** is now possible: drag along a footprint and the shape
+  and rotation follow from which edges are exposed, instead of the user guessing
+  a rotation and eyeballing the result.
+- The loc panel could **name** the rotation ("west edge") rather than showing
+  `2`, and warn when a wall's edge faces into solid ground.
+- It also settles `docs/map-learning.md` §8.5, which listed rotation remapping
+  as an unverified unknown — so **rotating a selection** (a long-wanted editor
+  affordance) can now remap wall rotations correctly rather than leaving walls
+  facing the way they started.
+
+### Two object def fields this pass pinned down
+
+- **`obstructsGround`** (boolean) — on a type-22 ground decoration this means
+  the loc REPLACES the terrain under it rather than lying on top. It is what
+  distinguishes a **dock plank laid over open sea** from a water decal (lily
+  pads, foam and ripples are all `false`). Not currently surfaced in any panel.
+- **`offsetY`** — the renderer NEGATES it (`mapScene.ts:4274`), so a *negative*
+  `offsetY` RAISES the loc. Port Sarim's decking sits at −904, i.e. 904 units up,
+  94% of a 960 storey. Worth a signed, labelled control rather than a raw number,
+  because the sign is counter-intuitive and a storey is the natural unit.
+  **Do not assume a raised loc uses it**: most dock decking in the cache sits at
+  `offsetY: 0` and carries its height in the MODEL instead, which is the trap
+  that made a first pass find 4 deck ids instead of 193.
+
+### Identifying water, for any tool that needs it
+
+An overlay is water if the underwater ("um") layer is authored beneath it. That
+picks out **overlay 112** — 1,406,704 tiles at 94.8% underwater-height presence,
+96% of all water in the cache. **The overlay def's `waterColor` is NOT a water
+flag**: it is written unconditionally, and 235 of 247 overlays carry the same
+default `#122b3d`. `mapScene.ts`'s `isWaterMaterial` is a texture-HUE test used
+to decide what to animate and does not select 112 at all.

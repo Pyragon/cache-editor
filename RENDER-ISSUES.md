@@ -76,6 +76,46 @@ own — so it gets a document instead of bullets here.
   approximations are listed under Maps in `TODO.md`.
 
 ## Locs / transparency
+- **Broadleaf canopies render SEE-THROUGH (Cody, 2026-08-07, generated island).**
+  The canopy is transparent enough to see a neighbouring evergreen through it,
+  where the evergreen beside it reads solid. Screenshot:
+  `ShareX/Screenshots/2026-08/opera_gIkIKnVmYp.png`.
+
+  Measured, so the ids are not in doubt. Affected:
+
+  | trunk | canopy | `lift` | footprint | reads as |
+  |---|---|---|---|---|
+  | Oak `#38731` | `#38736` | 1 | 3 | **see-through** |
+  | Tree `#70060` | `#70061` | 1 | 3 | **see-through** |
+  | Evergreen `#54787` | `#54795` | 1 | 2 | solid |
+
+  **That split is the most useful thing here**: all three are ordinary plane-1
+  canopies emitted by the same code path with the same `lift`, so placement is
+  not the variable. Two broadleaf canopies fail and the conifer does not, which
+  points at the model or its material rather than the renderer's geometry — and
+  gives whoever fixes it a control to compare against.
+
+  First thing to check is texture alpha — see the alpha re-dump watch-out in
+  `TODO.md`: foliage is drawn with a fixed `alphaTest` 0.35 cutout on textured
+  terrain and `faceAlpha != 0 || blendType != 0` decides transparency on locs,
+  so a canopy whose texture alpha sits in the middle of that range would thin
+  out exactly like this. Compare `#38736`'s texture alpha against `#54795`'s
+  before touching any renderer code.
+
+- **`Tree #38760` has no canopy — and that is what our data says, so verify it
+  against the map before calling it a render bug.** In the same shot a trunk
+  stands bare. The scenery index records **`NO CANOPY RECORDED`** for `#38760`,
+  along with `#1301`, `#1304`, `#38783` and `#38785` — while `#70060` → `#70061`
+  and the oak/evergreen pairs above are recorded fine.
+
+  So either those trunks genuinely carry no plane-1 loc in the real map, or
+  `CANOPY_MIN_RATE` (0.5 in `scenery.ts`) is rejecting a real pairing that
+  happens less than half the time. That threshold was chosen so a tree standing
+  under a bridge once doesn't teach us trees carry bridges; it has never been
+  checked against a species that legitimately pairs at, say, 0.3. Measure the
+  actual pair rate for `#38760` in `maps/` before changing anything — if it is
+  genuinely unpaired, this is correct behaviour and the entry can be deleted.
+
 - **Static locs don't priority-interleave opaque and transparent faces.**
   The client bakes ONE face order per model — priority →
   opaque-before-transparent → effectId → texture (`MeshRasterizer_Sub3` ctor,

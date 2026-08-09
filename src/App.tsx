@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ENTRY_ORDER, getEntryPath, getLoader, resolveEntryHandle } from './loaders'
+import { PROCGEN_DIR } from './procgen/claude'
 import type { LoadedItem, QuestServerData } from './loaders'
 import HuffmanViewer from './components/HuffmanViewer'
 import { CS2Viewer } from './components/CS2Viewer'
@@ -298,10 +299,15 @@ async function readCacheDir(dirHandle: FileSystemDirectoryHandle): Promise<Cache
   }
 
   // Anything present on disk but not covered by the canonical order (custom
-  // or not-yet-catalogued entries) still shows up, appended alphabetically.
+  // or not-yet-catalogued entries) still shows up, appended alphabetically —
+  // except `procgen/`, which the editor writes itself as a drop box for
+  // planning briefs and plans. It holds no cache data and has no loader, so
+  // listing it would put a permanently-empty entry in the sidebar.
   const leftovers: string[] = []
   for await (const handle of dirHandle.values()) {
-    if (handle.kind === 'directory' && !known.has(handle.name)) leftovers.push(handle.name)
+    if (handle.kind !== 'directory') continue
+    if (known.has(handle.name) || handle.name === PROCGEN_DIR) continue
+    leftovers.push(handle.name)
   }
   leftovers.sort((a, b) => a.localeCompare(b))
   for (const name of leftovers) entries.push({ id: entryId++, name, available: true })

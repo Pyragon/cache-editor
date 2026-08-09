@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# rig build output and dumped icons — generated, 36MB
+scratchpad/rig/out/

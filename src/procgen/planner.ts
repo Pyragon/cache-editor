@@ -29,7 +29,7 @@
 import { makeRng } from './rng'
 import { DEFAULT_PALETTE as PALETTE, type GroundPalette } from './palette'
 import type {
-  EnvironmentSpec, GroundBand, ProcPlan, ScatterRule, SpeciesPick, Zone,
+  EnvironmentSpec, GroundBand, ProcPlan, ScatterRule, SceneryChoice, SpeciesPick, Zone,
 } from './types'
 
 // Ground-material roles and their per-cache binding live in `palette.ts` —
@@ -45,7 +45,7 @@ export type ThemeId =
   // derived from measured places
   | 'lumbridge_meadow' | 'varrock_town' | 'falador_stone' | 'draynor_lowland'
   | 'seers_farmland' | 'barbarian_wilds' | 'catherby_coast' | 'kharid_desert'
-  | 'karamja_tropics'
+  | 'karamja_tropics' | 'fishing_village'
 
 export const THEMES: { id: ThemeId; label: string; blurb: string }[] = [
   { id: 'rolling_grass', label: 'Rolling grass', blurb: 'Gentle hills, scattered oaks, a path or two.' },
@@ -66,6 +66,7 @@ export const THEMES: { id: ThemeId; label: string; blurb: string }[] = [
   { id: 'catherby_coast', label: 'Catherby coast', blurb: 'Flowered shore under high ground, with snow above the treeline.' },
   { id: 'kharid_desert', label: 'Al Kharid desert', blurb: 'Sand and rock, almost nothing growing, boulders everywhere.' },
   { id: 'karamja_tropics', label: 'Karamja tropics', blurb: 'Yellow-green jungle floor, sand shore, heavy undergrowth.' },
+  { id: 'fishing_village', label: 'Fishing village', blurb: 'A small settlement on a shore, with jetties running out over the water.' },
 ]
 
 export type PlannerDials = {
@@ -113,38 +114,56 @@ const pick = (...s: SpeciesPick[]): SpeciesPick[] => s
 const dens = (base: number, d: number) => +(base * (0.45 + d * 1.1)).toFixed(3)
 
 /**
- * The measured woodland species mix: plain tree 51.6%, dead 20.9%, oak 11.4%,
- * evergreen 7.9%, willow 3.6%, stump 1.8%, maple 1.3%, yew 1.1%. Yew and maple
- * are genuinely rare in the game — a wood full of them is wrong.
+ * What a rule is FOR, rather than what it plants.
+ *
+ * These replaced the hand-written species mixes that used to live here (a
+ * measured 51.6% plain tree / 20.9% dead / 11.4% oak woodland, a pooled
+ * undergrowth mix, and a separate jungle floor). The mixes were real — they
+ * came out of the 15-settlement survey — but they were a survey AVERAGE being
+ * applied per tile, and a theme has not read the map. Writing
+ * `species: ['tree_tropical']` is the author guessing the biome; writing
+ * `role: 'canopy'` hands that question to the generator, which scores every
+ * candidate by how often the real game plants it on ground like the tile being
+ * planted. Underlay alone explains 34.5% of object identity, so getting the
+ * GROUND bands right is what makes the vegetation follow. See
+ * `docs/map-learning.md` §9a and `RoleId` in `types.ts`.
+ *
+ * Note what this deletes: `JUNGLE_UNDERGROWTH` existed only because pooling
+ * jungle and temperate species and weighting them by GLOBAL frequency put
+ * jungle grass on 77% of the grass in the game (§11). Context scoring is the
+ * real fix for that, and with it the separate mix is redundant.
+ *
+ * What stays a theme's job is the BALANCE BETWEEN roles: "2.4 canopy and 1.6
+ * deadwood per 100 tiles" is a statement about a place, and no amount of
+ * reading the map supplies it. Which dead tree lands on which tile is not.
  */
-const WOODLAND = pick(
-  { species: 'tree', weight: 13 },
-  { species: 'tree_oak', weight: 3 },
-  { species: 'tree_evergreen', weight: 2 },
-  { species: 'tree_willow', weight: 1 },
-)
-
-/** Undergrowth, measured pooled at ~1.0 per 100 tiles across all places. */
-const UNDERGROWTH = pick(
-  { species: 'plant', weight: 5 },
-  { species: 'flowers', weight: 2 },
-  { species: 'mushroom', weight: 1 },
-  { species: 'bush', weight: 1 },
-  { species: 'fern', weight: 1 },
-)
+const CANOPY: SceneryChoice = { role: 'canopy' }
+const DEADWOOD: SceneryChoice = { role: 'deadwood' }
+const UNDERGROWTH: SceneryChoice = { role: 'undergrowth' }
+const LOOSE_STONE: SceneryChoice = { role: 'loose_stone' }
 
 /**
- * Jungle floor. Its own mix because jungle plants and grass are now separate
- * species: Karamja is dense enough in the real map that pooling them with the
- * generic buckets and weighting by real usage put jungle grass on 77% of every
- * grass tuft in the game, snowfields included.
+ * Karamja's own ground, named outright.
+ *
+ * The palette's green roles were rebound to TEMPERATE materials once we
+ * measured what the map actually grows on each one (`palette.ts`, and
+ * `docs/map-learning.md` §12c) — so the palette no longer has a word for
+ * jungle, and a theme that IS a biome has to supply its own.
+ *
+ * These are the exact ids the palette was wrongly bound to, which is not a
+ * coincidence: they are Karamja's materials, and binding them to roles called
+ * "grass" and "grassLush" is what put jungle across the whole game. Here they
+ * are correct, and the colours match the theme's blurb — 47 is the bright
+ * green, 48 the olive, 49 the yellow-olive of a jungle floor.
+ *
+ * Measured jungle share (canopy / undergrowth): 48 -> 30%/68%, 49 -> 13%/68%,
+ * 50 -> 46%/64%, 62 -> 46%/52%.
+ *
+ * Hardcoded ids are a compromise. The proper fix is either jungle ROLES in the
+ * palette or, better, an archetype supplying ground and species together from
+ * real Karamja regions — see `docs/map-learning.md` §9a.
  */
-const JUNGLE_UNDERGROWTH = pick(
-  { species: 'plant_jungle', weight: 5 },
-  { species: 'grass_jungle', weight: 3 },
-  { species: 'bush', weight: 1 },
-  { species: 'fern', weight: 1 },
-)
+const JUNGLE = { lush: 47, olive: 48, yellow: 49, sand: 61 }
 
 /**
  * Open green country. Weights follow the measured open-zone mix (162 13.6%,
@@ -228,6 +247,8 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
   const barriers: ProcPlan['barriers'] = []
   const resources: ProcPlan['resources'] = []
   const props: ProcPlan['props'] = []
+  const docks: ProcPlan['docks'] = []
+  const buildings: ProcPlan['buildings'] = []
   let environment: EnvironmentSpec | undefined
   let ground = meadowBands(p)
   let ridged = false
@@ -257,18 +278,38 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
         minSize: 5, maxSize: 9, purpose: 'building', underlayId: p.gravel,
       },
     })
+    // A reserved plot used to be an invisible promise to a prefab system that
+    // did not exist. It is now a building: massing from the measured footprint
+    // vocabulary, walls from a mined family, furniture by wall distance.
+    buildings.push({ zoneId: 'town' })
   }
 
   /** trees + undergrowth at a measured per-100-tiles figure */
   const woodland = (
-    treePer100: number, mix: SpeciesPick[] = WOODLAND, growth = 1,
-    floor: SpeciesPick[] = UNDERGROWTH,
+    treePer100: number,
+    opts: {
+      /** what the tree layer is; defaults to whatever belongs on this ground */
+      canopy?: SceneryChoice
+      /** multiplier on the measured ~1.0 undergrowth per 100 tiles */
+      growth?: number
+      floor?: SceneryChoice
+      /**
+       * Keep the undergrowth below a treeline. Two reasons, and they agree:
+       * nothing much grows above the snow in the real map, and the context
+       * model has ZERO undergrowth observations on snow (`docs/map-learning.md`
+       * §12a) — so with no evidence it falls back to the global prior, which is
+       * jungle-heavy, and a snowfield sprouts jungle grass. Themes that paint a
+       * snow band set this to just under where that band starts.
+       */
+      floorMaxHeight?: number
+    } = {},
   ) => {
     scatter.push(
-      { species: mix, density: dens(treePer100, d), clustering: 0.5, spacing: 2,
+      { ...(opts.canopy ?? CANOPY), density: dens(treePer100, d), clustering: 0.5, spacing: 2,
         avoid: ['path', 'plot'], maxSlope: 20 },
-      { species: floor, density: dens(1.0 * growth, d), clustering: 0.6, spacing: 1,
-        avoid: ['path', 'plot'] },
+      { ...(opts.floor ?? UNDERGROWTH), density: dens(1.0 * (opts.growth ?? 1), d),
+        clustering: 0.6, spacing: 1, avoid: ['path', 'plot'],
+        ...(opts.floorMaxHeight !== undefined ? { maxHeight: opts.floorMaxHeight } : {}) },
     )
   }
 
@@ -277,14 +318,9 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
     case 'dense_forest':
       // the densest place measured is 2.37 trees/100; a deliberate forest sits
       // just above it rather than at the old 14-36
-      woodland(2.6, pick(
-        { species: 'tree', weight: 10 },
-        { species: 'tree_oak', weight: 4 },
-        { species: 'tree_willow', weight: 2 },
-        { species: 'tree_maple', weight: 1 },
-      ), 1.6)
-      scatter.push({ species: pick({ species: 'tree_stump' }, { species: 'tree_fallen' }),
-        density: dens(0.15, d), clustering: 0.4, spacing: 3, avoid: ['path', 'plot'] })
+      woodland(2.6, { growth: 1.6 })
+      scatter.push({ ...DEADWOOD, density: dens(0.15, d), clustering: 0.4, spacing: 3,
+        avoid: ['path', 'plot'] })
       break
 
     case 'gloomy_woods':
@@ -307,14 +343,12 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
           { underlayId: p.stone, weight: 1 },
         ], minSlope: 8, overlayId: p.rock },
       ]
-      woodland(1.6, pick(
-        { species: 'tree_dead', weight: 8 },
-        { species: 'tree_stump', weight: 3 },
-        { species: 'tree_fallen', weight: 2 },
-        { species: 'tree_burnt', weight: 1 },
-      ), 0.7)
-      scatter.push({ species: pick({ species: 'gravestone' }, { species: 'mushroom' }),
-        density: dens(0.2, d), clustering: 0.7, spacing: 2, avoid: ['path', 'plot'] })
+      // the tree layer here IS dead wood — that is the theme, not a species list
+      woodland(1.6, { canopy: DEADWOOD, growth: 0.7 })
+      // halved from 0.2: the old rule was gravestones AND mushrooms, and the
+      // mushrooms now come from the undergrowth role above
+      scatter.push({ role: 'memorial', density: dens(0.1, d), clustering: 0.7, spacing: 2,
+        avoid: ['path', 'plot'] })
       // the bit dials alone can't do: the PLACE gets darker, not just the props
       environment = {
         sunColour: 0x6a6f7a, sunAmbient: 0.75, sunLight: 0.5, sunBacklight: 0.25,
@@ -343,10 +377,11 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
         ], minSlope: 11, overlayId: p.rock },
         { underlay: [{ underlayId: p.snow, weight: 3 }, { underlayId: p.stone, weight: 2 }], minHeight: 0.88 },
       ]
-      woodland(0.5, pick({ species: 'tree_evergreen', weight: 3 }, { species: 'tree' }), 0.4)
-      scatter.push({ species: pick(
-        { species: 'rock_small', weight: 3 }, { species: 'rock_large', weight: 2 }, { species: 'boulder' }),
-        density: dens(0.5, d), clustering: 0.5, spacing: 2, avoid: ['path', 'plot'] })
+      // stony, snow-capped ground picks its own conifers; the floor stops just
+      // under the snow band this theme paints at 0.88
+      woodland(0.5, { growth: 0.4, floorMaxHeight: 0.85 })
+      scatter.push({ ...LOOSE_STONE, density: dens(0.5, d), clustering: 0.5, spacing: 2,
+        avoid: ['path', 'plot'] })
       if (dials.settlement > 0.2) {
         addTown('town')
         props.push({ species: 'fountain', zoneId: 'town', pad: 3 })
@@ -379,10 +414,10 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
       })
       resources.push({
         zoneId: 'pit',
-        species: pick(
-          { species: 'ore_copper', weight: 3 }, { species: 'ore_tin', weight: 3 },
-          { species: 'ore_iron', weight: 2 }, { species: 'ore_coal', weight: 2 },
-          { species: 'ore_clay' }, { species: 'ore_silver' }),
+        // which seams this ground carries is the map's answer, not ours: the
+        // executor samples the role down to 2-5 types, straddling the measured
+        // median of 4 per site
+        role: 'ore',
         // A real mining site carries 13-19 rocks (p25/p75, 20 sites measured),
         // median 4 of each type. The executor knots them into per-type pockets,
         // so this is the size of an ore BODY, not a fill for the whole pit.
@@ -391,10 +426,11 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
         rubble: true,
       })
       scatter.push(
-        { species: pick({ species: 'rubble', weight: 3 }, { species: 'rock_small', weight: 2 }, { species: 'boulder' }),
-          density: dens(0.6, d), clustering: 0.6, spacing: 1, avoid: ['path'] },
-        { species: pick({ species: 'crate' }, { species: 'barrel' }),
-          density: dens(0.15, d), clustering: 0.8, spacing: 2, avoid: ['path'], zoneId: 'pit' },
+        { ...LOOSE_STONE, density: dens(0.6, d), clustering: 0.6, spacing: 1, avoid: ['path'] },
+        // `settlement_prop` is only allowed to scatter because the rule names a
+        // zone — crates in a working pit read fine, crates in a meadow do not
+        { role: 'settlement_prop', density: dens(0.15, d), clustering: 0.8, spacing: 2,
+          avoid: ['path'], zoneId: 'pit' },
       )
       break
     }
@@ -417,18 +453,59 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
         { underlay: [{ underlayId: p.sand, weight: 3 }, { underlayId: p.mud, weight: 1 }],
           maxHeight: 0.07, overlayId: p.water },
       ]
-      woodland(0.9, pick({ species: 'tree', weight: 3 }, { species: 'tree_willow', weight: 2 }, { species: 'tree_oak' }), 1.1)
-      scatter.push({ species: pick({ species: 'reeds', weight: 3 }, { species: 'grass_tuft' }),
-        density: dens(0.8, d), clustering: 0.7, spacing: 1, minHeight: 0.07, maxHeight: 0.2 })
+      woodland(0.9, { growth: 1.1 })
+      // the damp margin just above the waterline
+      scatter.push({ role: 'waterside', density: dens(0.8, d), clustering: 0.7, spacing: 1,
+        minHeight: 0.07, maxHeight: 0.2 })
+      docks.push({ count: 1 })
+      break
+
+    /**
+     * The theme this whole line of work exists for. A coast, a small
+     * settlement ON it, and jetties — "no docks on an island fishing village"
+     * is the oldest fault in `docs/map-learning.md` §1.
+     *
+     * Deliberately small and low: real fishing settlements are a handful of
+     * plots, not a town, and the sea has to be close enough that the dock lane
+     * is a short walk rather than a road across the map.
+     */
+    case 'fishing_village':
+      landform = 'coast'
+      amplitude = 14 + dials.relief * 40
+      ground = [
+        { underlay: [
+          { underlayId: p.grassDark, weight: 4 },
+          { underlayId: p.grass, weight: 3 },
+        ] },
+        // The beach is a BAND, not a fringe: 77% sand at one tile from the
+        // water, tapering to 34% at six. And the narrower the band the fewer
+        // materials — a contrasting tile every sixth one is what put holes in
+        // the shoreline last time.
+        { underlay: [
+          { underlayId: p.sand, weight: 8 },
+          { underlayId: p.grassDead, weight: 1 },
+        ], maxHeight: 0.18 },
+        { underlay: [{ underlayId: p.sand }], maxHeight: 0.10 },
+        { underlay: [{ underlayId: p.sand, weight: 3 }, { underlayId: p.mud, weight: 1 }],
+          maxHeight: 0.06, overlayId: p.water },
+      ]
+      addTown('village', 0.75)
+      woodland(0.5, { growth: 0.9 })
+      scatter.push({ role: 'waterside', density: dens(1.1, d), clustering: 0.7, spacing: 1,
+        minHeight: 0.06, maxHeight: 0.2 })
+      // two or three jetties reads as a working waterfront; one reads as an
+      // accident. Sizes are left unset ON PURPOSE so the generator samples the
+      // measured distribution instead of taking a guess from here (§15).
+      docks.push({ count: 2 + Math.round(dials.settlement * 2) })
+      props.push({ role: 'settlement_prop', zoneId: 'town', pad: 1 })
       break
 
     case 'village_in_forest': {
       addTown()
-      woodland(2.2, WOODLAND, 1.2)
+      woodland(2.2, { growth: 1.2 })
       // the original ask: "surrounded by a forest ... so we are actually trapped"
       barriers.push({
-        aroundZoneId: 'town',
-        species: pick({ species: 'tree', weight: 3 }, { species: 'tree_oak', weight: 2 }),
+        aroundZoneId: 'town', role: 'canopy',
         thickness: 3, offset: 4, gaps: 2, gapWidth: 7,
       })
       props.push({ species: 'well', zoneId: 'town', pad: 2 })
@@ -449,10 +526,8 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
           minSlope: 9, overlayId: p.rock },
       ]
       scatter.push(
-        { species: pick({ species: 'tree_burnt', weight: 3 }, { species: 'tree_stump', weight: 3 }, { species: 'tree_dead', weight: 2 }),
-          density: dens(0.6, d), clustering: 0.6, spacing: 3, avoid: ['path'] },
-        { species: pick({ species: 'rubble', weight: 3 }, { species: 'rock_small' }),
-          density: dens(0.5, d), clustering: 0.5, spacing: 1, avoid: ['path'] },
+        { ...DEADWOOD, density: dens(0.6, d), clustering: 0.6, spacing: 3, avoid: ['path'] },
+        { ...LOOSE_STONE, density: dens(0.5, d), clustering: 0.5, spacing: 1, avoid: ['path'] },
       )
       environment = { sunColour: 0x8a7a63, sunAmbient: 0.95, fogColour: 0x6b6153, fogDepth: 320 }
       break
@@ -462,10 +537,9 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
       // 0.64 trees/100 — the sparsest green place surveyed. 26% flat, height
       // range 49, and a town core that is 36% packed earth.
       amplitude = 20 + dials.relief * 60
-      woodland(0.64, pick(
-        { species: 'tree', weight: 7 }, { species: 'tree_oak', weight: 1 }, { species: 'tree_willow', weight: 1 }), 0.4)
-      scatter.push({ species: pick({ species: 'rock_small' }),
-        density: dens(0.36, d), clustering: 0.4, spacing: 3, avoid: ['path', 'plot'] })
+      woodland(0.64, { growth: 0.4 })
+      scatter.push({ ...LOOSE_STONE, density: dens(0.36, d), clustering: 0.4, spacing: 3,
+        avoid: ['path', 'plot'] })
       if (dials.settlement > 0.15) addTown('village')
       break
 
@@ -474,8 +548,7 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
       // ordinary balanced green country, 1.30 trees/100
       amplitude = 20 + dials.relief * 60
       addTown('town', 1.5)
-      woodland(1.30, pick(
-        { species: 'tree', weight: 9 }, { species: 'tree_oak', weight: 2 }, { species: 'tree_yew', weight: 1 }), 0.7)
+      woodland(1.30, { growth: 0.7 })
       props.push({ species: 'fountain', zoneId: 'town', pad: 3 })
       props.push({ species: 'signpost', zoneId: 'town', pad: 1 })
       break
@@ -485,7 +558,7 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
       // surveyed towns after Taverley, on gentle ground with pale paving
       amplitude = 25 + dials.relief * 75
       addTown('town', 1.3)
-      woodland(0.91, WOODLAND, 0.8)
+      woodland(0.91, { growth: 0.8 })
       // The survey measures 0.39 fences per 100 tiles here, but a fence in the
       // real map is a LINE around a field — scattering that rate as individual
       // posts just litters the countryside with orphaned railings. Enclosures
@@ -504,9 +577,10 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
           { underlayId: p.dirt, weight: 1 },
         ], maxHeight: 0.3 },
       ]
-      woodland(1.20, pick(
-        { species: 'tree', weight: 8 }, { species: 'tree_willow', weight: 3 },
-        { species: 'tree_oak', weight: 2 }, { species: 'tree_dead', weight: 2 }), 0.8)
+      // willows are not named here any more: this theme's whole identity is its
+      // wet, low ground, and willow is what the map plants on wet, low ground.
+      // If they stop appearing, the GROUND bands are what to look at.
+      woodland(1.20, { growth: 0.8 })
       if (dials.settlement > 0.15) addTown('village', 0.8)
       break
 
@@ -514,13 +588,19 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
       // 1.99 trees/100 and 0.53 fences/100 — wooded farmland. The only place
       // maple grows in any number (9.6% of its trees).
       amplitude = 25 + dials.relief * 85
-      woodland(1.99, pick(
+      // One of the two places a species list is kept deliberately. Maple is 9.6%
+      // of Seers' trees and ~1% of the map's, so it is exactly the kind of local
+      // fact a global context model cannot recover — and this theme is NAMED
+      // after it. `role` narrows rather than replaces, so context still ranks
+      // the variants within these species.
+      woodland(1.99, { canopy: { role: 'canopy', species: pick(
         { species: 'tree', weight: 8 }, { species: 'tree_oak', weight: 3 },
-        { species: 'tree_maple', weight: 2 }, { species: 'tree_willow', weight: 1 }), 1.0)
+        { species: 'tree_maple', weight: 2 }, { species: 'tree_willow', weight: 1 }) } })
       // its 0.53 fences/100 are hedged FIELD BOUNDARIES, not loose posts — see
       // the note in `falador_stone`
       scatter.push(
-        { species: pick({ species: 'flowers' }),
+        // likewise flowers: "flowered farmland" is the theme, at a measured rate
+        { role: 'undergrowth', species: pick({ species: 'flowers' }),
           density: dens(0.59, d), clustering: 0.6, spacing: 1, avoid: ['path', 'plot'] },
       )
       if (dials.settlement > 0.2) addTown('village')
@@ -545,11 +625,12 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
           { underlayId: p.stone, weight: 1 },
         ], minSlope: 9, overlayId: p.rock },
       ]
-      woodland(2.37, pick(
-        { species: 'tree_dead', weight: 8 },
-        { species: 'tree', weight: 3 },
-        { species: 'tree_stump', weight: 2 },
-        { species: 'tree_oak', weight: 1 }), 0.5)
+      // Two thirds dead is the theme, and a ratio BETWEEN roles is exactly what
+      // stays the plan's job — so it becomes two rules at measured densities
+      // rather than one rule with dead trees weighted inside it.
+      woodland(0.78, { growth: 0.5 })
+      scatter.push({ ...DEADWOOD, density: dens(1.59, d), clustering: 0.5, spacing: 2,
+        avoid: ['path', 'plot'], maxSlope: 20 })
       if (dials.settlement > 0.25) addTown('camp', 0.7)
       break
 
@@ -564,11 +645,13 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
         { underlay: [{ underlayId: p.sand, weight: 3 }, { underlayId: p.mud }], maxHeight: 0.07, overlayId: p.water },
         { underlay: [{ underlayId: p.snow, weight: 4 }, { underlayId: p.stone, weight: 1 }], minHeight: 0.7 },
       ]
-      woodland(1.23, WOODLAND, 0.6)
+      // floor stops below the snow band this theme paints at 0.7
+      woodland(1.23, { growth: 0.6, floorMaxHeight: 0.68 })
       scatter.push(
-        { species: pick({ species: 'flowers' }),
+        // "flowered shore" is the theme, at its measured 0.86/100
+        { role: 'undergrowth', species: pick({ species: 'flowers' }),
           density: dens(0.86, d), clustering: 0.6, spacing: 1, avoid: ['path', 'plot'], minHeight: 0.17 },
-        { species: pick({ species: 'reeds' }),
+        { role: 'waterside',
           density: dens(0.3, d), clustering: 0.7, spacing: 1, minHeight: 0.22, maxHeight: 0.34 },
       )
       if (dials.settlement > 0.2) addTown('village', 0.8)
@@ -589,10 +672,11 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
           minSlope: 9, overlayId: p.rock },
       ]
       scatter.push(
-        { species: pick({ species: 'rock_small', weight: 3 }, { species: 'boulder', weight: 2 }, { species: 'rock_large' }),
-          density: dens(0.64, d), clustering: 0.5, spacing: 2, avoid: ['path', 'plot'] },
-        { species: pick({ species: 'tree_dead', weight: 2 }, { species: 'tree_palm' }),
-          density: dens(0.16, d), clustering: 0.6, spacing: 4, avoid: ['path', 'plot'] },
+        { ...LOOSE_STONE, density: dens(0.64, d), clustering: 0.5, spacing: 2, avoid: ['path', 'plot'] },
+        // 0.16/100 is about six trees a region. What kind is the sand's answer,
+        // not ours — this is the theme most worth watching after the change,
+        // because desert ground is where context has the least to go on.
+        { ...CANOPY, density: dens(0.16, d), clustering: 0.6, spacing: 4, avoid: ['path', 'plot'] },
       )
       environment = { sunColour: 0xffe9b0, sunAmbient: 1.05, fogColour: 0xd8c69a, fogDepth: 420 }
       if (dials.settlement > 0.25) addTown('town', 0.9)
@@ -603,31 +687,33 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
       // over a yellow-green floor with sand at the shore
       landform = 'coast'
       amplitude = 30 + dials.relief * 100
+      // The only theme that names its own ground: the palette is temperate now,
+      // so a jungle has to ask for jungle materials (see JUNGLE above).
       ground = [
         { underlay: [
-          { underlayId: p.grassDead, weight: 4 },
-          { underlayId: p.grassLush, weight: 3 },
-          { underlayId: p.grass, weight: 2 },
+          { underlayId: JUNGLE.yellow, weight: 4 },
+          { underlayId: JUNGLE.lush, weight: 3 },
+          { underlayId: JUNGLE.olive, weight: 2 },
           { underlayId: p.dirt, weight: 2 },
         ] },
-        { underlay: [{ underlayId: p.sand, weight: 4 }, { underlayId: p.grassDead, weight: 1 }], maxHeight: 0.16 },
-        { underlay: [{ underlayId: p.sand, weight: 3 }], maxHeight: 0.07, overlayId: p.water },
+        { underlay: [{ underlayId: JUNGLE.sand, weight: 4 }, { underlayId: JUNGLE.yellow, weight: 1 }], maxHeight: 0.16 },
+        { underlay: [{ underlayId: JUNGLE.sand, weight: 3 }], maxHeight: 0.07, overlayId: p.water },
         { underlay: [{ underlayId: p.stone, weight: 2 }, { underlayId: p.mud, weight: 2 }],
           minSlope: 10, overlayId: p.rock },
       ]
-      woodland(1.40, pick(
-        { species: 'tree_tropical', weight: 7 }, { species: 'tree', weight: 3 },
-        { species: 'tree_palm', weight: 2 }, { species: 'tree_oak', weight: 1 },
-      ), 3.8, JUNGLE_UNDERGROWTH)
+      // The sharpest test of the whole idea: nothing here says "tropical" any
+      // more. The jungle comes from the GROUND, via the context model — which is
+      // the entire thesis, stated as a theme. If this stops being a jungle, the
+      // ground bands above are what to look at, not the scatter rule.
+      woodland(1.40, { growth: 3.8 })
       break
 
     case 'rolling_grass':
     default:
       // measured median across the surveyed places is about 1.0 trees/100
-      woodland(0.95, pick(
-        { species: 'tree', weight: 9 }, { species: 'tree_oak', weight: 3 }, { species: 'tree_willow', weight: 1 }), 0.9)
-      scatter.push({ species: pick({ species: 'rock_small' }),
-        density: dens(0.13, d), clustering: 0.4, spacing: 3, avoid: ['path', 'plot'] })
+      woodland(0.95, { growth: 0.9 })
+      scatter.push({ ...LOOSE_STONE, density: dens(0.13, d), clustering: 0.4, spacing: 3,
+        avoid: ['path', 'plot'] })
       break
   }
 
@@ -682,7 +768,7 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
     waysidePlotUnderlayId: p.gravel,
     // "lights along paths if we ask for it to be a darker area"
     lighting: darkTheme
-      ? { species: pick({ species: 'lantern', weight: 2 }, { species: 'torch' }), every: 7, offset: 2, emitsLight: true, size2d: 2 }
+      ? { role: 'light', every: 7, offset: 2, emitsLight: true, size2d: 2 }
       : undefined,
   }
 
@@ -711,6 +797,8 @@ export function buildPlan(dials: PlannerDials, area: ProcPlan['area']): ProcPlan
     barriers: barriers.length ? barriers : undefined,
     resources: resources.length ? resources : undefined,
     props: props.length ? props : undefined,
+    docks: docks.length ? docks : undefined,
+    buildings: buildings.length ? buildings : undefined,
     environment,
     // keep the rng used so a future dial can jitter theme choices reproducibly
     ...(rnd() < -1 ? {} : {}),

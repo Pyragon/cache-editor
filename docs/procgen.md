@@ -209,6 +209,32 @@ judgement noted.
    numbers but I have not seen it rendered — if it reads as a wall of trunks,
    the density scale needs halving across every theme.
 
+6a. **`waterLevel` was INERT on `coast` and `island` — fixed 2026-08-07.**
+   The landform mask drives `unit` negative outside the landmass and it clamps,
+   so every sea tile sat at `norm` exactly 0 and `norm <= waterLevel` selected
+   the same tiles at any level. Measured on one island seed: **52.0% sea at
+   `waterLevel` 0.14 and 53.3% at 0.34.** The sea share was whatever the
+   hardcoded mask radius happened to give.
+
+   `landMask` now shifts with `waterLevel` (`shift = (0.34 - level) * 1.1`), so
+   0.34 reproduces the original window exactly and lower values grow the
+   landmass. Measured after the fix, same seed: 0.20 → 25.7%, 0.23 → 32.0%,
+   0.26 → 38.0%, 0.32 → 49.5%. Monotonic and usable.
+
+   **Two gotchas found alongside it.** The water band's own `maxHeight` also
+   paints the water overlay, and *anything wearing that overlay counts as
+   water* — so a band at 0.34 with `waterLevel` 0.20 gives you 0.34's sea and
+   masks the dial. **Tie the water band's `maxHeight` to `waterLevel`.** And
+   the band that identifies the water overlay is `ground.find(b => b.overlayId
+   !== undefined && b.maxHeight !== undefined)` — the FIRST such band — so a
+   plan needs an explicit water band and should put it first.
+
+   **This changed three shipped themes** (`coastal`, `catherby_coast`,
+   `karamja_tropics` set a `waterLevel` other than 0.34, so their landmass
+   grew): placements went 235→276, 300→397, 713→874 on the same seed. Not
+   signed off by eye — revert by pinning those themes to `waterLevel: 0.34` if
+   the old shorelines were wanted.
+
 6. **Water.** ~~Still the old open question~~ **RESOLVED 2026-08-07.** The
    generator now emits the underwater ("um") layer alongside the surface, so
    `coastal`/`island` water actually renders. This was not cosmetic: the water

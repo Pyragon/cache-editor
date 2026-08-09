@@ -62,26 +62,76 @@ export const ROLE_INFO: Record<PaletteRole, { label: string; blurb: string }> = 
 }
 
 /**
- * MEASURED, not guessed. Every id below was read out of the real map dumps -
- * 15 settlements and their surrounding countryside, ~550k tiles - and picked
- * as the material that actually fills that role in the game. The working is in
- * `docs/procgen-reference.md`.
+ * MEASURED, not guessed — but measured TWICE, and the second measurement moved
+ * six of these.
+ *
+ * The original binding read 15 settlements and picked, for each role, the
+ * material that most PREVALENTLY filled it. That survey included Brimhaven,
+ * which is on Karamja, so for several roles "the commonest green" was jungle
+ * green — the old comments on `grassDead` and `sand` said "of built Brimhaven"
+ * out loud without anyone noticing what that implied.
+ *
+ * Nothing complained, because the themes hardcoded temperate species onto that
+ * ground and a temperate-looking place came out anyway. The moment scatter
+ * rules moved to ROLES and the map got a vote on what grows here, it answered
+ * with jungle: `trackEarth` alone came back 62% tropical canopy and 86% jungle
+ * undergrowth. The full table is in `docs/map-learning.md` §12c.
+ *
+ * So the second measurement asks a different and better question — not "what is
+ * commonest here" but **"what does the real game GROW on this material"** —
+ * which is the question a ground palette actually has to answer.
+ * `jungle N%` is the share of canopy+undergrowth picks that come back tropical,
+ * and `ev` is how many real placements the model has on it.
+ *
+ * ## Appearance is a HARD constraint, and rgb does not carry it
+ *
+ * The first pass of that rebind ranked candidates by how close their `rgb` was
+ * to the role's old colour — and `GroundMaterial.rgb` below says in as many
+ * words that it is "NOT what the tile looks like when `texture` is set". Every
+ * one of these materials has a texture. `sand` was rebound to 130, whose
+ * texture 725 is a **wall of paving slabs**, and the shoreline rendered as a
+ * tiled floor; `grassDead` went to 12, whose texture 66 is angular gravel.
+ *
+ * Both are reverted. The rule that replaces the rgb test: **look at
+ * `textures/<id>/<id>.png` before binding anything.** The tint only shifts a
+ * texture's hue — it cannot turn flagstones into sand.
  *
  * They remain defaults rather than constants: another cache or revision can
  * number these differently, which is what the picker is for.
  */
 export const DEFAULT_PALETTE: GroundPalette = {
-  grass: 48,        // #58680b olive - 11-20% of every zone surveyed
-  grassLush: 47,    // #35720a brighter green
-  grassMid: 160,    // #29380f - third commonest underlay in the real map (10.7% of open)
-  grassDark: 162,   // #20250a - the commonest single underlay in the real map
-  grassDead: 49,    // #78680b dry yellow-olive - 56% of built Brimhaven
-  dirt: 63,         // #644e1e mid brown
-  mud: 62,          // #3d2b0b dark brown - also the steep-slope material
-  townEarth: 163,   // #1c1813 - 18.5% of built tiles vs 5.9% of open
-  trackEarth: 64,   // #654d0b tex 510 - long thin runs, 75% of them away from buildings
-  sand: 61,         // #d0c074 - 28% of open Brimhaven
-  gravel: 95,       // #4b3e14
+  // The temperate greens in this cache are a DARK ramp — there is no clean
+  // bright green. 159 and 160 are the same rgb with different textures, which
+  // is why grass and grassMid can share a colour without the ramp collapsing.
+  // Textures checked by eye. The temperate greens in this cache are a DARK ramp
+  // — there is no clean bright green. 159 and 160 are the same rgb with
+  // different textures, so grass and grassMid share a colour without the ramp
+  // collapsing.
+  grass: 160,       // #29380f tex 917 fibrous grass. jungle 16% ev 6755 (was 48, 40%)
+  grassLush: 92,    // #38562f tex 276 fine green grass. jungle 24% ev 465 (was 47, 50%)
+  grassMid: 159,    // #29380f tex 918 - 160's twin. jungle 17% ev 4345
+  grassDark: 162,   // #20250a tex 980. jungle 14% ev 12412 - most-observed in the cache
+  grassDead: 49,    // #78680b tex 312, a grass texture. Rebound to 12 and REVERTED:
+                    // 12 is texture 66, angular gravel chippings, not dry grass.
+  dirt: 63,         // #644e1e tex 154 soft earth. jungle 28% ev 1912 - clean enough to keep
+  // Neither mud candidate has a convincing mud texture — 416 is rock and the old
+  // 62's 181 is pebbles. Kept on 9 for the much lower jungle share (24% vs 43%),
+  // where the near-black tint reads as dark earth. Worth a better id if one turns up.
+  mud: 9,           // #282018 tex 416. jungle 24% ev 888 (was 62 #3d2b0b, jungle 43%)
+  townEarth: 163,   // #1c1813 jungle 12% ev 2841 - the cleanest material in the cache
+  trackEarth: 69,   // #654d0b jungle 32% ev 2437 - IDENTICAL rgb to the old 64, texture
+                    // 154 not 510. 64 was the most jungle ground in the whole cache
+                    // (62% tropical canopy, 86% jungle undergrowth) and it was our
+                    // open-country path material.
+  sand: 61,         // #d0c074 tex 128, fine speckled sand. Rebound to 130 and REVERTED:
+                    // 130 is texture 725, PAVING SLABS. It shipped, and the shore
+                    // came out as a tiled floor. A beach grows almost nothing, so
+                    // the jungle share barely matters here and appearance is the
+                    // entire job.
+  gravel: 95,       // #4b3e14 jungle 24% ev  768
+  // stone and snow have NO placement evidence at all: every candidate scores
+  // the same on them and the global prior decides. Rebinding cannot fix that —
+  // archetypes are the answer (`docs/map-learning.md` §12a). Left as surveyed.
   stone: 54,        // #767676 - 19% of open Rimmington, the rocky coast
   snow: 25,         // #e6e6eb - the high ground above Catherby and Taverley
   path: 235,        // #35302d tex 928, blends - 96 components, mean span 33 tiles

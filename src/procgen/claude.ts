@@ -11,8 +11,25 @@
  * nowhere else — never to a server of ours, never logged, never put in a plan.
  */
 
-import type { ProcPlan, SpeciesId } from './types'
-import { ALL_SPECIES } from './scenery'
+import type { ProcPlan, RoleId, SpeciesId } from './types'
+import { ALL_SPECIES, ROLE_SPECIES } from './scenery'
+import { describeMine, type ArchetypeModel } from './archetypes'
+
+const ROLE_SPECIES_NAMES = Object.keys(ROLE_SPECIES)
+
+/**
+ * Folder inside the opened cache used to hand a plan to and from an outside
+ * planner — Claude Code, an editor, anything that can read and write a file.
+ *
+ * It is OURS, not the cache's: it holds no game data and nothing repacks it,
+ * so `readCacheDir` filters it out of the entry sidebar. Naming it here rather
+ * than in the sidebar keeps the two ends from drifting.
+ */
+export const PROCGEN_DIR = 'procgen'
+/** what the app writes: everything a planner needs to know about this cache */
+export const BRIEF_FILE = 'brief.md'
+/** what the planner writes back: a ProcPlan the Plan tab can build from */
+export const PLAN_FILE = 'plan.json'
 import { THEMES } from './planner'
 import { ROLE_INFO, type GroundPalette, type PaletteRole } from './palette'
 
@@ -70,6 +87,22 @@ function planSchema(): Record<string, unknown> {
     properties: { species: speciesEnum, weight: { type: 'number' } },
     required: ['species'],
   }
+  /**
+   * The preferred way to say what a rule plants. Every rule that took a
+   * `species` list now takes this instead, and `species` is demoted to an
+   * override — the schema has to allow a role-only rule or the "prefer roles"
+   * instruction in the prompt is unfollowable.
+   */
+  const roleEnum = {
+    type: 'string',
+    enum: ROLE_SPECIES_NAMES,
+    description: 'what this rule is FOR. Preferred over `species`: the generator picks the actual object from the map, scored by what the real game plants on ground like the tile being planted',
+  }
+  const speciesOverride = {
+    type: 'array',
+    items: speciesPick,
+    description: 'explicit override — use ONLY when you really do mean these exact things. Prefer `role`',
+  }
   const weightedUnderlay = {
     type: 'object',
     properties: { underlayId: { type: 'integer' }, weight: { type: 'number' } },
@@ -90,7 +123,7 @@ function planSchema(): Record<string, unknown> {
           ridged: { type: 'boolean', description: 'true reads as mountain chains' },
           waterLevel: { type: 'number', description: 'height below which water is painted. With a landform set this is an ABSOLUTE depth (sea sits at 0, so ~0.06 puts the shoreline just above it); without one it is a percentile of the area own range' },
           landform: { type: 'string', enum: ['inland', 'coast', 'island', 'lakes'], description: 'the SHAPE of the landmass. `coast` puts open sea on one side (~30% water in one body), `island` puts sea all round (~40%). Without this, waterLevel alone only makes scattered ponds - it cannot make a shore or an island' },
-          coastAngle: { type: 'number', description: 'degrees; which way the open sea lies for `coast`. 0 = east' },
+          coastAngle: { type: 'number', description: 'degrees; the bearing the LAND lies toward for `coast` — the sea is on the OPPOSITE side. 0 = land east, open sea to the west. 180 = land west, sea east' },
         },
         required: ['amplitude', 'featureScale'],
       },
@@ -156,11 +189,11 @@ function planSchema(): Record<string, unknown> {
           lighting: {
             type: 'object',
             properties: {
-              species: { type: 'array', items: speciesPick },
+              role: roleEnum, species: speciesOverride,
               every: { type: 'integer' }, offset: { type: 'integer' },
               emitsLight: { type: 'boolean' }, colorHsl: { type: 'integer' }, size2d: { type: 'integer' },
             },
-            required: ['species', 'every'],
+            required: ['every'],
           },
         },
         required: ['overlayId'],
@@ -171,7 +204,8 @@ function planSchema(): Record<string, unknown> {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            species: { type: 'array', items: speciesPick },
+            role: roleEnum,
+            species: speciesOverride,
             zoneId: { type: 'string' },
             density: { type: 'number', description: 'placements per 100 eligible tiles; 4 = sparse, 30 = thick forest' },
             clustering: { type: 'number' }, spacing: { type: 'number' },
@@ -180,7 +214,7 @@ function planSchema(): Record<string, unknown> {
             maxSlope: { type: 'number' }, minHeight: { type: 'number' }, maxHeight: { type: 'number' },
             randomRotation: { type: 'boolean' },
           },
-          required: ['species', 'density'],
+          required: ['density'],
         },
       },
       barriers: {
@@ -189,11 +223,12 @@ function planSchema(): Record<string, unknown> {
           type: 'object',
           properties: {
             aroundZoneId: { type: 'string' },
-            species: { type: 'array', items: speciesPick },
+            role: roleEnum,
+            species: speciesOverride,
             thickness: { type: 'integer' }, gaps: { type: 'integer' },
             gapWidth: { type: 'integer' }, offset: { type: 'integer' },
           },
-          required: ['aroundZoneId', 'species'],
+          required: ['aroundZoneId'],
         },
       },
       resources: {
@@ -202,10 +237,11 @@ function planSchema(): Record<string, unknown> {
           type: 'object',
           properties: {
             zoneId: { type: 'string' },
-            species: { type: 'array', items: speciesPick },
+            role: roleEnum,
+            species: speciesOverride,
             count: { type: 'integer' }, depth: { type: 'number' }, rubble: { type: 'boolean' },
           },
-          required: ['zoneId', 'species', 'count'],
+          required: ['zoneId', 'count'],
         },
       },
       props: {
@@ -213,11 +249,90 @@ function planSchema(): Record<string, unknown> {
         items: {
           type: 'object',
           properties: {
+            // A prop is the one place `species` stays the natural choice: it is
+            // ONE deliberately placed thing, so "a fountain" means a fountain.
+            // `role` is here for "something a village square would have".
+            role: roleEnum,
             species: speciesEnum,
             zoneId: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' },
             rotation: { type: 'integer' }, pad: { type: 'integer' },
           },
-          required: ['species'],
+        },
+      },
+      docks: {
+        type: 'array',
+        description:
+          'Jetties running out over water. Needs a shoreline, so set terrain.landform '
+          + 'to "coast" or "island". The deck objects are MINED from this cache and '
+          + 'chosen by the generator — there is deliberately no way to name them here. '
+          + 'LEAVE width AND length UNSET unless you have a specific reason: omitted, '
+          + 'the generator samples what real piers measure (71% are 1-2 tiles wide, '
+          + 'median 11 long), and any number you write here is a guess by comparison.',
+        items: {
+          type: 'object',
+          properties: {
+            count: { type: 'integer', description: 'how many jetties (1-3 reads as a working waterfront)' },
+            nearZoneId: { type: 'string', description: 'build near this zone, if it reaches the water' },
+            width: { type: 'integer', description: 'deck tiles across, 1-4. Prefer omitting.' },
+            length: { type: 'integer', description: 'tiles out over the water. Prefer omitting.' },
+            headChance: { type: 'number', description: '0..1 chance of a widened T-head at the seaward end' },
+            trim: {
+              type: 'number',
+              description:
+                '0..1 clutter on the deck. Prefer omitting: 43% of REAL piers carry '
+                + 'nothing at all, and a dock covered in barrels is the generated tell.',
+            },
+            deckClutter: {
+              type: 'object',
+              description:
+                'Named cargo standing ON the deck — the one place you may name what goes '
+                + 'on a jetty. Use it when the pier is WORKING (a fishing village landing '
+                + 'its catch, a port loading), not to dress every dock. `trim` cannot do '
+                + 'this: it replays ids mined off real piers, which are railings and '
+                + 'ladders, and scatter rules cannot reach a deck tile at all.',
+              properties: {
+                role: { type: 'string', description: 'usually "settlement_prop"' },
+                species: {
+                  type: 'array',
+                  description: 'e.g. crate and barrel, with weights',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      species: { type: 'string' },
+                      weight: { type: 'number' },
+                    },
+                    required: ['species'],
+                  },
+                },
+                density: {
+                  type: 'number',
+                  description:
+                    'placements per 100 DECK tiles, not per 100 ground tiles — the '
+                    + 'landscape sparsity guidance does not apply here. Default 12, which '
+                    + 'is two or three pieces on a jetty. 40+ is a deck you cannot walk down.',
+                },
+              },
+            },
+          },
+          required: ['count'],
+        },
+      },
+      buildings: {
+        type: 'array',
+        description:
+          'Put buildings on the plots a zone reserves. There is deliberately NO way '
+          + 'to describe a layout: the massing is sampled from the footprint vocabulary '
+          + 'measured across the real map, the walls come from a mined material family, '
+          + 'and the furniture from measured wall-distance distributions. You decide '
+          + 'WHERE there are buildings (via the zone and its plot count), not what they '
+          + 'look like. A zone with plots and no entry here stays an empty paved pad.',
+        items: {
+          type: 'object',
+          properties: {
+            zoneId: { type: 'string', description: 'only build on the plots of this zone; omit for all' },
+            fill: { type: 'number', description: '0..1 share of plots that get a building (default 1)' },
+            furnish: { type: 'number', description: '0..1 interior clutter (default follows the measurement)' },
+          },
         },
       },
       environment: {
@@ -242,6 +357,23 @@ export type CacheContext = {
   /** role → definition id, as bound for THIS cache by the ground-material
    *  picker. Without it the model is inventing ids. */
   palette?: GroundPalette
+  /** the place types mined from THIS cache, so a plan can name one */
+  archetypes?: ArchetypeModel | null
+}
+
+/**
+ * Everything a planner needs to know about THIS cache, as text.
+ *
+ * Exported because the API call is not the only planner. A `ProcPlan` is the
+ * whole contract, so a plan written in a chat window — Claude Code, say —
+ * runs through exactly the same generator, with no key and no request. What
+ * that author lacks is not capability but INFORMATION: which species this dump
+ * resolved, what the ground roles are bound to, what the real densities are,
+ * and which place types were mined from it. This is that information, and both
+ * routes read the same copy so they cannot drift apart.
+ */
+export function planningBrief(area: ProcPlan['area'], ctx: CacheContext): string {
+  return systemPrompt(area, ctx)
 }
 
 function systemPrompt(area: ProcPlan['area'], ctx: CacheContext): string {
@@ -256,8 +388,10 @@ function systemPrompt(area: ProcPlan['area'], ctx: CacheContext): string {
     '- zones are the areas that mean something (a town, a wood, a pit). Give them ids and refer to those ids from scatter/barriers/resources/props.',
     '- scatter rules say what grows where and how thickly. Use several rules per area: canopy trees, then undergrowth, then occasional dead wood/rocks.',
     '- a barrier ring is how you make somewhere enclosed ("a village you cannot walk out of"). ALWAYS leave gaps (2 is usual) or the place is unreachable.',
+    '- buildings: a zone with `plots` only RESERVES paved pads. Add a `buildings` entry to actually build on them, or the settlement is a set of empty squares. Building shape, walls and furniture are all mined from this cache — you choose where people live, not what the houses look like.',
+    '- docks: if the place is on water and people work it — a fishing village, a port, a ferry — give it `docks`. A shore settlement with no jetty is the single most obvious thing missing from a waterfront, and it needs terrain.landform "coast" or "island" to have a shoreline at all. Set `count` (1-3) and LEAVE width/length/trim UNSET: those are sampled from what real piers in this cache measure, and anything you write instead is a guess. Real piers are narrow — 71% are one or two tiles wide — and 43% carry no clutter whatsoever. If the pier is WORKING and should have cargo standing on it, that is `docks[].deckClutter` (crates, barrels) and nothing else reaches a deck: `trim` replays mined railings and ladders, and a scatter rule cannot touch a deck tile.',
     '- if the mood is dark, dim the ACTUAL environment (sunAmbient ~0.7, a cold grey sunColour, heavier fogDepth) as well as choosing dead trees. Do not just pick gloomy props and leave the sun bright.',
-    '- if you make somewhere dark and it has paths, light them: paths.lighting with lanterns or torches every ~7 tiles, emitsLight true.',
+    '- if you make somewhere dark and it has paths, light them: paths.lighting with `role: "light"`, every ~7 tiles, emitsLight true.',
     '- paths: a straight line across the area is the strongest tell that a place was generated. Set paths.wander (0.3 surveyed road, 0.6+ wilderness track) and give it branches, so the route curves with the ground and turns off somewhere.',
     '- paths.coverage decides how much of the area the network actually SERVES, which is a separate question from how much it bends. A settled or travelled area wants 0.6-0.9; somewhere meant to feel remote or trackless wants 0-0.2. Leaving it out means only the branches you asked for.',
     '- do NOT scatter fences, gates, hedges or walls. They only read as deliberate in a LINE around something; sprinkled individually they are orphaned railings standing in a field. Use a barrier ring if you want somewhere enclosed. The same goes for crates, barrels, benches and signposts unless the rule names a zone to keep them inside.',
@@ -266,7 +400,7 @@ function systemPrompt(area: ProcPlan['area'], ctx: CacheContext): string {
     '',
     'Guidance that matters:',
     '- density is placements per 100 eligible tiles, and the real map is MUCH sparser than intuition suggests. Measured across 15 settlements: the densest place in the game is 2.4 trees per 100 tiles, the median is about 1.1, and open country runs 0.5-1.0. All scenery together, buildings included, comes to under 4 per 100. Use 0.5-1.0 for open ground, 1.5-2.5 for woodland, 2.5-3.5 for a deliberately thick forest. A density of 10 is already a wall of trunks; 25 is a solid carpet.',
-    '- species mix, measured: plain tree 52%, dead tree 21%, oak 11%, evergreen 8%, willow 4%, stump 2%, maple 1%, yew 1%. Yew and maple are genuinely rare - a wood full of either is wrong. Dead trees are NOT gloom-only: they are two thirds of the trees around Barbarian Village and a quarter of a desert edge, so they read as rough or border country as much as haunted.',
+    '- the balance BETWEEN roles is still yours, even though the species inside one is not. Measured across the map: dead wood is 21% of all trees, and it is not gloom-only — two thirds of the trees around Barbarian Village and a quarter of a desert edge. So a rough or border place is a `canopy` rule and a `deadwood` rule at comparable densities, not one `canopy` rule with dead trees named in it.',
     '- resources[].count is the size of a whole ore BODY, not a fill for the zone. Real mining sites carry 13-19 rocks (median 17) across 1-8 ore types, median 4 of each type; single-ore sites of 18-34 coal exist too. Use 12-20 for an ordinary mine, 25+ only for somewhere the mine IS the place. You do not need to arrange them: the generator knots each ore type into its own compact pocket, sets the pockets ~3 tiles apart, and leaves about one rock in seven scattered outside — the measured shape of a real mine. Just pick the ore mix and the count.',
     '- flatten a town (~0.85) or buildings will sit on a slope. Give it plots so buildings can be stamped later.',
     '- give ground bands overlapping conditions; later bands win, so paint the general case first and the exceptions after.',
@@ -285,6 +419,26 @@ function systemPrompt(area: ProcPlan['area'], ctx: CacheContext): string {
         ].join('\n')
       : '- no ground materials are bound for this cache; keep `ground` to a single band and let the user fix it.',
     '- vary the ground. A single material across the whole area reads as a painted plane however good the heightmap is: put wet ground in the hollows (low maxHeight), worn ground on the ridges and slopes, and stone only where it is genuinely steep.',
+    '- BUT keep NARROW transition bands pure. Mixing is for broad areas. A shoreline is only one to three tiles wide, so a second material at weight 1 in a beach band puts a contrasting tile in every sixth one — which reads as a HOLE punched in the shore, not as variety, and isolated single tiles also break the terrain corner-blending. Measured: a beach of `sand 5 / dead grass 1` left only 77% of the waterline as sand and looked gappy; `sand 8 / dead grass 1` plus a second pure-sand band nearer the water took it to 95%. Rule of thumb: the narrower the band, the fewer materials it should carry, and the tile row actually touching water should be one material.',
+    '',
+    // Roles are the preferred way to write a scatter rule: naming a species
+    // makes the AUTHOR guess the biome, and the author has not read the map.
+    // Naming a role lets the generator answer from measurement instead.
+    'PREFER ROLES OVER SPECIES, in scatter rules, barrier rings, resource nodes and path lighting alike.',
+    'Instead of `species: [{species: "tree_oak"}]`, write `role: "canopy"` and let the generator pick from',
+    `the map. Roles: ${ROLE_SPECIES_NAMES.join(', ')}.`,
+    'It scores every species in the role by how often the real game plants it on ground like the tile being',
+    'planted, so getting the GROUND right makes the vegetation follow by itself — which is what the real map does.',
+    'The corollary is worth acting on: if you want a jungle, do not ask for jungle trees — paint jungle GROUND',
+    'and ask for `canopy`. Naming the species yourself means guessing the biome, and you have not read this map.',
+    'Name explicit species only when the place is DEFINED by that one thing (a memorial garden of yew, say).',
+    '',
+    ctx.archetypes
+      ? [
+          'PLACE TYPES mined from this cache. Prefer naming an area type over hand-picking materials:',
+          describeMine(ctx.archetypes),
+        ].join('\n')
+      : '- no place types have been mined from this cache yet.',
     '',
     `Reference themes the built-in planner ships, for calibration: ${THEMES.map((t) => `${t.id} (${t.blurb})`).join('; ')}.`,
   ].join('\n')
@@ -396,6 +550,15 @@ const NEVER_SCATTERED: SpeciesId[] = ['fence', 'fence_gate', 'hedge', 'wall_ston
  */
 const NEEDS_A_ZONE: SpeciesId[] = ['crate', 'barrel', 'bench', 'campfire', 'signpost']
 
+/**
+ * The same two rules at ROLE level. A role names a whole family, so it has to
+ * be judged as one — `enclosure` is exactly the fences and walls that must be
+ * placed deliberately, and `settlement_prop` is the crates-and-benches family
+ * that only makes sense somewhere.
+ */
+const NEVER_SCATTERED_ROLES: RoleId[] = ['enclosure']
+const NEEDS_A_ZONE_ROLES: RoleId[] = ['settlement_prop']
+
 export function sanitizePlan(plan: ProcPlan): { plan: ProcPlan; notes: string[] } {
   const notes: string[] = []
   const next: ProcPlan = { ...plan }
@@ -409,12 +572,31 @@ export function sanitizePlan(plan: ProcPlan): { plan: ProcPlan; notes: string[] 
   if (next.scatter) {
     // strip structural scenery before anything else looks at the rules
     next.scatter = next.scatter.flatMap((rule) => {
+      // Now that `species` is optional in the schema, a rule can name NEITHER.
+      // The generator treats that as "plant nothing", which is indistinguishable
+      // from the rule having worked — so say so rather than dropping it quietly.
+      if (!rule.role && !rule.species?.length) {
+        notes.push('dropped a scatter rule that named neither a role nor any species — it would have planted nothing')
+        return []
+      }
+      const bannedRoles = rule.zoneId
+        ? NEVER_SCATTERED_ROLES
+        : [...NEVER_SCATTERED_ROLES, ...NEEDS_A_ZONE_ROLES]
+      if (rule.role && bannedRoles.includes(rule.role)) {
+        notes.push(`dropped a '${rule.role}' scatter rule — that family has to be placed deliberately, not sprinkled`)
+        return []
+      }
       const banned = rule.zoneId ? NEVER_SCATTERED : [...NEVER_SCATTERED, ...NEEDS_A_ZONE]
+      // A role-only rule has no species list to filter; the role check above is
+      // the whole test for it.
+      if (!rule.species?.length) return [rule]
       const kept = rule.species.filter((s) => !banned.includes(s.species))
       if (kept.length === rule.species.length) return [rule]
       const dropped = rule.species.filter((s) => banned.includes(s.species)).map((s) => s.species)
       notes.push(`dropped ${dropped.join(', ')} from a scatter rule — that scenery has to be placed deliberately, not sprinkled`)
-      return kept.length ? [{ ...rule, species: kept }] : []
+      // Dropping every named species leaves the rule meaningless UNLESS it also
+      // names a role, which can still supply candidates on its own.
+      return kept.length ? [{ ...rule, species: kept }] : rule.role ? [{ ...rule, species: undefined }] : []
     })
     next.scatter = next.scatter.map((rule) => {
       // The real map's densest place is 2.4 trees per 100 tiles, so anything
@@ -430,7 +612,15 @@ export function sanitizePlan(plan: ProcPlan): { plan: ProcPlan; notes: string[] 
   }
 
   if (next.barriers) {
-    next.barriers = next.barriers.map((ring) => {
+    next.barriers = next.barriers.flatMap((ring) => {
+      // Same "names nothing" case as scatter. A barrier that plants nothing is
+      // worse than a missing one: the path network still aims at its gaps.
+      if (!ring.role && !ring.species?.length) {
+        notes.push(`barrier around "${ring.aroundZoneId}" named neither a role nor any species and was dropped`)
+        return []
+      }
+      return [ring]
+    }).map((ring) => {
       if ((ring.gaps ?? 0) < 1) {
         notes.push(`barrier around "${ring.aroundZoneId}" had no gaps — added one so the area is reachable`)
         return { ...ring, gaps: 1, gapWidth: ring.gapWidth ?? 6 }
@@ -446,6 +636,58 @@ export function sanitizePlan(plan: ProcPlan): { plan: ProcPlan; notes: string[] 
   }
   for (const r of next.resources ?? []) {
     if (!zoneIds.has(r.zoneId)) notes.push(`resource node references unknown zone "${r.zoneId}" and was skipped`)
+    if (!r.role && !r.species?.length) notes.push(`resource node in "${r.zoneId}" named neither a role nor any species — it will place nothing`)
+  }
+  const lighting = next.paths?.lighting
+  if (lighting && !lighting.role && !lighting.species?.length) {
+    notes.push('path lighting named neither a role nor any species — no lamps will be placed')
+  }
+
+  if (next.docks?.length) {
+    // A jetty needs a sea to run into. `inland` has no shoreline at all, so the
+    // dock planner would search every tile and quietly find nothing — the same
+    // silent-nothing failure the scatter rules above are guarded against.
+    const form = next.terrain.landform
+    if (form && form !== 'coast' && form !== 'island' && form !== 'lakes') {
+      notes.push(`docks were asked for on a '${form}' landform, which has no shoreline — `
+        + 'set terrain.landform to "coast" or "island", or they will not be built')
+    }
+    next.docks = next.docks.flatMap((d) => {
+      const count = Math.round(d.count ?? 0)
+      if (!count || count < 0) {
+        notes.push('dropped a dock spec with no count')
+        return []
+      }
+      return [{
+        ...d,
+        count: Math.min(8, count),
+        ...(d.width !== undefined ? { width: Math.max(1, Math.min(4, Math.round(d.width))) } : {}),
+        ...(d.length !== undefined ? { length: Math.max(3, Math.min(40, Math.round(d.length))) } : {}),
+        ...(d.trim !== undefined ? { trim: Math.max(0, Math.min(1, d.trim)) } : {}),
+        ...(d.headChance !== undefined ? { headChance: Math.max(0, Math.min(1, d.headChance)) } : {}),
+        // A clutter entry naming nothing places nothing, which is a silent
+        // no-op — the same failure the scatter guards above exist to catch.
+        // Clamped hard at 60 per 100 deck tiles: past that a jetty is a
+        // warehouse and you cannot walk down it.
+        ...(d.deckClutter
+          ? (d.deckClutter.role || d.deckClutter.species?.length
+              ? {
+                  deckClutter: {
+                    ...d.deckClutter,
+                    ...(d.deckClutter.density !== undefined
+                      ? { density: Math.max(0, Math.min(60, d.deckClutter.density)) }
+                      : {}),
+                  },
+                }
+              : (notes.push('dropped dock deckClutter that named neither a role nor any species'), {}))
+          : {}),
+      }]
+    })
+    for (const d of next.docks) {
+      if (d.nearZoneId && !zoneIds.has(d.nearZoneId)) {
+        notes.push(`dock references unknown zone "${d.nearZoneId}" — it will be placed anywhere on the shore`)
+      }
+    }
   }
 
   if (!next.ground?.length) {

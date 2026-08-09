@@ -14,9 +14,25 @@
 import { SIZE, tileIndex, type LocEntry, type MapTerrain } from '../loaders/maps'
 import { materialByte } from './palette'
 import { makeRng, pickWeighted, smoothstep, warpedFbm } from './rng'
-import { resolveSpecies, type SceneryIndex } from './scenery'
+import { chooseScenery, type SceneryIndex } from './scenery'
+import {
+  OUT_DIRS, pickDeckPiece, pickDockFamily, pickDockTrim, sampleLength, sampleWidth,
+  type DockLayout,
+} from './docks'
+import {
+  BUILDING_PURPOSES, pickTemplate, type BuildingPurpose, type TemplateModel,
+} from './templates'
+import type { BuildingModel } from './buildings'
+import type { BuildingSpec } from './types'
+import {
+  CORNER_ROT, EDGE_DX, EDGE_DY, STRAIGHT_ROT,
+  pickDoorId, pickFloorPatch, pickFurniture, pickWallDecor,
+  pickWallFamily, pickWallId,
+  sampleFootprint, SHAPE_CORNER, SHAPE_STRAIGHT,
+} from './buildings'
+import type { ContextModel, TileContext } from './context'
 import type {
-  GenerationResult, GroundBand, ProcPlan, ScatterRule, SpeciesId, SpeciesPick, Zone,
+  GenerationResult, GroundBand, ProcPlan, ScatterRule, SceneryChoice, SpeciesId, SpeciesPick, Zone,
 } from './types'
 
 const PLANES = 4
@@ -43,6 +59,8 @@ type Field = {
   /** material byte a reserved plot pad is paved with; 0 = leave the ground */
   plotMat: Uint8Array
   isWater: Uint8Array
+  /** dock decking, so scatter and the ground paint leave it alone */
+  isDeck: Uint8Array
   /** tiles from the nearest land, for water only; 0 on land */
   waterDist: Uint16Array
   occupied: Uint8Array
@@ -106,16 +124,33 @@ function buildHeights(plan: ProcPlan, f: Field) {
    * basins are scattered, so it yields ponds wherever the noise happens to dip
    * — never a coherent shore, and never a landmass with sea all round it.
    */
+  /**
+   * `waterLevel` slides the shoreline for a shaped landform.
+   *
+   * It cannot do that as a height threshold, which is what it is for `inland`.
+   * Every tile beyond the mask ends up at `norm` 0 (the mask drives `unit`
+   * negative and it clamps), so `norm <= waterLevel` selects exactly the same
+   * tiles for any level >= 0. Measured on one island seed: **52.0% sea at
+   * waterLevel 0.14 and 53.3% at 0.34** — a dial the plan exposes, the panel
+   * documents, and that did nothing.
+   *
+   * So for `coast`/`island` it moves the MASK instead. 0.34 reproduces the
+   * original window exactly, which keeps every existing theme unchanged; below
+   * that the landmass grows, above it shrinks. The constant is measured, not
+   * guessed — see `docs/procgen.md`.
+   */
+  const shift = (0.34 - (t.waterLevel ?? 0.34)) * 1.1
   const landMask = (x: number, y: number): number => {
     if (form === 'coast') {
-      // signed distance along the sea direction, -1 (open sea) to 1 (inland)
+      // signed distance along the sea direction, -1 (open sea) to 1 (inland).
+      // Less water pushes the shore seaward, so the window moves DOWN.
       const proj = ((x - halfW) * sx + (y - halfH) * sy) / reach
-      return smoothstep(-0.9, 0.2, proj)
+      return smoothstep(-0.9 - shift, 0.2 - shift, proj)
     }
     // island: radial, on the ellipse of the area so a non-square area still
-    // gets an island rather than a stripe
+    // gets an island rather than a stripe. Less water = a wider landmass.
     const r = Math.hypot((x - halfW) / halfW, (y - halfH) / halfH)
-    return 1 - smoothstep(0.62, 1.15, r)
+    return 1 - smoothstep(0.62 + shift, 1.15 + shift, r)
   }
 
   let min = Infinity
@@ -184,17 +219,27 @@ function applyZones(plan: ProcPlan, f: Field, result: GenerationResult) {
     let tiles = 0
     // flatten toward the zone's mean height, with a skirt so it melts into the
     // hillside rather than terracing into it
+    // A ZONE IS DRY LAND. None of this used to know about water, so a coastal
+    // village flattened the seabed into a shelf (the skirt reaches 10 tiles
+    // OUTSIDE the zone, so further than the circle), claimed sea tiles as
+    // village, and then `paintGround` painted its dark town earth straight over
+    // the beach band — the shoreline simply disappeared under a flat dark slab.
+    // Excluding water here fixes all three at once, because the flatten, the
+    // zone mask and the path paving all read from it.
     if (zone.flatten && zone.flatten > 0) {
       let sum = 0
       let n = 0
       for (let x = 0; x < f.w; x++) {
         for (let y = 0; y < f.h; y++) {
           if (!zoneContains(zone, x, y)) continue
+          if (f.isWater[idx(f, x, y)]) continue
           sum += f.height[idx(f, x, y)]
           n++
         }
       }
       if (n > 0) {
+        // Mean over LAND only. With the sea included, a village that half
+        // overlaps the shore averages toward sea level and sinks itself.
         const target = sum / n
         const skirt = 10
         for (let x = 0; x < f.w; x++) {
@@ -205,17 +250,27 @@ function applyZones(plan: ProcPlan, f: Field, result: GenerationResult) {
             const w = (1 - smoothstep(-1, skirt, d)) * zone.flatten
             if (w <= 0) continue
             const i = idx(f, x, y)
+            if (f.isWater[i]) continue
             f.height[i] = f.height[i] + (target - f.height[i]) * w
           }
         }
       }
     }
+    let wet = 0
     for (let x = 0; x < f.w; x++) {
       for (let y = 0; y < f.h; y++) {
         if (!zoneContains(zone, x, y)) continue
+        if (f.isWater[idx(f, x, y)]) { wet++; continue }
         f.zoneAt[idx(f, x, y)] = zi + 1
         tiles++
       }
+    }
+    // Worth saying out loud: a zone mostly in the sea is a plan that placed it
+    // badly, and the symptom (a small village) is not obviously that.
+    if (wet > tiles) {
+      result.report.warnings.push(
+        `zone "${zone.id}" is mostly water (${wet} sea tiles vs ${tiles} land) — it was clipped to the land, so it is smaller than the plan asked for`,
+      )
     }
     result.report.zones.push({ id: zone.id, kind: zone.kind, tiles })
   })
@@ -265,6 +320,21 @@ function placePlots(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
       }
       result.report.plots.push({ zoneId: zone.id, x: px, y: py, w, h, purpose: spec.purpose })
       placed++
+    }
+
+    // --- name the notable buildings, LARGEST PLOT FIRST.
+    //
+    // A church needs the room and a village's civic buildings sit on its best
+    // ground, so handing purposes out in plot order would put the bank in
+    // whatever 5x5 corner happened to be reserved first and then fail to find a
+    // template that fits it. Anything past the end of the list keeps whatever
+    // `spec.purpose` was, which is usually nothing — and that is what makes the
+    // rest of the settlement houses rather than a row of banks.
+    const named = spec.purposes ?? []
+    if (named.length) {
+      const mine = result.report.plots.filter((p) => p.zoneId === zone.id)
+      mine.sort((a, b) => b.w * b.h - a.w * a.h)
+      for (let i = 0; i < named.length && i < mine.length; i++) mine[i].purpose = named[i]
     }
   }
   computeSlopes(f)
@@ -396,7 +466,18 @@ function routePath(
       const diag = dx !== 0 && dy !== 0
       const climb = Math.abs(f.height[ni] - f.height[cur])
       // water is crossable but expensive; a bridge is a prefab problem
-      let step = (diag ? 1.414 : 1) + climb * 0.9 + (f.isWater[ni] ? 12 : 0)
+      // Water is priced as a last resort rather than banned outright, so a
+      // narrow inlet can still be crossed like a causeway when there is no way
+      // round — but never merely because the sea is flatter than the hill. At
+      // 12 it was cheaper than a modest climb; the mask was also empty at this
+      // point until `markWaterLevel` was moved ahead of routing.
+      // Reserved plots are expensive, not impossible. The router had no plot
+      // term at all, so a road ran straight through a building's footprint and
+      // the house was stamped on top of it. It stays crossable because a plot
+      // can sit across the only corridor and a village with no through-route is
+      // worse than one with a lane past a wall.
+      let step = (diag ? 1.414 : 1) + climb * 0.9
+        + (f.isWater[ni] ? 200 : 0) + (f.isPlot[ni] ? 60 : 0)
       if (wander) step += wander[ni] * wanderStrength
       if (avoid && avoid[ni]) step += 8
       if (f.isPath[ni]) step *= 0.35 // braid into existing routes
@@ -510,7 +591,11 @@ function shapePathCorners(f: Field, spec: ProcPlan['paths']) {
   }
 }
 
-function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: GenerationResult): number[][] {
+function paintPaths(
+  plan: ProcPlan, f: Field, rnd: () => number, result: GenerationResult,
+  /** foot-of-the-jetty tiles that must end up connected to the network */
+  dockAnchors: number[] = [],
+): number[][] {
   const spec = plan.paths
   const routes: number[][] = []
   if (!spec) return routes
@@ -531,16 +616,29 @@ function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
       const j = Math.floor(rnd() * (i + 1))
       ;[sides[i], sides[j]] = [sides[j], sides[i]]
     }
+    // A portal must be on LAND. On an east-facing coast the whole of side 1 is
+    // open sea, and aiming a route at it sent the road out into the water —
+    // which no cost function can undo, because the goal itself was wet. Retry
+    // along the side, and if a side has no dry point at all, drop it: an island
+    // simply has fewer ways out than a plain does.
     const portal = (side: number) => {
-      const t = 0.15 + rnd() * 0.7 // never right at a corner
-      if (side === 0) return { x: Math.round((f.w - 1) * t), y: 1 }
-      if (side === 1) return { x: f.w - 2, y: Math.round((f.h - 1) * t) }
-      if (side === 2) return { x: Math.round((f.w - 1) * t), y: f.h - 2 }
-      return { x: 1, y: Math.round((f.h - 1) * t) }
+      for (let attempt = 0; attempt < 16; attempt++) {
+        const t = 0.15 + rnd() * 0.7 // never right at a corner
+        const p = side === 0 ? { x: Math.round((f.w - 1) * t), y: 1 }
+          : side === 1 ? { x: f.w - 2, y: Math.round((f.h - 1) * t) }
+            : side === 2 ? { x: Math.round((f.w - 1) * t), y: f.h - 2 }
+              : { x: 1, y: Math.round((f.h - 1) * t) }
+        if (!f.isWater[idx(f, p.x, p.y)]) return p
+      }
+      return null
     }
-    const portals = sides.slice(0, zones.length ? 2 : 3).map(portal)
-    anchors.unshift(portals[0])
-    anchors.push(...portals.slice(1))
+    const portals = sides.slice(0, zones.length ? 2 : 3)
+      .map(portal)
+      .filter((p): p is { x: number; y: number } => p !== null)
+    if (portals.length) {
+      anchors.unshift(portals[0])
+      anchors.push(...portals.slice(1))
+    }
   }
 
   /**
@@ -589,6 +687,14 @@ function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
           const py = ty + dy
           if (!inBounds(f, px, py)) continue
           const pi = idx(f, px, py)
+          // The ROUTE avoids water; its WIDTH did not. A road runs dry along
+          // the shore and then paints two to four tiles across, and the spill
+          // lands in the sea — where the water overlay covers the paving but
+          // leaves the path's bare underlay showing as a stair-step of brown
+          // triangles. Small, and only near a coastline, which is why it
+          // survived the routing fix and only reappeared once `branches` put
+          // more road along the shore.
+          if (f.isWater[pi]) continue
           f.isPath[pi] = 1
           // Paved only where the traffic is. `settled` is a property of the
           // whole PLAN, so keying the surface off it paved every track in the
@@ -662,6 +768,13 @@ function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
         if (!inBounds(f, nx, ny)) continue
         const ni = idx(f, nx, ny)
         if (dist[ni] !== -1) continue
+        // Do not swim. The spur targeting already refuses to AIM at a water
+        // tile, but this BFS used to flood straight through the sea, so the
+        // "furthest dry land from the network" could be a headland across an
+        // inlet — and the spur then had to cross to reach it. Leaving water at
+        // -1 also leaves anything only reachable THROUGH water at -1, so such
+        // a target is never chosen in the first place.
+        if (f.isWater[ni]) continue
         dist[ni] = dist[cur] + 1
         queue[qt++] = ni
       }
@@ -804,6 +917,34 @@ function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
     if (!looped) spurs.push(route)
   }
 
+  // --- a lane down to each jetty. The generic spur targeting aims at whatever
+  // is furthest from the network, which reaches a shore anchor only by luck, so
+  // docks get an explicit one. Without it a fishing village has piers standing
+  // off an untouched beach.
+  for (const anchor of dockAnchors) {
+    const axx = Math.floor(anchor / f.h)
+    const ayy = anchor % f.h
+    let near = -1
+    let nearD = Infinity
+    for (let i = 0; i < f.isPath.length; i++) {
+      if (!f.isPath[i]) continue
+      const d = Math.hypot(Math.floor(i / f.h) - axx, (i % f.h) - ayy)
+      if (d < nearD) { nearD = d; near = i }
+    }
+    if (near < 0 || nearD < 2) continue
+    // no `avoid` field: that one exists to push a LOOP away from the route it
+    // branches off, and a lane to the shore is a short straight errand
+    const lane = routePath(
+      f, { x: axx, y: ayy },
+      { x: Math.floor(near / f.h), y: near % f.h },
+      wander, wanderStrength, null,
+    )
+    if (lane.length >= 2) {
+      routes.push(lane)
+      paint(lane, spurWidth, spurWidth)
+    }
+  }
+
   // --- wayside pads at the far end of a spur: somewhere a shop, a shrine or a
   // hut could be stamped later. Without these an unsettled area has no plots
   // at all, because plots are a ZONE feature and the wilds have no zones.
@@ -847,6 +988,621 @@ function paintPaths(plan: ProcPlan, f: Field, rnd: () => number, result: Generat
   shapePathCorners(f, spec)
   computeSlopes(f)
   return routes
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Docks
+// ---------------------------------------------------------------------------
+
+/**
+ * Lay jetties out over the water — BEFORE the paths run, so a road can be sent
+ * to each one. A pier nobody can walk to is scenery, not a dock.
+ *
+ * Everything dimensional here is sampled from the mined model (§15) rather than
+ * chosen: walkway width (71% of real piers are 1-2 tiles) and length (p50 11).
+ * The plan may override, and mostly should not.
+ *
+ * The deck starts at the FIRST WATER TILE, not at the anchor. Two reasons: 43%
+ * of real piers sit entirely over water so the apron is small, and leaving the
+ * land tile clear is what lets the path reach the foot of the pier.
+ */
+function planDocks(
+  plan: ProcPlan, f: Field, index: SceneryIndex | null, rnd: () => number,
+  result: GenerationResult,
+): DockLayout[] {
+  const specs = plan.docks ?? []
+  if (!specs.length) return []
+  const dm = index?.docks ?? null
+  if (!dm?.families.length) {
+    if (specs.length) result.report.warnings.push(
+      'docks: the cache index carries no dock vocabulary, so no jetties were built '
+      + '(rebuild the scenery index against a cache whose maps folder is readable)',
+    )
+    return []
+  }
+  const zones = plan.zones ?? []
+  const layouts: DockLayout[] = []
+
+  for (const spec of specs) {
+    const count = Math.max(0, Math.min(8, Math.round(spec.count)))
+    const zone = spec.nearZoneId ? zones.find((z) => z.id === spec.nearZoneId) : undefined
+    for (let n = 0; n < count; n++) {
+      const width = sampleWidth(dm, rnd, spec.width)
+      const length = sampleLength(dm, rnd, spec.length)
+
+      // --- pick a shore anchor: dry, free, with open water in front of it
+      let bestScore = 0
+      let bestAnchor = -1
+      let bestDir = -1
+      for (let x = 0; x < f.w; x++) {
+        for (let y = 0; y < f.h; y++) {
+          const i = idx(f, x, y)
+          if (f.isWater[i] || f.occupied[i] || f.isPlot[i] || f.isDeck[i]) continue
+          if (zone && zoneEdgeDistance(zone, x, y) > (spec.length ?? 24)) continue
+          for (let d = 0; d < 4; d++) {
+            const [dx, dy] = OUT_DIRS[d]
+            if (!inBounds(f, x + dx, y + dy) || !f.isWater[idx(f, x + dx, y + dy)]) continue
+            // how much open water lies straight ahead, and how clear the
+            // sides are — a jetty wants a channel, not a puddle
+            let ahead = 0
+            for (let t = 1; t <= length; t++) {
+              const nx = x + dx * t, ny = y + dy * t
+              if (!inBounds(f, nx, ny)) break
+              const ni = idx(f, nx, ny)
+              if (!f.isWater[ni] || f.isDeck[ni]) break
+              ahead++
+            }
+            if (ahead < 3) continue
+            // keep jetties apart, so a harbour reads as several piers rather
+            // than one raft
+            let clearance = 1
+            for (const l of layouts) {
+              const lx = Math.floor(l.anchor / f.h), ly = l.anchor % f.h
+              const dist = Math.hypot(x - lx, y - ly)
+              if (dist < 6) { clearance = 0; break }
+              clearance = Math.min(clearance, dist / 20)
+            }
+            const score = ahead * clearance + rnd() * 2
+            if (score > bestScore) { bestScore = score; bestAnchor = i; bestDir = d }
+          }
+        }
+      }
+      if (bestAnchor < 0) break
+
+      // --- walk out
+      const ax = Math.floor(bestAnchor / f.h), ay = bestAnchor % f.h
+      const [dx, dy] = OUT_DIRS[bestDir]
+      const px = -dy, py = dx
+      const headChance = spec.headChance ?? 0.25
+      const wantHead = rnd() < headChance
+      const tiles: number[] = []
+      const seen = new Set<number>()
+      let reach = 0
+      for (let t = 1; t <= length; t++) {
+        const nearEnd = t >= length - 1
+        const w = wantHead && nearEnd ? width + 2 : width
+        const row: number[] = []
+        let ok = true
+        let anyWater = false
+        for (let k = 0; k < w; k++) {
+          const off = k - ((w - 1) >> 1)
+          const tx = ax + dx * t + px * off
+          const ty = ay + dy * t + py * off
+          if (!inBounds(f, tx, ty)) { ok = false; break }
+          const ti = idx(f, tx, ty)
+          if (f.occupied[ti] || f.isPlot[ti] || f.isDeck[ti]) { ok = false; break }
+          if (f.isWater[ti]) anyWater = true
+          row.push(ti)
+        }
+        // Reaching dry land on the far side would make this a BRIDGE, and §15
+        // explicitly did not measure bridges — they are a different structure
+        // with land at both ends. Stop at the water's edge instead.
+        if (!ok || !anyWater) break
+        for (const ti of row) if (!seen.has(ti)) { seen.add(ti); tiles.push(ti) }
+        reach = t
+      }
+      // A jetty is longer than it is wide — §15 puts the long side at p50 11
+      // against a short side of 4. Without this, a walk that runs out of water
+      // after three tiles leaves a 4x4 raft bolted to the beach.
+      if (tiles.length < 3 || reach < 3 || reach < width) break
+
+      for (const ti of tiles) { f.isDeck[ti] = 1; f.occupied[ti] = 1 }
+      layouts.push({ tiles, anchor: bestAnchor, dir: bestDir, spec })
+      result.report.docks.push({
+        x: ax, y: ay, dir: bestDir, tiles: tiles.length, length: reach, width,
+      })
+    }
+  }
+  return layouts
+}
+
+/**
+ * Emit the deck itself, then whatever trim the map says it should carry, then
+ * whatever cargo the PLAN asked to stand on it.
+ *
+ * The two clutter layers are deliberately different in kind and must not be
+ * merged. Trim is mined by id, positional, and rotated against the outward
+ * normal — it reproduces the map. `deckClutter` is named by the plan, because
+ * the mined vocabulary has no crate in it and `scatter` cannot reach a deck
+ * tile (`isDeck` exists to keep it out). One tile takes one or the other.
+ */
+function runDocks(
+  layouts: DockLayout[], index: SceneryIndex | null, rnd: () => number, out: Placement[],
+  result: GenerationResult, f: Field, missing: Set<SpeciesId>,
+) {
+  const dm = index?.docks ?? null
+  if (!dm || !layouts.length) return
+  for (const layout of layouts) {
+    const family = pickDockFamily(dm, rnd)
+    if (!family) continue
+    const set = new Set(layout.tiles)
+    // Cargo is budgeted per PIER, against that pier's own tile count, so a
+    // short jetty gets a crate and a long one gets a few — a flat per-tile
+    // chance would load the long piers and leave the short ones bare.
+    const cargo = layout.spec.deckClutter
+    let cargoLeft = cargo
+      ? Math.round((layout.tiles.length / 100) * (cargo.density ?? 12))
+      : 0
+    // 43% of real piers carry NOTHING. Rolling it per PIER rather than per tile
+    // is the difference between "some docks are bare" and "every dock is
+    // half-dressed", and the measurement is about piers.
+    const bare = rnd() < (layout.spec.trim !== undefined ? 1 - layout.spec.trim : dm.bareRate)
+    const trimRate = layout.spec.trim ?? 0.18
+    for (let k = 0; k < layout.tiles.length; k++) {
+      const ti = layout.tiles[k]
+      /** deck tiles still to come, this one included — the cargo denominator */
+      const tilesLeft = layout.tiles.length - k
+      const x = Math.floor(ti / f.h), y = ti % f.h
+      // outward normal: the first non-deck 4-neighbour, in the SAME order the
+      // mine used. That correspondence is the contract — measured against one
+      // convention and replayed against another puts every edge piece askew.
+      let outDir = -1
+      for (let d = 0; d < 4; d++) {
+        const nx = x + OUT_DIRS[d][0], ny = y + OUT_DIRS[d][1]
+        if (!inBounds(f, nx, ny) || !set.has(idx(f, nx, ny))) { outDir = d; break }
+      }
+      const piece = pickDeckPiece(dm, family, outDir >= 0, outDir, rnd)
+      if (!piece) continue
+      out.push({ x, y, objectId: piece.id, shape: 22, rotation: piece.rotation })
+
+      // The map's own dressing has first claim on the tile: it is POSITIONAL —
+      // an edge piece rotated against the outward normal — so it cannot be
+      // moved elsewhere, whereas a crate can stand anywhere on the deck.
+      if (!bare && outDir >= 0 && rnd() <= trimRate) {
+        const t = pickDockTrim(dm, outDir, rnd)
+        if (t) {
+          out.push({ x, y, objectId: t.id, shape: t.shape, rotation: t.rotation })
+          continue
+        }
+      }
+
+      // ...then the plan's cargo, spread over whatever deck is still clear.
+      // Rolling against the tiles REMAINING rather than a flat chance is what
+      // stops the whole allowance landing on the shoreward end of the pier.
+      if (cargo && cargoLeft > 0 && rnd() < cargoLeft / tilesLeft) {
+        const id = pickScenery(index, cargo, rnd, missing)
+        // null means nothing in the cargo list resolves against this cache;
+        // stop asking rather than burning the allowance a tile at a time.
+        if (id === null) cargoLeft = 0
+        else {
+          out.push({ x, y, objectId: id, shape: 10, rotation: Math.floor(rnd() * 4) })
+          cargoLeft--
+        }
+      }
+    }
+  }
+  result.report.placements += 0 // counted by the caller with everything else
+}
+
+// ---------------------------------------------------------------------------
+// 3c. Buildings
+// ---------------------------------------------------------------------------
+
+/**
+ * Stamp a measured building onto a plot.
+ *
+ * The GEOMETRY is the map's — every wall loc keeps the shape and rotation the
+ * real building had, so corners, jambs and door frames are whatever RuneScape
+ * actually authored rather than whatever a rule reconstructed. Only the
+ * MATERIAL is substituted, and only where the chosen family has a member
+ * authored for that shape; a wall with no substitute keeps its original id,
+ * because a hole in the wall is worse than a mismatched panel.
+ *
+ * Doors are never substituted. A door is the one loc whose identity carries
+ * behaviour, and swapping it for a wall panel seals the building.
+ */
+function stampTemplate(
+  plan: ProcPlan, f: Field, tm: TemplateModel, bm: BuildingModel | null,
+  spec: BuildingSpec, plot: { x: number; y: number; w: number; h: number; purpose?: string },
+  rnd: () => number, out: Placement[], result: GenerationResult,
+  model: ContextModel | null,
+): boolean {
+  // The plot's own purpose wins: it was assigned per plot so a village can have
+  // one church and six houses. `spec.purpose` is the blanket fallback.
+  // Only a REAL purpose counts. `plots.purpose` predates building purposes and
+  // is a free-text label — the shipped plan says "building", which is not a
+  // kind of building, so every plot was asking for something that cannot exist,
+  // failing, and taking the fallback path with a warning attached.
+  const asked = plot.purpose ?? spec.purpose
+  const want = BUILDING_PURPOSES.includes(asked as BuildingPurpose)
+    ? (asked as BuildingPurpose)
+    : undefined
+  const ringCtxEarly = plotRingContext(f, plot)
+  let t = pickTemplate(tm, want, plot.w, plot.h, rnd, model, ringCtxEarly)
+  if (!t && want) {
+    // Asked for a church and nothing of that kind fits this plot. Say so —
+    // silently building a cottage where the plan asked for a church is the
+    // kind of quiet substitution that is impossible to notice in a screenshot.
+    result.report.warnings.push(
+      `plot at (${plot.x},${plot.y}) asked for a "${want}" but no mined template of that `
+      + `kind fits ${plot.w}x${plot.h} — built whatever fits instead. Give the plot a `
+      + 'bigger maxSize if you want the real thing.',
+    )
+    t = pickTemplate(tm, undefined, plot.w, plot.h, rnd, model, ringCtxEarly)
+  }
+  if (!t) return false
+
+  const ox = plot.x + Math.floor((plot.w - t.w) / 2)
+  const oy = plot.y + Math.floor((plot.h - t.h) / 2)
+
+  // every tile the building occupies, walls included, so it can be levelled
+  const cover = new Set<number>()
+  for (const i of t.tiles) {
+    const x = ox + Math.floor(i / t.h), y = oy + (i % t.h)
+    if (!inBounds(f, x, y)) return false
+    cover.add(idx(f, x, y))
+  }
+  for (const wl of t.walls) {
+    const x = ox + wl.x, y = oy + wl.y
+    if (inBounds(f, x, y)) cover.add(idx(f, x, y))
+  }
+  if (!cover.size) return false
+
+  // level it: a stamped building on a slope has its walls half buried
+  let sum = 0
+  for (const i of cover) sum += f.height[i]
+  const level = sum / cover.size
+  for (const i of cover) { f.height[i] = level; f.occupied[i] = 1 }
+
+  const family = pickWallFamily(bm, rnd, model, ringCtxEarly)
+  const doorSet = new Set((bm?.doors ?? []).map((d: { id: number }) => d.id))
+
+  // --- walls, AS THE MAP BUILT THEM.
+  //
+  // Material substitution is off by default, and removing it fixed more than it
+  // ever bought. Two faults, both invisible in a placement count:
+  //
+  // 1. It UNDID the context scoring. `pickTemplate` weighs a template by its
+  //    own wall ids to find one that belongs on this ground — and then this
+  //    threw those ids away and repainted the building in a family chosen
+  //    separately. What you saw was never what was scored.
+  // 2. It repainted EVERY wall-shaped loc, not just the shell. A fireplace
+  //    surround, a banister and a railing are all shapes 0-3, so an interior
+  //    hearth came out clad in exterior wall panels — Cody's "our fire in the
+  //    middle gained corners", both it and the walls being object 23795, the
+  //    substituted material.
+  //
+  // A real building already has walls that suit it. The job of choosing one
+  // that suits the AREA belongs to selection, where the evidence is.
+  let walls = 0
+  for (const wl of t.walls) {
+    const x = ox + wl.x, y = oy + wl.y
+    if (!inBounds(f, x, y)) continue
+    let id = wl.id
+    if (spec.restyle && !wl.door && !doorSet.has(wl.id)) {
+      const sub = pickWallId(bm, family, wl.shape, rnd, (i) => doorSet.has(i))
+      if (sub !== null) id = sub
+    }
+    out.push({ x, y, objectId: id, shape: wl.shape, rotation: wl.rotation })
+    walls++
+  }
+
+  // --- the interior is the building's OWN contents, replayed verbatim.
+  //
+  // NOT the furniture scatter. Running that over a stamped interior is what
+  // produced four ladders in a 5x5 cottage, six chairs and seven stools around
+  // a three-tile table, a well and a campfire indoors, and single decal locs
+  // that are one tenth of a rug. The whole point of a template is that the map
+  // already decided what is in this room; rolling dice on top of it throws
+  // away the one thing we came here for.
+  //
+  // It also fixes what no scatter could: a bed is multi-tile and needs the
+  // position and rotation the map gave it, a rug is several locs that only read
+  // as a rug together, and a bank's booths belong in the bank.
+  let furniture = 0
+  for (const c of t.contents) {
+    const x = ox + c.x, y = oy + c.y
+    if (!inBounds(f, x, y)) continue
+    out.push({ x, y, objectId: c.id, shape: c.shape, rotation: c.rotation })
+    furniture++
+  }
+
+  result.report.buildings.push({
+    x: ox, y: oy, w: t.w, h: t.h, walls, interior: t.tiles.length, furniture,
+    purpose: t.purpose, from: t.from,
+  })
+  void plan
+  return true
+}
+
+/**
+ * A `TileContext` describing the COUNTRY a plot sits in, sampled from a ring
+ * just outside it rather than from the plot itself.
+ *
+ * The plot is a paved pad, so its own material says "gravel" wherever in the
+ * world it is. `observeBuildings` profiles every family against the same ring
+ * around the real buildings it mined, so both sides of the comparison are
+ * measuring the same thing.
+ *
+ * The underlay/overlay reported are the ring's MODAL values — a single
+ * representative tile rather than a blend, because `TileContext` describes one
+ * tile and the context model bins it as one.
+ */
+function plotRingContext(
+  f: Field, plot: { x: number; y: number; w: number; h: number },
+): TileContext {
+  const RING = 3
+  const under = new Map<number, number>()
+  const over = new Map<number, number>()
+  let hSum = 0, sSum = 0, n = 0
+  for (let x = plot.x - RING; x < plot.x + plot.w + RING; x++) {
+    for (let y = plot.y - RING; y < plot.y + plot.h + RING; y++) {
+      if (x >= plot.x && x < plot.x + plot.w && y >= plot.y && y < plot.y + plot.h) continue
+      if (!inBounds(f, x, y)) continue
+      const i = idx(f, x, y)
+      const u = f.underlay[i]
+      if (u) under.set(u, (under.get(u) ?? 0) + 1)
+      const o = f.overlay[i]
+      over.set(o, (over.get(o) ?? 0) + 1)
+      hSum += f.height[i]
+      sSum += f.slope[i]
+      n++
+    }
+  }
+  const modal = (m: Map<number, number>): number => {
+    let best = 0, bestN = -1
+    for (const [v, c] of m) if (c > bestN) { bestN = c; best = v }
+    return best
+  }
+  return {
+    underlay: modal(under),
+    overlay: modal(over),
+    height: Math.round(n ? hSum / n : 0),
+    slope: Math.round(n ? sSum / n : 0),
+    // A building tile is by definition beside a wall. Saying otherwise would
+    // score every wall id against the "open ground" bin it is never seen in.
+    wall: 1,
+  }
+}
+
+/**
+ * Synthesise a building on each reserved plot: massing, walls, a door, furniture.
+ *
+ * Nothing here copies a layout — the massing is sampled from §14's measured
+ * footprint vocabulary, the walls from a mined material family, the furniture
+ * from §6's wall-distance distributions. Cody asked three times for buildings
+ * deduced from the corpus rather than stamped from prefabs.
+ *
+ * Wall placement rests on the rotation semantics measured 2026-08-09 (see
+ * `buildings.ts`): shape 0's rotation IS the exposed edge (0=+x, 1=-y, 2=-x,
+ * 3=+y), and a shape-1 corner at rotation r covers edges r and (r+1)&3.
+ */
+function runBuildings(
+  plan: ProcPlan, f: Field, index: SceneryIndex | null, rnd: () => number,
+  out: Placement[], result: GenerationResult, model: ContextModel | null,
+) {
+  const specs = plan.buildings ?? []
+  if (!specs.length) return
+  const bm = index?.buildings ?? null
+  const tm = index?.templates ?? null
+  if (!bm?.families.length) {
+    result.report.warnings.push(
+      'buildings: the cache index carries no wall vocabulary, so the plots were left empty '
+      + '(rebuild the scenery index against a cache whose maps folder is readable)',
+    )
+    return
+  }
+
+  for (const spec of specs) {
+    const plots = result.report.plots.filter((p) => !spec.zoneId || p.zoneId === spec.zoneId)
+    const fill = Math.max(0, Math.min(1, spec.fill ?? 1))
+    for (const plot of plots) {
+      if (rnd() > fill) continue
+      // leave a tile of margin so a building never touches the plot edge, which
+      // is where the path runs up to it
+      // --- PREFAB: replay a real building, with this area's masonry ---------
+      if ((spec.mode ?? 'prefab') === 'prefab' && tm?.templates.length) {
+        const stamped = stampTemplate(
+          plan, f, tm, bm, spec, plot, rnd, out, result, model,
+        )
+        if (stamped) continue
+        // no template fits this plot — fall through and synthesise rather than
+        // leaving the plot bare
+      }
+
+      const rects = sampleFootprint(rnd, Math.max(3, plot.w - 1), Math.max(3, plot.h - 1))
+      if (!rects) continue
+      // The country around the plot, NOT the plot itself — the pad is paved, so
+      // its own material says "gravel" wherever in the world it is. This is the
+      // same ring `observeBuildings` profiles each family against.
+      const ringCtx = plotRingContext(f, plot)
+      const family = pickWallFamily(bm, rnd, model, ringCtx)
+      if (!family) continue
+
+      let bw = 0, bh = 0
+      for (const r of rects) { bw = Math.max(bw, r.x + r.w); bh = Math.max(bh, r.y + r.h) }
+      const ox = plot.x + Math.floor((plot.w - bw) / 2)
+      const oy = plot.y + Math.floor((plot.h - bh) / 2)
+
+      const foot = new Set<number>()
+      for (const r of rects) {
+        for (let x = r.x; x < r.x + r.w; x++) for (let y = r.y; y < r.y + r.h; y++) {
+          const wx = ox + x, wy = oy + y
+          if (!inBounds(f, wx, wy)) { foot.clear(); break }
+          foot.add(idx(f, wx, wy))
+        }
+      }
+      if (!foot.size) continue
+
+      // level the ground under the whole footprint: a building on a slope has
+      // its walls half-buried at one end, and the plot pad only levelled the
+      // rectangle the plot reserved
+      let sum = 0
+      for (const i of foot) sum += f.height[i]
+      const level = sum / foot.size
+      for (const i of foot) { f.height[i] = level; f.occupied[i] = 1 }
+
+      // --- perimeter: which edges of each footprint tile face outside?
+      type WallTile = { i: number; x: number; y: number; edges: number[] }
+      const perimeter: WallTile[] = []
+      for (const i of foot) {
+        const x = Math.floor(i / f.h), y = i % f.h
+        const edges: number[] = []
+        for (let e = 0; e < 4; e++) {
+          const nx = x + EDGE_DX[e], ny = y + EDGE_DY[e]
+          if (!inBounds(f, nx, ny) || !foot.has(idx(f, nx, ny))) edges.push(e)
+        }
+        if (edges.length) perimeter.push({ i, x, y, edges })
+      }
+      if (perimeter.length < 4) continue
+
+      // --- the door goes on the side nearest a path, so the building faces the
+      // road rather than presenting a blank wall to it. Reachability is not
+      // probabilistic here: exactly one perimeter tile is chosen and it always
+      // becomes a door.
+      // Only a STRAIGHT wall tile can be a door. A corner tile is drawn as one
+      // shape-1 loc covering both its edges, so hanging a door on it emitted a
+      // corner and no door at all — which is how two of six buildings came out
+      // sealed. Reachability has to be guaranteed, not probable (§6).
+      const doorCandidates = perimeter.filter((t) => t.edges.length === 1)
+      let doorTile = doorCandidates[0] ?? perimeter[0]
+      let doorScore = Infinity
+      for (const t of doorCandidates) {
+        let best = Infinity
+        for (let r = 1; r <= 6 && best === Infinity; r++) {
+          for (let dx = -r; dx <= r && best === Infinity; dx++) {
+            for (let dy = -r; dy <= r; dy++) {
+              if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue
+              const nx = t.x + dx, ny = t.y + dy
+              if (!inBounds(f, nx, ny)) continue
+              if (f.isPath[idx(f, nx, ny)]) { best = r; break }
+            }
+          }
+        }
+        const score = best + rnd()
+        if (score < doorScore) { doorScore = score; doorTile = t }
+      }
+      const doorId = pickDoorId(bm, rnd, family, model, ringCtx)
+
+      // Doors are family MEMBERS (the key is every wall id in the building), so
+      // they must be kept out of the ordinary panel picker or they get used as
+      // walls. The one door is placed deliberately, below.
+      const doorSet = new Set((bm.doors ?? []).map((d) => d.id))
+      const notADoor = (id: number) => doorSet.has(id)
+
+      let wallCount = 0
+      let skipped = 0
+      for (const t of perimeter) {
+        // A tile with two exposed edges that meet is a corner, and the client
+        // seals that with ONE shape-2 whole corner. Shape 1 is a diagonal post
+        // that blocks nothing cardinal — see SHAPE_CORNER.
+        if (t.edges.length === 2) {
+          const [a, b] = t.edges
+          const rot = CORNER_ROT[Math.min(a, b) * 4 + Math.max(a, b)]
+          if (rot !== undefined) {
+            const id = pickWallId(bm, family, SHAPE_CORNER, rnd, notADoor)
+            if (id !== null) {
+              out.push({ x: t.x, y: t.y, objectId: id, shape: SHAPE_CORNER, rotation: rot })
+              wallCount++
+            } else skipped++
+            continue
+          }
+          // two OPPOSITE edges (a one-tile-thick spur) is not a corner; fall
+          // through and seal each side with its own straight panel
+        }
+        for (const e of t.edges) {
+          const isDoor = t === doorTile && doorId !== null && e === t.edges[0]
+          const id = isDoor ? doorId : pickWallId(bm, family, SHAPE_STRAIGHT, rnd, notADoor)
+          if (id === null) { skipped++; continue }
+          // STRAIGHT_ROT, not `e`. `e` is the spelling authored from the tile on
+          // the far side of the edge, so it drew every wall against the wrong
+          // face and the ring came out offset by a tile.
+          out.push({ x: t.x, y: t.y, objectId: id, shape: SHAPE_STRAIGHT, rotation: STRAIGHT_ROT[e] })
+          wallCount++
+        }
+      }
+
+      // --- interior
+      //
+      // Furniture was disabled while the wall vocabulary was wrong, because a
+      // furnished interior made it impossible to tell whether a stray object
+      // had been chosen as a wall or as a furnishing. It is back now that the
+      // mined list is CLASSIFIED (`buildings.ts` `FurnitureClass`): roofs are
+      // excluded, floor decals are their own class, and ranking is by distinct
+      // buildings rather than raw placements — which is what used to put
+      // "Potato" and "Wheat" at the top of the list.
+      //
+      // PURPOSE FIXTURES ARE NOT PLACED. A bank booth or an altar states what a
+      // building is, and no plot carries a purpose yet, so `pickFurniture` and
+      // friends filter them out entirely. They are mined and classified,
+      // waiting for labelled plots.
+      // THE WHOLE FOOTPRINT IS THE INTERIOR.
+      //
+      // A wall sits on a tile EDGE, so a perimeter tile is a room tile that
+      // happens to have a wall on one side — it is not consumed by it. Removing
+      // the perimeter left a 5x5 building with a 3x3 room and a 4x3 with a 2x1,
+      // which is why every generated house was something two people could stand
+      // in. This is the identical tile-versus-edge error that `observeBuildings`
+      // had on the mining side: it was fixed there and left standing here, so
+      // the detector and the builder disagreed about what a building even is.
+      const interior = [...foot]
+      const furnishRate = spec.furnish ?? 0.22
+      let furniture = 0
+      for (const i of interior) {
+        const x = Math.floor(i / f.h), y = i % f.h
+        // distance to the nearest tile carrying a wall — 0 ON a perimeter tile,
+        // which is the same measure `observeBuildings` records
+        let dist = 9
+        for (const t of perimeter) {
+          const d = Math.abs(t.x - x) + Math.abs(t.y - y)
+          if (d < dist) dist = d
+          if (!dist) break
+        }
+        // A floor patch shares the tile with whatever stands on it, so it is
+        // rolled separately rather than competing for the tile. Measured at 71%
+        // of buildings but only ~19% interior coverage, hence the low rate.
+        if (rnd() < 0.12) {
+          const patch = pickFloorPatch(bm, rnd)
+          if (patch) {
+            out.push({ x, y, objectId: patch.id, shape: patch.shape, rotation: Math.floor(rnd() * 4) })
+          }
+        }
+        if (rnd() > furnishRate) continue
+        // Against a wall, some of what the map puts there is MOUNTED on it.
+        const piece = dist === 0 && rnd() < 0.35
+          ? pickWallDecor(bm, rnd)
+          : pickFurniture(bm, dist, rnd)
+        if (!piece) continue
+        out.push({ x, y, objectId: piece.id, shape: piece.shape, rotation: Math.floor(rnd() * 4) })
+        f.occupied[i] = 1
+        furniture++
+      }
+
+      // A gap in the perimeter is a hole in the building, and it is invisible
+      // in a placement count — say so rather than shipping a wall with a
+      // missing panel.
+      if (skipped) {
+        result.report.warnings.push(
+          `a building at (${ox},${oy}) is missing ${skipped} wall piece(s): its material family `
+          + 'has no member authored for the shape that edge needs',
+        )
+      }
+      result.report.buildings.push({
+        x: ox, y: oy, w: bw, h: bh, walls: wallCount, interior: interior.length, furniture,
+      })
+    }
+  }
+  computeSlopes(f)
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +1677,21 @@ function paintGround(plan: ProcPlan, f: Field, rnd: () => number) {
     }
     computeWaterDistance(f)
   }
+}
+
+/**
+ * Mark sea from the height field alone, early enough for zones, plots and paths
+ * to respect it.
+ *
+ * This is deliberately only the `waterLevel` half of the test. A ground band can
+ * also paint the water overlay on its own `maxHeight`, but that is a
+ * ground-painting decision and stays in `paintGround`; the doc's advice to tie
+ * that band's `maxHeight` to `waterLevel` is what keeps the two agreeing.
+ */
+function markWaterLevel(plan: ProcPlan, f: Field) {
+  const level = plan.terrain.waterLevel
+  if (level === undefined) return
+  for (let i = 0; i < f.norm.length; i++) if (f.norm[i] <= level) f.isWater[i] = 1
 }
 
 /**
@@ -1000,31 +1771,49 @@ function markOccupied(f: Field, x: number, y: number, spacing: number) {
   }
 }
 
-function speciesId(
+/**
+ * The tile as the CONTEXT MODEL sees it, in the cache's own units.
+ *
+ * `f.underlay`/`f.overlay` already hold material BYTES and `f.height`/`f.slope`
+ * are in stored units, which is exactly what the scan measured off the dump —
+ * so no conversion, and none should be introduced. `wall` is always 2: the
+ * generator plants outdoors, and that is the honest answer rather than a
+ * neutral one, since it steers selection away from furniture.
+ */
+function tileContext(f: Field, i: number): TileContext {
+  return {
+    underlay: f.underlay[i],
+    overlay: f.overlay[i],
+    height: Math.round(f.height[i]),
+    slope: Math.round(f.slope[i]),
+    wall: 2,
+  }
+}
+
+/**
+ * What to plant here.
+ *
+ * A thin wrapper over `chooseScenery`, which scores every offered species AND
+ * every variant of each in one pass. The old shape of this function picked the
+ * species from the plan's weights first and only then let context choose a
+ * variant — so context could never veto the species itself. See the comment on
+ * `chooseScenery` for why that mattered.
+ */
+function pickScenery(
   index: SceneryIndex | null,
-  picks: SpeciesPick[],
+  choice: SceneryChoice,
   rnd: () => number,
   missing: Set<SpeciesId>,
+  /** what the real map plants where, and the tile we're planting on */
+  model?: ContextModel | null,
+  ctx?: TileContext | null,
 ): number | null {
-  const pick = pickWeighted(picks, rnd)
-  if (!pick) return null
-  const id = resolveSpecies(index, pick.species, rnd)
-  if (id === null) {
-    missing.add(pick.species)
-    // fall back to any other species in the same list that DOES resolve, so a
-    // cache missing "tree_magic" still gets a forest
-    for (const alt of picks) {
-      const altId = resolveSpecies(index, alt.species, rnd)
-      if (altId !== null) return altId
-    }
-    return null
-  }
-  return id
+  return chooseScenery(index, choice, rnd, model, ctx, missing)?.id ?? null
 }
 
 function runScatter(
   plan: ProcPlan, f: Field, index: SceneryIndex | null, rnd: () => number,
-  out: Placement[], missing: Set<SpeciesId>,
+  out: Placement[], missing: Set<SpeciesId>, model: ContextModel | null,
 ) {
   const zones = plan.zones ?? []
   for (const rule of plan.scatter ?? []) {
@@ -1055,7 +1844,7 @@ function runScatter(
         y = Math.floor(rnd() * f.h)
       }
       if (!inBounds(f, x, y) || !eligible(f, rule, zones, x, y)) continue
-      const id = speciesId(index, rule.species, rnd, missing)
+      const id = pickScenery(index, rule, rnd, missing, model, tileContext(f, idx(f, x, y)))
       if (id === null) break // nothing in this rule resolves; stop retrying
       out.push({
         x, y, objectId: id, shape: 10,
@@ -1074,7 +1863,7 @@ function runScatter(
  */
 function runBarriers(
   plan: ProcPlan, f: Field, index: SceneryIndex | null, rnd: () => number,
-  out: Placement[], missing: Set<SpeciesId>,
+  out: Placement[], missing: Set<SpeciesId>, model: ContextModel | null,
 ) {
   const zones = plan.zones ?? []
   for (const ring of plan.barriers ?? []) {
@@ -1102,7 +1891,7 @@ function runBarriers(
           return diff < arc
         })
         if (gapped) continue
-        const id = speciesId(index, ring.species, rnd, missing)
+        const id = pickScenery(index, ring, rnd, missing, model, tileContext(f, idx(f, x, y)))
         if (id === null) break
         out.push({ x, y, objectId: id, shape: 10, rotation: Math.floor(rnd() * 4) })
         f.occupied[i] = 1
@@ -1113,13 +1902,16 @@ function runBarriers(
 
 function runResources(
   plan: ProcPlan, f: Field, index: SceneryIndex | null, rnd: () => number,
-  out: Placement[], missing: Set<SpeciesId>,
+  out: Placement[], missing: Set<SpeciesId>, model: ContextModel | null,
 ) {
   const zones = plan.zones ?? []
   for (const node of plan.resources ?? []) {
     const zone = zones.find((z) => z.id === node.zoneId)
     if (!zone) continue
     const centre = zoneCentre(zone)
+    const ccx = Math.max(0, Math.min(f.w - 1, Math.round(centre.x)))
+    const ccy = Math.max(0, Math.min(f.h - 1, Math.round(centre.y)))
+    const centreCtx = tileContext(f, idx(f, ccx, ccy))
     const radius = zone.shape.type === 'circle' ? zone.shape.radius : Math.max(zone.shape.w, zone.shape.h) / 2
     // sink the pit so it reads as excavated ground
     if (node.depth) {
@@ -1155,11 +1947,35 @@ function runResources(
 
     // One object id per ore type, resolved once, so a pocket is all one ore
     // instead of the per-rock weighted pick that produced the even mixture.
+    // A plan may name the ore species outright, or just say `role: 'ore'` and
+    // let the map decide what this ground carries. A role is sampled DOWN: a
+    // real mining site runs 1-8 types with a median of 4 (measured above), so
+    // handing it every seam in the game would produce a mine that reads as a
+    // sampler rather than a place.
+    let oreSpecies: SpeciesPick[]
+    if (node.species?.length) {
+      oreSpecies = node.species
+    } else if (node.role) {
+      const wantTypes = 2 + Math.floor(rnd() * 4) // 2-5, straddling the measured median
+      const seen = new Set<SpeciesId>()
+      oreSpecies = []
+      for (let t = 0; t < wantTypes * 8 && oreSpecies.length < wantTypes; t++) {
+        const p = chooseScenery(index, { role: node.role }, rnd, model, centreCtx, missing)
+        if (!p || seen.has(p.species)) continue
+        seen.add(p.species)
+        oreSpecies.push({ species: p.species })
+      }
+    } else {
+      continue
+    }
+
     const kinds: { id: number; weight: number }[] = []
-    for (const s of node.species) {
+    for (const s of oreSpecies) {
       const weight = s.weight ?? 1
       if (weight <= 0) continue
-      const id = speciesId(index, [{ species: s.species }], rnd, missing)
+      // one id per ore TYPE for the whole body, so the zone centre is the
+      // right tile to ask about rather than any single rock's
+      const id = pickScenery(index, { species: [{ species: s.species }] }, rnd, missing, model, centreCtx)
       if (id === null) continue
       kinds.push({ id, weight })
     }
@@ -1218,7 +2034,7 @@ function runResources(
 
 function runProps(
   plan: ProcPlan, f: Field, index: SceneryIndex | null, rnd: () => number,
-  out: Placement[], missing: Set<SpeciesId>,
+  out: Placement[], missing: Set<SpeciesId>, model: ContextModel | null,
 ) {
   const zones = plan.zones ?? []
   for (const prop of plan.props ?? []) {
@@ -1232,7 +2048,11 @@ function runProps(
       y = Math.round(c.y)
     }
     if (x === undefined || y === undefined || !inBounds(f, x, y)) continue
-    const id = speciesId(index, [{ species: prop.species }], rnd, missing)
+    const id = pickScenery(
+      index,
+      { role: prop.role, species: prop.species ? [{ species: prop.species }] : undefined },
+      rnd, missing, model, tileContext(f, idx(f, x, y)),
+    )
     if (id === null) continue
     // flatten and clear a pad, so a fountain doesn't sit half-buried
     const pad = prop.pad ?? 2
@@ -1255,6 +2075,7 @@ function runPathLighting(
   plan: ProcPlan, f: Field, routes: number[][], index: SceneryIndex | null,
   rnd: () => number, out: Placement[], missing: Set<SpeciesId>,
   lights: { x: number; y: number; colorHsl: number; size2d: number }[],
+  model: ContextModel | null,
 ) {
   const spec = plan.paths?.lighting
   if (!spec) return
@@ -1284,7 +2105,7 @@ function runPathLighting(
       if (!inBounds(f, px, py)) continue
       const pi = idx(f, px, py)
       if (f.isPath[pi] || f.occupied[pi] || f.isWater[pi]) continue
-      const id = speciesId(index, spec.species, rnd, missing)
+      const id = pickScenery(index, spec, rnd, missing, model, tileContext(f, pi))
       if (id === null) return
       out.push({ x: px, y: py, objectId: id, shape: 10, rotation: Math.floor(rnd() * 4) })
       f.occupied[pi] = 1
@@ -1319,7 +2140,9 @@ function emptyTerrain(): MapTerrain {
  * Run a plan. Pure apart from reading the scenery index; the caller decides
  * whether to preview or save the result.
  */
-export function generate(plan: ProcPlan, index: SceneryIndex | null): GenerationResult {
+export function generate(
+  plan: ProcPlan, index: SceneryIndex | null, model: ContextModel | null = null,
+): GenerationResult {
   const regionsW = plan.area.x1 - plan.area.x0 + 1
   const regionsH = plan.area.y1 - plan.area.y0 + 1
   const w = regionsW * SIZE
@@ -1337,6 +2160,7 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
     isPlot: new Uint8Array(tiles),
     plotMat: new Uint8Array(tiles),
     isWater: new Uint8Array(tiles),
+    isDeck: new Uint8Array(tiles),
     waterDist: new Uint16Array(tiles),
     occupied: new Uint8Array(tiles),
     zoneAt: new Uint16Array(tiles),
@@ -1346,7 +2170,10 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
     underwater: new Map(),
     objects: new Map(),
     environment: new Map(),
-    report: { regions: regionsW * regionsH, placements: 0, zones: [], plots: [], unresolved: [], warnings: [] },
+    report: {
+      regions: regionsW * regionsH, placements: 0,
+      zones: [], plots: [], docks: [], buildings: [], unresolved: [], warnings: [],
+    },
   }
   const rnd = makeRng(plan.seed ^ 0x9e3779b9)
   const missing = new Set<SpeciesId>()
@@ -1361,9 +2188,20 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
 
   buildHeights(plan, f)
   computeSlopes(f)
+  // BEFORE zones, plots and paths — all three test `isWater` and all three ran
+  // while it was still all zeroes, because only `paintGround` ever filled it in
+  // and that runs later. The router's own water penalty was dead code, so a
+  // coast plan routed roads out into the open sea, and plots could be reserved
+  // on the seabed. The water LEVEL only needs the heightmap, so it can be known
+  // here; the overlay-driven half still resolves during the ground paint.
+  markWaterLevel(plan, f)
   applyZones(plan, f, result)
   placePlots(plan, f, rnd, result)
-  const routes = paintPaths(plan, f, rnd, result)
+  // Docks are laid out BEFORE the paths so a road can be routed to the foot of
+  // each jetty. A pier nobody can walk to is scenery; the locs themselves are
+  // emitted later, with everything else.
+  const docks = planDocks(plan, f, index, rnd, result)
+  const routes = paintPaths(plan, f, rnd, result, docks.map((d) => d.anchor))
   paintGround(plan, f, rnd)
 
   const placements: Placement[] = []
@@ -1371,11 +2209,15 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
   // ORDER MATTERS. Everything marks occupancy, so the deliberate things go
   // down first and the filler fits around them — scatter last, or it takes the
   // verges the lamps need and the path ends up unlit.
-  runResources(plan, f, index, rnd, placements, missing)
-  runProps(plan, f, index, rnd, placements, missing)
-  runPathLighting(plan, f, routes, index, rnd, placements, missing, lights)
-  runBarriers(plan, f, index, rnd, placements, missing)
-  runScatter(plan, f, index, rnd, placements, missing)
+  runDocks(docks, index, rnd, placements, result, f, missing)
+  // Buildings before the filler for the usual reason: they claim occupancy, so
+  // scatter fits around them instead of planting a tree in the parlour.
+  runBuildings(plan, f, index, rnd, placements, result, model)
+  runResources(plan, f, index, rnd, placements, missing, model)
+  runProps(plan, f, index, rnd, placements, missing, model)
+  runPathLighting(plan, f, routes, index, rnd, placements, missing, lights, model)
+  runBarriers(plan, f, index, rnd, placements, missing, model)
+  runScatter(plan, f, index, rnd, placements, missing, model)
 
   // heights changed after the ground paint (props/resources level things), so
   // recompute normalized height once more before quantizing
@@ -1433,15 +2275,72 @@ export function generate(plan: ProcPlan, index: SceneryIndex | null): Generation
     if (!list) continue
     list.push([p.objectId, p.shape, p.rotation, p.x % SIZE, p.y % SIZE, 0] as LocEntry)
     result.report.placements++
-    // Two-part trees: an oak is a trunk on plane 0 and a separate canopy loc
-    // on plane 1, with a DIFFERENT object id. Emit only the trunk and you get
-    // a wood of bare poles. The real map pairs them at 97-100%, always on the
-    // same tile and — measured — with the same shape and the same rotation
-    // (99.3%), so the canopy is a straight copy one plane up.
-    const canopy = index?.canopies?.[p.objectId]
-    if (canopy) {
-      list.push([canopy, p.shape, p.rotation, p.x % SIZE, p.y % SIZE, 1] as LocEntry)
-      result.report.canopies = (result.report.canopies ?? 0) + 1
+    // Multi-part trees: the ground loc is only the bottom of a stack. An oak
+    // is a trunk on plane 0 and a canopy on plane 1; a TROPICAL tree is three
+    // locs — stump 1326, trunk 1327, crown 1328 — each with a different object
+    // id. Emit only the ground part and you get a wood of bare poles. The real
+    // map stacks them on the same tile with the same shape and rotation
+    // (99.3% of 2,439 oak pairs), so each layer is a straight copy one plane up.
+    const layers = index?.canopies?.[p.objectId]
+    // Shape-check rather than trust: an index persisted by an older build held
+    // a different shape here, which read as `undefined` and emitted locs with
+    // no object — canopies vanished with no error anywhere. Skipping is the
+    // right failure: bare trunks beat invisible nulls written into a region.
+    if (Array.isArray(layers) && layers.length) {
+      const lx = p.x % SIZE
+      const ly = p.y % SIZE
+      // Each layer also needs ITS plane at the right HEIGHT over this tile.
+      // With no stored height the renderer puts a plane a full storey (960)
+      // below the one under it — right for a tropical tree at every level, and
+      // badly wrong for an oak, which stores byte 1 so plane 1 sits flush with
+      // the ground and its canopy model carries its own height.
+      //
+      // The height must be written at the vertices the renderer actually
+      // SAMPLES, and those depend on the loc's FOOTPRINT, not its tile:
+      // `buildLocsMesh` averages four heights at
+      //   x + (size>>1) and x + ((size+1)>>1)   (same for y)
+      // so a 1x1 tropical layer samples x/x+1 but a 3x3 oak canopy samples
+      // x+1/x+2. Writing the tile alone, or even a 2x2 block, left the big
+      // ones reading the fallback — which is exactly why tropical (1x1) and
+      // evergreen (2x2) looked right while oak and yew (3x3) floated ~720
+      // units up. Heights live on a 65x65 VERTEX grid where vertex (gx,gy)
+      // reads tile (gx,gy), hence writing TILES to move vertices.
+      const targets: { t: MapTerrain; ti: number; lift: number }[] = []
+      let reachable = true
+      for (let i = 0; i < layers.length && reachable; i++) {
+        const layer = layers[i]
+        if (!(layer.id > 0)) { reachable = false; break }
+        if (layer.lift < 0) continue
+        const lo = layer.size >> 1
+        const hi = (layer.size + 1) >> 1
+        for (let dx = lo; dx <= hi && reachable; dx++) {
+          for (let dy = lo; dy <= hi; dy++) {
+            const ax = p.x + dx
+            const ay = p.y + dy
+            // a sampled tile can fall in the next region along, or outside the
+            // generated area entirely when the tree sits on its outer edge
+            const t = result.terrain.get(
+              ((plan.area.x0 + Math.floor(ax / SIZE)) << 8) | (plan.area.y0 + Math.floor(ay / SIZE)),
+            )
+            if (!t) { reachable = false; break }
+            targets.push({ t, ti: tileIndex(i + 1, ax % SIZE, ay % SIZE), lift: layer.lift })
+          }
+        }
+      }
+      // All or nothing, across the WHOLE stack. A tree on the area's outer
+      // edge needs a vertex owned by a region we aren't generating, and a
+      // partly-written height is the worst outcome: the average lands between
+      // the two and floats the piece clear of the one below. A bare trunk
+      // there is honest and barely noticeable.
+      if (!reachable) continue
+      for (const { t, ti, lift } of targets) {
+        t.heightValue[ti] = lift
+        t.heightPresence[ti >> 3] |= 1 << (ti & 0x7)
+      }
+      for (let i = 0; i < layers.length; i++) {
+        list.push([layers[i].id, p.shape, p.rotation, lx, ly, i + 1] as LocEntry)
+        result.report.canopies = (result.report.canopies ?? 0) + 1
+      }
     }
   }
 

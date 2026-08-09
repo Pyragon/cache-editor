@@ -173,6 +173,25 @@
   color: #8b93a3;
 }
 
+/* A note can be a numbered procedure as well as a paragraph. `margin: 0` above
+   strips the indent browsers hang list markers in, so put just that back —
+   the prose width and colour are inherited unchanged. */
+ol.tex-op-note,
+ul.tex-op-note {
+  padding-left: 20px;
+}
+
+ol.tex-op-note li + li,
+ul.tex-op-note li + li {
+  margin-top: 4px;
+}
+
+/* Consecutive notes (a lead-in paragraph followed by the steps) would
+   otherwise collide, since both have zero margin. */
+.tex-op-note + .tex-op-note {
+  margin-top: 8px;
+}
+
 /* The section's lead-in paragraph, which sits directly above the output selectors. */
 .tex-op-intro {
   margin-bottom: 14px;

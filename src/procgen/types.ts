@@ -55,7 +55,18 @@ export type SpeciesId =
   | 'tree_tropical'
   // undergrowth
   | 'bush' | 'fern' | 'plant' | 'flowers' | 'reeds' | 'grass_tuft' | 'mushroom'
-  | 'grass_jungle' | 'plant_jungle'
+  | 'grass_jungle' | 'plant_jungle' | 'nettles'
+  // NOTE on the waterfront: `fishing_spot` and `fishing_ledge` were added here
+  // and then REMOVED 2026-08-07 after Cody looked at them in the scene. Passing
+  // the placement tests is not the same as being placeable on its own:
+  //   - a fishing spot in RuneScape is an NPC, not scenery, so a scenery object
+  //     named "Fishing spot" is never what a waterfront wants;
+  //   - "Fishing ledge" is a slab of concrete authored to sit ON an existing
+  //     dock, so standing alone at a shoreline it reads as debris.
+  // Both looked like good candidates on the numbers (185 placements, 100% on
+  // the ground, rarely near a wall) — which is the lesson: usage statistics say
+  // the game places a thing, not that it can stand by itself. A real waterfront
+  // is a multi-tile STRUCTURE (`docs/map-learning.md` §5), not a scatter rule.
   // stone
   | 'rock_small' | 'rock_large' | 'boulder' | 'rubble' | 'stalagmite'
   // ore-bearing
@@ -69,6 +80,60 @@ export type SpeciesId =
 
 /** One species with a relative weight inside a pick list. */
 export type SpeciesPick = { species: SpeciesId; weight?: number }
+
+/**
+ * What a scatter rule is FOR, as opposed to what it plants.
+ *
+ * A role is the preferred way to write a rule, and species lists are the
+ * escape hatch. The reason is that a plan is authored either by a hand-written
+ * theme or by a language model reading a one-line description, and **neither
+ * has read the map**. Writing `species: ['tree_tropical']` forces the author to
+ * guess the biome; naming the role `canopy` lets the generator answer from
+ * measurement — every species in the role competes, scored by how often the
+ * real game plants it on ground like this one.
+ *
+ * This works because the plan already paints the ground, and **underlay is by
+ * far the strongest predictor of what grows on it (34.5% of object identity,
+ * `docs/map-learning.md` §12)**. Get the ground right and the vegetation
+ * follows by itself, which is exactly what the real map does.
+ *
+ * Roles are only safe BECAUSE the context model exists. A role scored on global
+ * frequency alone would walk straight back into the biome-conflation trap
+ * (§11): jungle grass is 77% of all grass tufts in the game, so `undergrowth`
+ * would carpet a snowfield in jungle. Context is what stops that.
+ */
+export type RoleId =
+  /** the tree layer — whatever kind of tree belongs on this ground */
+  | 'canopy'
+  /** dead, burnt, fallen, stumps: the things a bleak or logged place has */
+  | 'deadwood'
+  /** bushes, ferns, plants, flowers, reeds, tufts, mushrooms */
+  | 'undergrowth'
+  /** rocks, boulders, rubble — scenery stone, not ore */
+  | 'loose_stone'
+  /** ore-bearing nodes, for mines and quarries */
+  | 'ore'
+  /** fences, gates, hedges, low stone walls — the things that divide land */
+  | 'enclosure'
+  /** crates, barrels, benches, wells, signposts, statues, fountains */
+  | 'settlement_prop'
+  /** torches, lanterns, lamp posts, candles */
+  | 'light'
+  /** gravestones, for graveyards */
+  | 'memorial'
+  /** reeds and the waterside vocabulary */
+  | 'waterside'
+
+/**
+ * What to plant: a ROLE (preferred — the generator picks from the map) or an
+ * explicit species list (an override, when the plan really does mean that one
+ * thing). Giving both narrows the role to those species while keeping the
+ * context scoring.
+ */
+export type SceneryChoice = {
+  role?: RoleId
+  species?: SpeciesPick[]
+}
 
 /** What a zone is FOR. Drives defaults, and is what a prefab stamper reads later. */
 export type ZoneKind =
@@ -93,7 +158,26 @@ export type Zone = {
   /** Plot hints for the prefab system: how many building pads, and how big.
    *  `underlayId` paves the pad so a reserved plot is VISIBLE — until the
    *  prefab system exists, an unpaved plot is an invisible promise. */
-  plots?: { count: number; minSize?: number; maxSize?: number; purpose?: string; underlayId?: number }
+  plots?: {
+    count: number
+    minSize?: number
+    maxSize?: number
+    purpose?: string
+    underlayId?: number
+    /**
+     * What the notable buildings in this zone are, e.g.
+     * `["church", "bank", "pub"]`.
+     *
+     * Assigned to the LARGEST plots first, because a church needs the room and
+     * a village's civic buildings sit on its best ground. Plots past the end of
+     * the list get no purpose and take whatever template fits — which is what
+     * makes the rest of the settlement houses rather than a row of banks.
+     *
+     * Only the prefab path can honour these; synthesis has no notion of what a
+     * building is for.
+     */
+    purposes?: string[]
+  }
 }
 
 export type WeightedUnderlay = { underlayId: number; weight?: number }
@@ -120,7 +204,9 @@ export type GroundBand = {
  */
 export type ScatterRule = {
   id?: string
-  species: SpeciesPick[]
+  /** what to plant — a role (preferred) and/or an explicit species list */
+  role?: RoleId
+  species?: SpeciesPick[]
   /** zone id, or omitted for the whole area */
   zoneId?: string
   /** placements per 100 tiles of eligible ground */
@@ -153,7 +239,8 @@ export type ScatterRule = {
 export type BarrierRing = {
   /** the zone whose edge it hugs */
   aroundZoneId: string
-  species: SpeciesPick[]
+  role?: RoleId
+  species?: SpeciesPick[]
   /** rings of scenery, in tiles */
   thickness?: number
   /** how many ways through */
@@ -165,7 +252,8 @@ export type BarrierRing = {
 
 /** Lamps/torches spaced along the path network. */
 export type PathLighting = {
-  species: SpeciesPick[]
+  role?: RoleId
+  species?: SpeciesPick[]
   /** tiles between lights */
   every: number
   /** offset from the path centre line, in tiles */
@@ -253,7 +341,8 @@ export type PathSpec = {
 /** A cluster of ore/rock nodes — "an area with resources, like a mine". */
 export type ResourceNode = {
   zoneId: string
-  species: SpeciesPick[]
+  role?: RoleId
+  species?: SpeciesPick[]
   count: number
   /** dig the ground down so it reads as a pit rather than a field of rocks */
   depth?: number
@@ -263,7 +352,8 @@ export type ResourceNode = {
 
 /** One deliberately placed thing — a fountain in a plaza, a statue, a well. */
 export type PropPlacement = {
-  species: SpeciesId
+  role?: RoleId
+  species?: SpeciesId
   /** centre of a zone, or explicit area-relative tiles */
   zoneId?: string
   x?: number
@@ -318,8 +408,140 @@ export type TerrainSpec = {
    * being a clean line or circle.
    */
   landform?: 'inland' | 'coast' | 'island' | 'lakes'
-  /** degrees; the direction the open sea lies in for `coast`. 0 = east. */
+  /**
+   * Degrees; the bearing the LAND lies toward for `coast`, so the sea is on the
+   * opposite side. 0 = land to the east and open sea to the WEST.
+   *
+   * The name says coast and the old comment said "the direction the open sea
+   * lies in", which is the exact opposite of what it does: the mask projects
+   * along `(cos, sin)` and treats a large projection as inland. Measured on a
+   * 2x2 with `coastAngle: 0` — every tile below x = 32 is sea and everything
+   * east of it is land. The behaviour is left alone rather than flipped
+   * because every shipped theme's shoreline is built on it; only the
+   * description was wrong.
+   */
   coastAngle?: number
+}
+
+/**
+ * A jetty running out over water.
+ *
+ * The plan says how many and roughly what size; it never names deck object ids,
+ * because the DECK VOCABULARY IS MINED (§15) and most of it is unnamed in the
+ * cache. That is the §9a split holding: intent here, vocabulary in the
+ * generator.
+ *
+ * Every dimension is optional, and omitting it is the better default — the
+ * generator then samples the measured distribution (walkway width p50 2, with
+ * 71% of real piers at 1-2 tiles; long side p50 11) instead of taking a guess
+ * from a planner that has not read the map.
+ */
+export type DockSpec = {
+  /** how many jetties to build along the shore */
+  count: number
+  /**
+   * Build near this zone if it reaches the water. Omitted = anywhere on the
+   * area's shoreline with enough open water in front of it.
+   */
+  nearZoneId?: string
+  /** deck tiles across. Omit to sample the measured 1-2. Clamped to 1-4. */
+  width?: number
+  /** how far out over the water. Omit to sample the measured ~11. */
+  length?: number
+  /**
+   * Chance a jetty gets a widened head at its seaward end (a T or an L).
+   * Defaults to a modest rate; real piers are mostly plain runs.
+   */
+  headChance?: number
+  /**
+   * 0..1 — how heavily to trim the deck with barrels, railings and ladders.
+   * Defaults to the measured rate, and the measurement is a warning: **43% of
+   * real piers carry NOTHING at all.** A dock loaded with clutter is the
+   * generated tell.
+   */
+  trim?: number
+  /**
+   * Named cargo standing ON the deck — crates and barrels on a working pier.
+   *
+   * This is the one place a plan may name what goes on a jetty, and it exists
+   * because `trim` cannot express it. Trim is the MINED vocabulary: ids lifted
+   * off real piers, most of them unnamed in the cache (§15), positional, and
+   * placed on edge tiles against the outward normal. It reproduces what the map
+   * puts on a pier, which is railings and ladders — there is no way to ask it
+   * for a crate, and `scatter` cannot reach the deck either because deck tiles
+   * are flagged `isDeck` precisely so the ground paint and the scatter rules
+   * leave them alone.
+   *
+   * So the split is: `trim` is the map's answer to "what dresses a pier", and
+   * this is the plan's answer to "what is this pier WORKING with". A tile that
+   * took mined trim never also takes cargo — one thing per deck tile.
+   *
+   * `density` is placements per 100 DECK tiles, not per 100 ground tiles, and
+   * the landscape sparsity guidance does not apply: a pier is 20-odd tiles, so
+   * the default of 12 is about two or three pieces on a jetty. Treat 40+ as a
+   * deck you cannot walk down.
+   */
+  deckClutter?: {
+    role?: RoleId
+    species?: SpeciesPick[]
+    /** placements per 100 deck tiles. Default 12. */
+    density?: number
+  }
+}
+
+/**
+ * Put buildings on the plots a zone reserves.
+ *
+ * There is deliberately no way to describe a LAYOUT here. The massing comes
+ * from the measured footprint vocabulary (§14), the walls from a mined material
+ * family, and the furniture from the measured wall-distance distributions (§6)
+ * — Cody asked three times for buildings deduced from the corpus rather than
+ * stamped from prefabs, so a plan says "build on the plots", not "build this".
+ */
+export type BuildingSpec = {
+  /** only build on plots of this zone; omitted = every plot */
+  zoneId?: string
+  /** 0..1 share of available plots that get a building. Default 1. */
+  fill?: number
+  /** 0..1 how heavily to furnish interiors. Default follows the measurement. */
+  furnish?: number
+  /**
+   * Where a building's SHAPE comes from.
+   *
+   * - `prefab` (default) replays a real building measured off the map —
+   *   footprint, every wall loc, its doors — with this area's masonry
+   *   substituted in. It cannot invent anything the game does not contain,
+   *   which is the point.
+   * - `synthesise` samples a footprint and lays walls by rule. It can produce
+   *   anything, including shapes no RuneScape building has ever had.
+   *
+   * Both are kept because they fail in opposite directions. Synthesis was the
+   * original design and spent two days producing rooms two people could stand
+   * in, because its massing was never actually mined — see `templates.ts`.
+   */
+  mode?: 'prefab' | 'synthesise'
+  /**
+   * Repaint a stamped building's walls in the area's own masonry family.
+   *
+   * OFF by default, and it should usually stay off. It defeats the point of
+   * choosing the template in the first place: selection scores a template by
+   * its wall ids to find one that belongs on this ground, and this then
+   * discards those ids. It also repaints every wall-SHAPED loc rather than the
+   * shell alone, so interior fittings — a fireplace surround, a banister — come
+   * out clad in exterior wall panels.
+   *
+   * Kept because it is the only way to force a consistent look across a
+   * settlement built from templates of mixed origin.
+   */
+  restyle?: boolean
+  /**
+   * Ask for a particular kind of building — 'house', 'church', 'bank',
+   * 'castle', 'forge', 'pub', 'workshop', 'hall', 'tower', 'shed', 'store',
+   * 'kitchen'. Omitted lets the generator take whatever fits the plot.
+   *
+   * Only meaningful with `mode: 'prefab'`: synthesis has no notion of purpose.
+   */
+  purpose?: string
 }
 
 export type ProcPlan = {
@@ -336,6 +558,10 @@ export type ProcPlan = {
   barriers?: BarrierRing[]
   resources?: ResourceNode[]
   props?: PropPlacement[]
+  /** jetties over the water. Needs a shoreline — see `TerrainSpec.landform`. */
+  docks?: DockSpec[]
+  /** buildings on the plots a zone reserves */
+  buildings?: BuildingSpec[]
   environment?: EnvironmentSpec
   /**
    * Regions whose existing content must be preserved and blended toward,
@@ -369,6 +595,17 @@ export type GenerationResult = {
     canopies?: number
     zones: { id: string; kind: ZoneKind; tiles: number }[]
     plots: { zoneId: string; x: number; y: number; w: number; h: number; purpose?: string }[]
+    /** jetties built, anchored at (x,y) on the shore and running out along `dir` */
+    docks: { x: number; y: number; dir: number; tiles: number; length: number; width: number }[]
+    /** buildings synthesised, with their footprint and interior size */
+    buildings: {
+      x: number; y: number; w: number; h: number
+      walls: number; interior: number; furniture: number
+      /** prefab only: what kind it is and which region it was lifted from, so
+       *  an out-of-place building can be traced to a real one on the map */
+      purpose?: string
+      from?: number
+    }[]
     unresolved: SpeciesId[]
     warnings: string[]
   }

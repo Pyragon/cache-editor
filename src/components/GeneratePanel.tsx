@@ -4,12 +4,18 @@ import { buildPlan, DEFAULT_DIALS, THEMES, type PlannerDials, type ThemeId } fro
 import { loadPalette, savePalette, unboundRoles, ROLE_INFO, type GroundPalette } from '../procgen/palette'
 import GroundPaletteModal from './GroundPaletteModal'
 import { generate } from '../procgen/generate'
-import { getApiKey, requestPlan, sanitizePlan } from '../procgen/claude'
+import {
+  BRIEF_FILE, PLAN_FILE, PROCGEN_DIR,
+  getApiKey, planningBrief, requestPlan, sanitizePlan,
+} from '../procgen/claude'
+import type { ArchetypeModel } from '../procgen/archetypes'
 import {
   buildSceneryIndex, clearCachedIndex, indexSpeciesCount, loadCachedIndex,
   type ScanStats, type SceneryIndex,
 } from '../procgen/scenery'
 import { getEntryPath, resolveEntryHandle } from '../loaders/entryOrder'
+import type { ContextModel } from '../procgen/context'
+import { clearContextModel, loadArchetypes, loadContextModel } from '../procgen/modelStore'
 import type { GenerationResult, ProcPlan } from '../procgen/types'
 
 /**
@@ -114,14 +120,46 @@ export default function GeneratePanel({
   const [index, setIndex] = useState<SceneryIndex | null>(null)
   const [indexProgress, setIndexProgress] = useState('')
   const cancelRef = useRef({ cancelled: false })
+  /** what the real map plants where; loaded once, rebuilt with the index */
+  const contextRef = useRef<ContextModel | null>(null)
+  /** the place types mined from this cache, for the planning brief */
+  const archetypeRef = useRef<ArchetypeModel | null>(null)
+  /** These mirror the refs above so the completeness check can RENDER. Reading
+   *  a ref during render never re-runs when it loads, so the gaps list would
+   *  report whatever was true on mount and never correct itself. */
+  const [archetypeCount, setArchetypeCount] = useState(0)
+  const [hasContext, setHasContext] = useState(false)
+  /** feedback for the brief buttons, which are otherwise silent */
+  const [briefCopied, setBriefCopied] = useState('')
+  /** 'waiting' polls procgen/plan.json for an answer to the brief we wrote */
+  const [planFileState, setPlanFileState] = useState<'idle' | 'waiting'>('idle')
+  /** when the brief was written, so an older plan.json isn't mistaken for a reply */
+  const briefWrittenAt = useRef(0)
   const hasKey = !!getApiKey()
   /** the resolved objects folder: undefined = still looking, null = not there */
   const [sceneryDir, setSceneryDir] = useState<FileSystemDirectoryHandle | null | undefined>(undefined)
   /** the maps folder, read once to learn how often the game places each object */
   const [mapsDir, setMapsDir] = useState<FileSystemDirectoryHandle | null>(null)
+  const [areasDir, setAreasDir] = useState<FileSystemDirectoryHandle | null>(null)
+  const [modelsDir, setModelsDir] = useState<FileSystemDirectoryHandle | null>(null)
 
   useEffect(() => {
     setIndex(loadCachedIndex(cacheFingerprint))
+    // The model lives in IndexedDB (too big for localStorage), so it loads
+    // asynchronously and separately from the index. Absent is fine: generation
+    // falls back to the frequency prior alone.
+    let cancelled = false
+    void loadContextModel(cacheFingerprint).then((m) => {
+      if (cancelled) return
+      contextRef.current = m
+      setHasContext(!!m)
+    })
+    void loadArchetypes(cacheFingerprint).then((a) => {
+      if (cancelled) return
+      archetypeRef.current = a
+      setArchetypeCount(a?.archetypes.length ?? 0)
+    })
+    return () => { cancelled = true }
   }, [cacheFingerprint])
 
   // Find the objects folder up front, so "this will generate bare terrain" is
@@ -147,6 +185,31 @@ export default function GeneratePanel({
       if (!rootHandle) { setMapsDir(null); return }
       const dir = await resolveEntryHandle(rootHandle, getEntryPath('maps')).catch(() => null)
       if (!cancelled) setMapsDir(dir)
+    })()
+    return () => { cancelled = true }
+  }, [rootHandle])
+
+  // The world map's area definitions, which say which regions are the actual
+  // overworld. Without them every mined vocabulary learns from dungeons and
+  // test areas as if they were the game — see `worldAreas.ts`.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      if (!rootHandle) { setAreasDir(null); return }
+      const dir = await resolveEntryHandle(rootHandle, getEntryPath('map_areas')).catch(() => null)
+      if (!cancelled) setAreasDir(dir)
+    })()
+    return () => { cancelled = true }
+  }, [rootHandle])
+
+  // Models, so the mine can drop the invisible marker anchors the client never
+  // draws — barrier walls were otherwise built into houses (`markers.ts`).
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      if (!rootHandle) { setModelsDir(null); return }
+      const dir = await resolveEntryHandle(rootHandle, getEntryPath('models')).catch(() => null)
+      if (!cancelled) setModelsDir(dir)
     })()
     return () => { cancelled = true }
   }, [rootHandle])
@@ -177,10 +240,18 @@ export default function GeneratePanel({
    * problem rather than a missing index. So this both tries harder to find the
    * folder and says plainly when it cannot.
    */
-  async function ensureIndex(): Promise<SceneryIndex | null> {
+  /**
+   * `force` rescans even when an index is already loaded.
+   *
+   * The Rebuild button needs it for a reason that isn't obvious: it clears the
+   * cache and calls straight back in, but `setIndex(null)` has not landed yet,
+   * so this closure still sees the OLD index and would short-circuit on the
+   * line below — the rebuild would quietly do nothing.
+   */
+  async function ensureIndex(force = false): Promise<SceneryIndex | null> {
     // an index with no species is treated as absent, or it short-circuits the
     // rebuild and silently disables scenery for good
-    if (index && indexSpeciesCount(index)) return index
+    if (!force && index && indexSpeciesCount(index)) return index
     // the parent resolves `objects/` for us, but it does so from its own
     // rootHandle and leaves null on any failure — try once more here rather
     // than silently generating an empty world
@@ -194,8 +265,25 @@ export default function GeneratePanel({
         + '"objects" folder at its root.')
       return null
     }
+    // Whoever sets `busy` clears it. This used to be left to the CALLER, and
+    // every caller happened to have a try/finally that did it — so the one
+    // that didn't (the rebuild button) left the panel reading "indexing
+    // scenery…" forever, after a scan that had actually succeeded. A function
+    // that acquires state and relies on its callers to release it will keep
+    // finding new ways to leak it.
     setBusy('indexing scenery')
     setIndexProgress('reading object definitions… this happens once per cache')
+    try {
+      return await runScan(dir)
+    } finally {
+      setBusy('')
+      setIndexProgress('')
+    }
+  }
+
+  /** The scan itself. Split out only so `ensureIndex` can wrap it in the
+   *  try/finally above without indenting the whole body. */
+  async function runScan(dir: FileSystemDirectoryHandle): Promise<SceneryIndex | null> {
     // a holder, not a bare let: TS cannot see the callback assign it and
     // narrows a plain local to `never`
     const statsBox: { v: ScanStats | null } = { v: null }
@@ -213,12 +301,31 @@ export default function GeneratePanel({
       mapsDir,
       (done, total) => setIndexProgress(
         `${Math.floor((done / Math.max(1, total)) * 100)}% · learning which objects the game `
-        + `actually uses · region ${done.toLocaleString()} of ${total.toLocaleString()}`,
+        + `actually uses · overworld region ${done.toLocaleString()} of ${total.toLocaleString()}`,
       ),
+      areasDir,
+      modelsDir,
     )
-    setIndex(built)
+    // Say which corpus was mined. A silent fallback to "all 2,413 regions" is
+    // exactly how dungeon masonry and a one-region door became the defaults,
+    // and the symptom only ever showed up as ugly output much later.
+    if (!built.corpus.filtered) {
+      setError('This cache has no readable map_areas folder, so the generator had to learn '
+        + 'from EVERY region in the dump — dungeons, minigames and test areas included. '
+        + 'Expect underground walls and odd doors on buildings. Re-dump map_areas to fix it.')
+    }
+    setIndex(built.index)
+    if (built.contextModel) { contextRef.current = built.contextModel; setHasContext(true) }
+    // The archetypes are mined by this same scan. The ref was loaded from
+    // IndexedDB on mount, i.e. BEFORE the scan existed — so without this a
+    // brief written on the very run that mines them still reports "no place
+    // types have been mined from this cache yet".
+    if (built.archetypes) {
+      archetypeRef.current = built.archetypes
+      setArchetypeCount(built.archetypes.archetypes.length)
+    }
     setIndexProgress('')
-    if (!built || !Object.keys(built.species).length) {
+    if (!built.index || !Object.keys(built.index.species).length) {
       // Say what the scan SAW. "No scenery" and "no files" look identical from
       // the outside and need completely different fixes.
       const s = statsBox.v
@@ -232,7 +339,7 @@ export default function GeneratePanel({
             : '')
         : 'Read the objects folder but matched no scenery in it.')
     }
-    return built
+    return built.index
   }
 
   async function runBuiltIn() {
@@ -245,7 +352,7 @@ export default function GeneratePanel({
       // from — the built-in planner used to skip it, so a bad rule here was
       // caught only when Claude wrote the same thing
       const { plan: p, notes: sanitizeNotes } = sanitizePlan(buildPlan({ ...dials, palette }, area))
-      const res = generate(p, idx)
+      const res = generate(p, idx, contextRef.current)
       setPlan(p)
       setResult(res)
       setNotes([...sanitizeNotes, ...res.report.warnings])
@@ -277,7 +384,7 @@ export default function GeneratePanel({
       })
       const { plan: safe, notes: sanitizeNotes } = sanitizePlan(reply.plan)
       setBusy('generating')
-      const res = generate(safe, idx)
+      const res = generate(safe, idx, contextRef.current)
       setPlan(safe)
       setResult(res)
       setNotes([...sanitizeNotes, ...res.report.warnings, ...(reply.note ? [reply.note] : [])])
@@ -287,6 +394,130 @@ export default function GeneratePanel({
       setBusy('')
     }
   }
+
+  /**
+   * Put everything a planner needs to know about THIS cache on the clipboard.
+   *
+   * The point of the Plan tab is that a `ProcPlan` written anywhere runs
+   * through the same generator with no key and no request. What an outside
+   * author lacks is not capability but INFORMATION — which species this dump
+   * resolved, what the ground roles are bound to, what the real densities are,
+   * which place types were mined from it. Without that they are guessing at
+   * ids, which is the exact failure the mine exists to remove.
+   *
+   * It is the same text the API layer sends as its system prompt, so the two
+   * routes cannot drift apart.
+   */
+  async function buildBrief(): Promise<string> {
+    // The brief is worthless without the index — that is where the available
+    // species come from — so build it first if this cache has never been
+    // scanned. Same one-off cost as any other generate.
+    const idx = await ensureIndex()
+    const available = idx
+      ? (Object.entries(idx.species) as [string, { id: number }[] | undefined][])
+          .filter(([, list]) => list && list.length > 0)
+          .map(([name]) => name)
+      : undefined
+    return planningBrief(area, {
+      availableSpecies: available,
+      palette,
+      archetypes: archetypeRef.current,
+    })
+  }
+
+  const PLAN_INSTRUCTION = 'Reply with a single ProcPlan JSON object and nothing else.'
+
+  async function copyBrief() {
+    setError('')
+    setBriefCopied('')
+    try {
+      const brief = await buildBrief()
+      await navigator.clipboard.writeText(`${brief}\n\n${PLAN_INSTRUCTION}`)
+      setBriefCopied(`Copied ${(brief.length / 1024).toFixed(1)} KB — paste it to any Claude, then paste its plan back here`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** the cache's `procgen/` drop box, created on first use */
+  async function procgenDir(): Promise<FileSystemDirectoryHandle> {
+    if (!rootHandle) throw new Error('no cache folder is open')
+    return rootHandle.getDirectoryHandle(PROCGEN_DIR, { create: true })
+  }
+
+  /**
+   * Write the brief into `procgen/` inside the opened cache, so a planner with
+   * filesystem access can read it without anything being pasted.
+   *
+   * This is the same brief the clipboard button copies and the same text the
+   * API layer sends — three routes, one source. The folder is ours, holds no
+   * cache data, and is filtered out of the entry sidebar.
+   */
+  async function writeBriefFile() {
+    setError('')
+    setBriefCopied('')
+    try {
+      const brief = await buildBrief()
+      const dir = await procgenDir()
+      const write = async (name: string, text: string) => {
+        const fh = await dir.getFileHandle(name, { create: true })
+        const w = await fh.createWritable()
+        await w.write(text)
+        await w.close()
+      }
+      await write(BRIEF_FILE, `${brief}\n\n${PLAN_INSTRUCTION}\nWrite it to \`${PLAN_FILE}\` beside this file.\n`)
+      // Stamp the moment we asked, so "has a plan arrived?" is a comparison
+      // rather than a guess. Without it an old plan.json left over from a
+      // previous area would look like a fresh answer.
+      briefWrittenAt.current = Date.now()
+      setPlanFileState('waiting')
+      setBriefCopied(`Wrote ${PROCGEN_DIR}/${BRIEF_FILE} — ask Claude Code to read it and write ${PLAN_FILE} beside it`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setPlanFileState('idle')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /**
+   * Look for a plan written back into `procgen/`.
+   *
+   * `quiet` is the polling path: a missing file is the normal state while
+   * waiting, so it must not paint an error every two seconds.
+   */
+  async function readPlanFile(quiet = false) {
+    if (!quiet) { setError(''); setBriefCopied('') }
+    try {
+      const dir = await procgenDir()
+      const fh = await dir.getFileHandle(PLAN_FILE)
+      const file = await fh.getFile()
+      // Only treat it as an answer if it was written AFTER we asked; otherwise
+      // a stale plan from an earlier area silently loads as if it were new.
+      if (quiet && file.lastModified < briefWrittenAt.current) return
+      const text = await file.text()
+      setPlanText(text)
+      setPlanFileState('idle')
+      setBriefCopied(`Loaded ${PROCGEN_DIR}/${PLAN_FILE} (${new Date(file.lastModified).toLocaleTimeString()}) — check it, then Build from plan`)
+    } catch (e) {
+      if (quiet) return
+      setError(e instanceof Error ? `no ${PLAN_FILE} yet (${e.message})` : String(e))
+    }
+  }
+
+  // Poll for the answer while waiting. The File System Access API has no
+  // change notification, so a poll is the only option — but it only runs
+  // between writing a brief and a plan arriving, never idly.
+  useEffect(() => {
+    if (planFileState !== 'waiting') return
+    const id = setInterval(() => { void readPlanFile(true) }, 2000)
+    return () => clearInterval(id)
+    // readPlanFile closes over setState only; re-creating the timer on every
+    // render would reset the interval continuously.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planFileState])
 
   /**
    * Build from a pasted plan.
@@ -334,7 +565,7 @@ export default function GeneratePanel({
         area,
         seed: parsed.seed ?? dials.seed,
       })
-      const res = generate(safe, idx)
+      const res = generate(safe, idx, contextRef.current)
       setPlan(safe)
       setResult(res)
       setNotes([
@@ -353,6 +584,22 @@ export default function GeneratePanel({
 
   const w = area.x1 - area.x0 + 1
   const h = area.y1 - area.y0 + 1
+  /**
+   * What the scan should have produced but this cache hasn't got.
+   *
+   * Deliberately a list rather than a check per artifact: the scan gains
+   * outputs over time, and each one arriving with its own warning is how a
+   * panel ends up with five near-identical messages. Add the artifact here and
+   * it reports itself.
+   */
+  const gaps: string[] = []
+  if (index) {
+    if (!index.weighted) gaps.push('how often the game really places each object')
+    if (!Object.keys(index.canopies ?? {}).length) gaps.push('multi-part trees')
+    if (!hasContext) gaps.push('what the map plants on which ground')
+    if (!archetypeCount) gaps.push('place types')
+  }
+
   const unbound = unboundRoles(palette)
 
   return (
@@ -393,24 +640,72 @@ export default function GeneratePanel({
           will be completely bare, because species are matched against object names.
         </div>
       )}
-      {sceneryDir && !indexSpeciesCount(index) && (
+      {sceneryDir && !indexSpeciesCount(index) && !busy && (
         <div className="map-picker-msg">
-          Scenery isn't indexed yet — the first generate reads the object definitions
-          once (about 74,000 files) and caches the result for this cache.
+          Scenery isn't indexed yet — generating (or rebuilding the index) reads the
+          object definitions and the map once, about 74,000 files, and caches the
+          result for this cache.
         </div>
       )}
-      {sceneryDir && !!indexSpeciesCount(index) && (
+      {/*
+        One completeness check, not a message per artifact.
+        A cached index short-circuits the rescan, so a cache can sit with some
+        of what the scan produces and not the rest — and nothing said so. The
+        answer is to name whatever is ACTUALLY missing in one line, so a new
+        artifact added to the scan later shows up here for free instead of
+        needing its own bespoke warning.
+      */}
+      {sceneryDir && !!indexSpeciesCount(index) && gaps.length > 0 && (
+        <div className="map-picker-msg">
+          This cache was indexed before some of what the generator uses existed —
+          missing: {gaps.join(', ')}. Rebuild the index to fill it in.
+        </div>
+      )}
+      {/*
+        Shown whenever there is an objects folder, INDEXED OR NOT. Gating this
+        row on the index having species put the only way to build one behind
+        having one already: clearing the cache made the button vanish, so a
+        cleared cache could not be rebuilt from here at all.
+      */}
+      {sceneryDir && !busy && (
         <div className="procgen-row">
-          <span className="map-picker-selcount">
-            scenery: {indexSpeciesCount(index)} species indexed
-          </span>
+          {!!indexSpeciesCount(index) && (
+            <span className="map-picker-selcount">
+              scenery: {indexSpeciesCount(index)} species indexed
+            </span>
+          )}
           <button
             type="button"
             className="save-bar-discard"
-            title="Throw the cached index away and rescan the objects folder. Worth doing if scenery is missing or the cache has been re-dumped."
-            onClick={() => { clearCachedIndex(); setIndex(null); setError('') }}
+            title="Read the objects folder and the map, and cache the result for this cache. Worth redoing if something is missing or the cache has been re-dumped."
+            onClick={() => {
+              void (async () => {
+                try {
+                  clearCachedIndex()
+                  // The stored model and place types came from the scan we are
+                  // about to redo, so drop them together rather than leaving a
+                  // half-old picture behind if the rebuild is cancelled.
+                  await clearContextModel()
+                  contextRef.current = null
+                  archetypeRef.current = null
+                  setHasContext(false)
+                  setArchetypeCount(0)
+                  setIndex(null)
+                  setError('')
+                  // Actually rebuild. This used to clear and stop, leaving the
+                  // panel saying "scenery isn't indexed yet" until something
+                  // else happened to need an index — a button labelled Rebuild
+                  // that rebuilt nothing.
+                  await ensureIndex(true)
+                } catch (e) {
+                  // Without this the rejection vanishes into the void() above
+                  // and the panel just sits there looking broken.
+                  setError(e instanceof Error ? e.message : String(e))
+                }
+              })()
+            }}
           >
-            Rebuild scenery index
+            {indexSpeciesCount(index) ? 'Rebuild scenery index' : 'Build scenery index'}
           </button>
         </div>
       )}
@@ -506,6 +801,67 @@ export default function GeneratePanel({
           )}
           <span className="map-picker-selcount">A plan is plain JSON — no key needed</span>
         </div>
+
+        <p className="tex-op-note">
+          A plan is the whole contract, so one written anywhere builds the same
+          place. Hand the <strong>brief</strong> — what this cache actually
+          holds — to any Claude, and build from the plan it writes back. This
+          is the same text the AI tab sends, so it needs <strong>no API key</strong>.
+        </p>
+        <ol className="tex-op-note">
+          <li>
+            <strong>Write brief to {PROCGEN_DIR}/</strong> puts{' '}
+            <code>{BRIEF_FILE}</code> in a <code>{PROCGEN_DIR}</code> folder
+            inside your cache. It holds no game data and never repacks, so it
+            is kept out of the entry list on the left.
+          </li>
+          <li>
+            Point Claude Code at it: <em>“read {PROCGEN_DIR}/{BRIEF_FILE} and
+            write the plan to {PROCGEN_DIR}/{PLAN_FILE}”</em>.
+          </li>
+          <li>
+            The plan loads into the box below on its own as soon as it appears.
+            Read it, then <strong>Build from plan</strong>.
+          </li>
+        </ol>
+
+        <div className="procgen-row">
+          <button
+            type="button"
+            className="save-bar-discard"
+            disabled={!!busy || !rootHandle}
+            title={rootHandle
+              ? `Write the brief to ${PROCGEN_DIR}/${BRIEF_FILE} inside the opened cache, then watch for ${PLAN_FILE} beside it`
+              : 'No cache folder is open'}
+            onClick={() => void writeBriefFile()}
+          >
+            Write brief to {PROCGEN_DIR}/
+          </button>
+          <button
+            type="button"
+            className="save-bar-discard"
+            disabled={!!busy || !rootHandle}
+            title={`Load ${PROCGEN_DIR}/${PLAN_FILE} into the box below`}
+            onClick={() => void readPlanFile()}
+          >
+            Read plan now
+          </button>
+          <button
+            type="button"
+            className="save-bar-discard"
+            disabled={!!busy}
+            title="Copy the same brief to the clipboard instead, for pasting into a chat window"
+            onClick={() => void copyBrief()}
+          >
+            Copy to clipboard
+          </button>
+        </div>
+        {planFileState === 'waiting' && (
+          <div className="map-picker-msg">
+            Watching {PROCGEN_DIR}/{PLAN_FILE} — it will load here as soon as it is written.
+          </div>
+        )}
+        {briefCopied && <div className="map-picker-msg">{briefCopied}</div>}
         {(
           <>
             <textarea
@@ -575,7 +931,13 @@ export default function GeneratePanel({
         <div className="procgen-result">
           <div className="map-picker-selcount">
             <strong>{result.report.placements.toLocaleString()}</strong> objects ·{' '}
-            {result.report.zones.length} zones · {result.report.plots.length} building plots ·{' '}
+            {result.report.zones.length} zones ·{' '}
+            {/* A plot with a building on it is no longer just a reserved pad, so
+                report what was actually BUILT rather than what was set aside. */}
+            {result.report.buildings.length
+              ? `${result.report.buildings.length} buildings`
+              : `${result.report.plots.length} building plots`} ·{' '}
+            {result.report.docks.length ? `${result.report.docks.length} docks · ` : ''}
             {result.report.regions} regions
             {plan.environment ? ' · environment overridden' : ''}
           </div>

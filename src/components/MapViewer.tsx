@@ -9,6 +9,8 @@ import MapSceneViewer from './MapSceneViewer'
 import GeneratePanel from './GeneratePanel'
 import type { GenerationResult, ProcPlan } from '../procgen/types'
 import { generate } from '../procgen/generate'
+import type { ContextModel } from '../procgen/context'
+import { loadContextModel } from '../procgen/modelStore'
 import { sanitizePlan } from '../procgen/claude'
 import type { SceneryIndex } from '../procgen/scenery'
 import type { RegionDraft } from './MapSceneViewer'
@@ -178,6 +180,17 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
    *  re-seeding a plan needs no key, no request and no money. */
   const [lastPlan, setLastPlan] = useState<ProcPlan | null>(null)
   const lastIndexRef = useRef<SceneryIndex | null>(null)
+  /** the context model the last generation used, so a re-roll matches it */
+  const lastContextRef = useRef<ContextModel | null>(null)
+  // Loaded here as well as in the panel, because a re-roll runs from this
+  // component without the panel ever mounting. Absent is fine — generation
+  // falls back to the frequency prior.
+  useEffect(() => {
+    const fp = world.rootHandle?.name || 'cache'
+    let cancelled = false
+    void loadContextModel(fp).then((m) => { if (!cancelled) lastContextRef.current = m })
+    return () => { cancelled = true }
+  }, [world.rootHandle])
   const [objectsDir, setObjectsDir] = useState<FileSystemDirectoryHandle | null>(null)
 
   useEffect(() => {
@@ -894,33 +907,54 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
   // Right-click deletes a region file, after an are-you-sure. Unlike edits
   // and creation this writes (well, removes) on disk immediately — a file
   // deletion isn't representable in the one-region draft/save model.
-  async function handlePickerContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
-    e.preventDefault()
-    const cell = pickerCell(e)
-    if (!cell?.used) return
-    const id = (cell.rx << 8) | cell.ry
-    if (id === regionId) {
+  /**
+   * Delete every EXISTING region in the selection.
+   *
+   * This used to be a right-click on a single cell, which was both undiscoverable
+   * and impossible to undo a mis-aim on. It's now an explicit button beside the
+   * rest of the selection's actions, so deleting looks like the other things you
+   * can do to a selected area rather than a hidden gesture.
+   */
+  async function deleteSelection() {
+    const existing = selIds.filter((id) => usedRegions?.has(id))
+    if (!existing.length) return
+    if (existing.includes(regionId)) {
       setPickerMsg("can't delete the region you're standing in — move somewhere else first")
       return
     }
+    const label = existing.length === 1
+      ? `region ${(existing[0] >> 8) & 0xff}, ${existing[0] & 0xff}`
+      : `${existing.length} regions`
     const ok = await confirmDialog(
-      `Delete region ${cell.rx}, ${cell.ry}? This permanently removes ${id}.json from the maps folder on disk.`,
-      { title: 'Delete region', confirmLabel: 'Delete', danger: true },
+      `Delete ${label}? This permanently removes ${existing.length === 1 ? 'its .json file' : 'their .json files'} `
+      + 'from the maps folder on disk, and cannot be undone.',
+      { title: existing.length === 1 ? 'Delete region' : 'Delete regions', confirmLabel: 'Delete', danger: true },
     )
     if (!ok) return
-    try {
-      await world.mapsDir.removeEntry(`${id}.json`)
-    } catch (err) {
-      setPickerMsg(`delete failed: ${err}`)
-      return
+    const gone: number[] = []
+    const failed: string[] = []
+    for (const id of existing) {
+      try {
+        await world.mapsDir.removeEntry(`${id}.json`)
+        gone.push(id)
+      } catch (err) {
+        failed.push(`${(id >> 8) & 0xff},${id & 0xff}: ${err}`)
+      }
     }
-    setPickerMsg(`deleted region ${cell.rx}, ${cell.ry}`)
-    setUsedRegions((prev) => {
-      if (!prev) return prev
-      const next = new Set(prev)
-      next.delete(id)
-      return next
-    })
+    // Report partial success honestly — a multi-region delete can fail
+    // part-way, and saying "deleted" when four of six went is a lie you'd
+    // only notice much later.
+    setPickerMsg(failed.length
+      ? `deleted ${gone.length} of ${existing.length} — failed: ${failed.join('; ')}`
+      : `deleted ${gone.length} region${gone.length === 1 ? '' : 's'}`)
+    if (gone.length) {
+      setUsedRegions((prev) => {
+        if (!prev) return prev
+        const next = new Set(prev)
+        for (const id of gone) next.delete(id)
+        return next
+      })
+    }
   }
 
   /** Jump to a region, honouring the unsaved-changes guard. False = cancelled. */
@@ -971,7 +1005,7 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
     // the scenery index was built when the area was first generated, and is
     // cached per cache — this never re-reads 74k object files
     const { plan: safe } = sanitizePlan({ ...lastPlan, seed })
-    applyGeneration(generate(safe, lastIndexRef.current), safe)
+    applyGeneration(generate(safe, lastIndexRef.current, lastContextRef.current), safe)
   }
 
   /**
@@ -1287,13 +1321,12 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
                   const cell = pickerCell(e)
                   if (cell?.used) void pickerGoTo(cell.rx, cell.ry)
                 }}
-                onContextMenu={handlePickerContextMenu}
               />
             ) : (
               <p className="loading-text">Scanning regions…</p>
             )}
             {usedRegions && (
-              <div className="map-picker-hint">click to select · shift+click to select a rectangle · double-click to open · scroll to zoom · drag to pan · right-click deletes · north is up</div>
+              <div className="map-picker-hint">click a corner, then the opposite corner · scroll to zoom · drag to pan · north is up</div>
             )}
             {pickerMsg && <div className="map-picker-msg">{pickerMsg}</div>}
             <div className="map-picker-status">
@@ -1351,6 +1384,18 @@ export default function MapViewer({ world, onDirtyChange, onNavigate, gotoRegion
                 >
                   Generate…
                 </button>
+                {selIds.length - selMissing > 0 && (
+                  <button
+                    type="button"
+                    className="save-bar-discard map-picker-delete"
+                    disabled={createBusy}
+                    title={`Permanently delete the ${selIds.length - selMissing} existing region`
+                      + `${selIds.length - selMissing === 1 ? '' : 's'} in this selection from disk`}
+                    onClick={() => void deleteSelection()}
+                  >
+                    Delete {selIds.length - selMissing}
+                  </button>
+                )}
                 <button type="button" className="save-bar-discard" disabled={createBusy} onClick={clearSelection}>
                   Clear
                 </button>

@@ -415,26 +415,420 @@ table — 20,329 of 73,913 — is never placed anywhere.
   samples by `uses × (1 − indoor)`. See `docs/map-learning.md` §11 for the
   measured before/after. **Needs a browser run**: the maps scan is 2,413 files
   and has only been verified offline. Watch the one-off index time.
-- **The mine** — all 2,413 regions, **all planes** (every survey so far read
-  plane 0 only, ignoring 29% of the map). Emits: the context model, the WFC
-  wall grammar, footprint vocabulary, room stats, relational path stats, and
-  the trunk→canopy id map.
-- **Context-driven species selection** — replaces name matching. This is what
-  fixes the wrong torches / snowy rocks / rainforest stumps on the island.
-- **Building synthesis (NOT prefabs)** — Cody asked three times for buildings
+- **Context model — BUILT 2026-08-07, untested in the browser.** Read
+  `docs/map-learning.md` §10a (RESUME HERE) first. New: `procgen/context.ts`,
+  `procgen/modelStore.ts` (IndexedDB), `components/terrainNoise.ts`
+  (`calculateTileHeight` lifted out of `mapScene.ts` so the scan can use it
+  without three). Built in the same pass as the frequency counts; 2,754
+  objects, 0.39 MB. `resolveSpecies` weights by
+  `outdoorUses x contextLikelihood`. **Main risk: scan time** — it now decodes
+  four base64 channels per region and evaluates terrain noise, and that has
+  never been timed in a browser.
+- **Roles + joint (species, id) scoring — BUILT 2026-08-07, validated offline
+  against the real dump, untested in the browser.** Read `docs/map-learning.md`
+  §12a. A scatter rule can now name a ROLE (`canopy`, `undergrowth`,
+  `deadwood`, `loose_stone`, `ore`, `enclosure`, `settlement_prop`, `light`,
+  `memorial`, `waterside`) and `chooseScenery` scores every candidate in every
+  offered species in one pass, so context can finally veto a SPECIES rather
+  than only picking a variant. Index bumped to `:v8` (new waterside species),
+  so this forces another rescan.
+  - **The big one: `CONTEXT_TEMPER` replaced the geometric mean.** Calibrated
+    against the real map, the geometric mean was the WORST of every value
+    tried — it put tropical trees on 16-27% of every ground in the game. The
+    monoculture §12 blamed on the raw product was mostly the frequency prior.
+    Now 1.5, measured. Re-run `scratchpad/rig/calibrate.ts` if features change.
+  - **The likelihood REWARDED being poorly observed (fixed 2026-08-08).** Cody
+    got an "Ice covered boulder" on a temperate shore. `contextLikelihood`
+    smoothed toward uniform — `(seen+1)/(n+bins)` — so with ~200 bins an object
+    with 9 placements scored `1/209` on ground it had never been seen on while
+    one with 336 scored `1/536`: **the rarer object won by 2.5x for knowing
+    less**, and a low-n object could never score badly anywhere. Fixed with
+    `seenOnGround` — a candidate needs at least one real placement on the tile's
+    underlay, else it is dropped (unless that empties the pool). Ice boulders
+    went to **0/4000 draws** on grass, sand and town earth, and it also
+    un-broke Rock 60271/60272, seen 92 and 44 times on grass but scoring 0.0000.
+    **Two smoothed alternatives were tried and BOTH failed** — shrinking toward
+    the population (the average object is a tree, so rocks inherited a tree's
+    liking for grass) and dividing by the object's own peak bin (ice boulders
+    0.41-0.45 vs a real boulder 0.37-0.53, overlapping, no threshold exists).
+    Don't try a third; see `docs/map-learning.md` §12a.
+  - **Two survivors, two different causes (fixed 2026-08-08, NEEDS A RESCAN —
+    index `:v11`).** See `docs/map-learning.md` §12a.
+    - **41582** (snow-covered rock) had `26:21 58:4 27:1 163:1` — 25 of 27 on
+      snow and ONE stray on town earth, which cleared a `> 0` gate.
+      `MIN_GROUND_SIGHTINGS = 2` drops it; every legitimate candidate has 2-7
+      sightings on the ground it is kept for.
+    - **29018** could never be caught by context: 7 of its 16 placements really
+      are on dirt. It is a **composition piece** — a flat slab authored to sit
+      in a row — and the measurable form is self-adjacency. New
+      `SceneryEntry.grouped`, measured in the same scan pass: standalone rock is
+      0-46%, composition pieces are 82%+ (29018 87.5%, Granite rocks 10947
+      100%), nothing in between, so `GROUPED_CUTOFF = 0.65`. This is §12a's
+      fishing-ledge lesson finally made measurable.
+    - Rubble 2509 (82.4%) is a deliberate casualty — it genuinely comes in
+      patches. **If clustered placement ever lands, these become candidates for
+      it rather than exclusions**, which is the better end state.
+  - **Still open — no-evidence contexts.** Undergrowth on snow has ZERO
+    observations, so scoring falls back to the jungle-heavy global prior and a
+    snowfield grows jungle grass. Not fixable by tuning; archetypes are the
+    structural answer (see plan v2 below).
+- **`canopy-wood.json` is a TEST RIG, not a map.** Single-species groves, oak
+  density 5 (double the densest real place), and a bare control clearing. Right
+  for verifying canopies, wrong for judging realism — write a natural mixed
+  plan before assessing the context model by eye.
+- **Retire the hand-added filters once the model is confirmed.**
+  `INDOOR_CUTOFF`, `GROUND_CUTOFF` and the never-placed drop are special cases
+  the model subsumes. Two things to keep in sync until then.
+- **Re-encode the neighbour feature by object CLASS.** As a raw count it
+  measured 1.2% and was dropped; it is the natural route to copses of one
+  species instead of a uniform mix.
+- **Add distance-to-water and distance-to-path features.** Cheap at generation
+  (`f.waterDist` exists), needs a BFS per region during the scan.
+- **The rest of the mine** — WFC wall grammar, footprint vocabulary, room
+  stats, relational path stats. All planes.
+- **BUILDING SYNTHESIS — layers 1/3/4/5 BUILT 2026-08-09, untested in the
+  browser.** Read `docs/map-learning.md` §16. `src/procgen/buildings.ts`,
+  `runBuildings` in `generate.ts`, `BuildingSpec` in `ProcPlan`, and `addTown()`
+  now builds on the plots it reserves. Verified via `scratchpad/rig/dockgen.ts`.
+  - **§8.5 ANSWERED — wall rotation semantics.** Measured on the 311 perfectly
+    rectangular buildings, where the side is unambiguous: **shape 0's rotation
+    IS the exposed edge (0=+x, 1=-y, 2=-x, 3=+y)**, at 71-75%, with the whole
+    remainder being the OPPOSITE rotation — the same wall authored from the
+    neighbouring tile, since a wall sits on a tile edge. **A shape-1 corner at
+    rotation r covers edges r and (r+1)&3**, exact at 100% on all four corners.
+  - **The near-miss worth remembering:** reusing the dock trick (rotation vs the
+    outward normal) measured only 28-52% concentrated and read as "walls aren't
+    positional". They are — the proxy mixed interior partitions, which have no
+    outward normal, in with perimeter walls. **When a positional measurement
+    comes back weak, suspect the control before the conclusion.**
+  - **Also mined:** 1,521 enclosed buildings (independently reproduces §14's
+    count), wall families (p50 5 ids per building), 360 door ids identified by
+    an **"Open" option** rather than by name, and furniture by wall distance
+    (which reproduces §6's pillar signature: 0% at d1).
+  - **Verified:** 6 buildings on 7 plots, footprints all inside §14's vocabulary,
+    every building has a door, no perimeter gaps, all 18 themes still generate.
+  - **Two bugs caught in verification.** The door could land on a corner tile,
+    where the corner branch emits one loc for both edges and `continue`s — two of
+    six buildings came out sealed. And the rig's own perimeter check used
+    `2*(w+h)-4`, right only for a plain rectangle, so it reported false failures
+    on any footprint with a wing; the generator now counts unplaceable pieces and
+    warns, and the rig reads that.
+  - **NOT done: layer 2 (room subdivision — every building is one room), layer 6
+    (upper storeys), roofs, the wall GRAMMAR** (§5's 50 cells / 708 adjacencies
+    are still only a scratchpad measurement; the placer is geometric, not
+    grammatical). Furniture rotation is random, so chairs don't face the room.
+- **Building synthesis — the original plan.** Cody asked three times for buildings
   deduced from the corpus, never stamped copies. Six layers; WFC covers only
   wall realization. Grammar already measured: 50 structure cells, 12 covering
   95%, 708 adjacencies (14% permissive), median 4 wall object ids per building.
+  - **Layer 1 footprint vocabulary — MEASURED 2026-08-08**, see
+    `docs/map-learning.md` §14. 1,521 buildings on plane 0. Buildings are
+    **near-square** (aspect p50 1.20, p90 1.86 — never long and thin), small
+    (commonest bboxes 5×5, 3×3, 6×6, 5×6, 4×5), and **rectilinear but not
+    rectangles** (fill ratio p50 0.81; only 20.4% are a plain rectangle).
+    **The primary rectangle is a median 72% of the footprint** — a dominant core
+    plus small additions, not equal parts. Wings are corner-aligned 58% /
+    centred 37%. Recipe: sample a 3-9-a-side near-square core, stop there ~22%
+    of the time, else attach 1-3 smaller rects keeping the core at ~70%, and
+    **reject any footprint whose fill ratio is under ~0.42** (the amoeba guard).
+    - Weakest number: wing alignment is from only 136 two-rect buildings.
+    - **Calibration target for this extractor is §6's independent "1,190
+      buildings, median 36 interior tiles".** The first version reported 593
+      buildings at exactly 14×14 and a median footprint of 178 because the
+      flood fill absorbed shared courtyards; §6's number is what exposed it.
+      Corrected run: 1,521 buildings, median interior 27.
+- **DOCKS — MEASURED *and* BUILT 2026-08-08/09, untested in the browser.** Read
+  `docs/map-learning.md` §15. Rigs: `scratchpad/rig/docks.ts` (the measurement),
+  `scratchpad/rig/dockgen.ts` (end-to-end through the real modules).
+  - **Shipped:** `src/procgen/docks.ts` (model + mining + picks), `DockSpec` in
+    `ProcPlan`, `planDocks`/`runDocks` in `generate.ts`, a lane routed to each
+    jetty, a **`fishing_village` theme**, one jetty on `coastal`, the
+    `docks` tool schema + brief line in `claude.ts`, sanitizer clamps and an
+    inland-landform warning. **Index bumped to `:v12` — this forces a rescan.**
+  - **Verified offline:** 50 piers mined → 24 families / 124 parts / 16.8 KB;
+    a 2x2 `fishing_village` builds 3 jetties, deck 95% over water, deterministic,
+    all 18 themes still generate. **Nobody has seen a jetty in a browser.**
+  - **Deck candidates are collected ABOVE `isPlaceableScenery`** because it
+    rejects `name === 'null'` and most dock parts are unnamed. Don't "tidy" that
+    back into the normal path.
+  - **Two verification lessons.** Clamping sampled widths to 4 turned every
+    24-wide quay into a 4-wide raft — FILTER out-of-range samples, don't clamp.
+    And the first pass criterion ("every plank over water") was wrong, not the
+    code: real piers are p50 0.97 over water, 43% entirely, because they have a
+    landward apron.
+  - **Still open:** bridges aren't separated from piers in the mine (and the
+    generator deliberately never builds one); trim is uniform along the edge
+    where the real thing clusters; multi-region piers are excluded, biasing
+    lengths short.
+- **Docks — the original measurement notes.** Read `docs/map-learning.md`
+  §15. `scratchpad/rig/docks.ts`. §1's oldest surviving fault ("no docks on an
+  island fishing village") survived because a pier had never been measured as a
+  STRUCTURE — §4 only ever measured waterside objects by name, which is how
+  `fishing_ledge` got shipped and pulled.
+  - **Water is overlay 112** (1.4M tiles, 94.8% underwater-terrain presence, 96%
+    of all water). **Do NOT reuse `isWaterMaterial`** (`mapScene.ts:1438`) — it
+    is a texture-hue test for what to ANIMATE and does not select 112 at all.
+    `waterColor` on the overlay def is also useless: written unconditionally,
+    235 of 247 overlays carry the identical default.
+  - **A pier is LOCS OVER WATER, not terrain** — type-22 ground decoration laid
+    straight on sea tiles, terrain untouched. Confirmed at Port Sarim first.
+  - **Deck test is `obstructsGround`.** The first cutoff tried was `offsetY <=
+    -200` (from Port Sarim's 64496 at −904) and it found 4 deck ids and 14 docks
+    map-wide; the commonest decks sit at `offsetY: 0` and carry their height in
+    the MODEL. Same trap as the tree canopies in §11. Correct test: **193 deck
+    ids, 115 structures, 59 shore-attached piers.**
+  - **Split ships out** — 22 of the 56 free-floating structures carry ship
+    vocabulary, and the two largest "docks" in the first run were hulls.
+  - **THE NUMBER: walkway width p50 = 2, and 71% of piers are 1-2 tiles wide.**
+    Long side p50 11, shore join p50 4, 43% sit entirely over water. Anything
+    wider than 4 is already wrong.
+  - **A dock style is a FAMILY of deck ids** (p50 2 per pier, only 24%
+    single-id), and ids within a family are POSITIONAL — 64489 is 95% edge,
+    20512 100%, 18863 only 14%, several locked to one rotation. Same shape of
+    problem as §5's wall grammar.
+  - **Trim is sparse: 43% of piers carry NOTHING**, 33% have a railing, and what
+    exists is edge-bound and nautical (Ship's ladder, Mast, Barrel, Winch).
+  - **Most dock parts are UNNAMED** (`name: "null"`), which is the direct reason
+    `scenery.ts`'s name-substring matching can never build one while it happily
+    finds "Fishing ledge". The dock vocabulary must be carried by ID.
+  - **Known weaknesses before building on this:** n = 51 clean piers (family
+    counts are "these exist", not a distribution); **bridges are not separated
+    from piers** (land contact on two opposite sides is the next filter, and is
+    the likely cause of the shore-join p90 of 48); border-crossing components are
+    dropped, biasing length short; `obstructsGround` may over-select beyond
+    decking.
+  - **Next: a `DockSpec` in `ProcPlan` + a structural emitter.** Pick a family,
+    route a 1-2 tile walkway from shore out over water ~11 tiles, optionally
+    widen to a head, place edge ids on the perimeter at measured rotations, leave
+    43% bare. Fishing ledges become legitimate again once a deck exists.
 - **Furnishing** — nearly free; the wall-distance distributions are already
   measured (armour 98% against a wall, lamps 94%, pillars 0%, benches 9%).
-- **Two-part trees — BUILT 2026-08-07, untested in the browser.** Oak, yew,
+- **Tropical crown 1329 — ADDED 2026-08-07 by request, a deliberate deviation.**
+  Tropical trees now emit four levels: 1326 -> 1327 -> 1328 -> 1329, a storey
+  apart. The MAP DOES NOT DO THIS: "Tropical leaves" has 1,248 placements, all
+  on planes 2-3, and its commonest columns are `-/-/-/[1329]` (252) and
+  `-/-/[1329]/-` (201) — sitting alone with no trunk beneath (20% exclusivity
+  over 77 ground objects, vs 96% for the real parts). Cody wants the tree
+  topped out and will judge it visually. Implemented as `CROWN_BY_TOP_NAME` in
+  `scenery.ts`, name-driven so it survives another dump; delete that block to
+  revert. If it looks wrong, the faithful alternative is 1329 as its own
+  scatter species placed by the context model.
+- **Exclusivity is the right gate for layer detection, not rate.** A
+  "rare but consistent" rule looked reasonable and would have added 65 layers,
+  mostly garbage — benches indoors always sit under the same ceiling object
+  (`null#57887`, 11% exclusivity over 202 ground types), crates under pipes.
+  Exclusivity separates a canopy (one trunk type) from a ceiling (everything in
+  the room). Not implemented; the current rate rule already rejects these.
+- **Archetypes — MINED AND CLUSTERED 2026-08-07; matching is the open bit.**
+  Read `docs/map-learning.md` §12b. `src/procgen/archetypes.ts`, built in the
+  same scan pass, stored in IndexedDB. The clustering is validated
+  independently: with no labels at all, one cluster caught **Varrock, Falador
+  and Lumbridge** together, another Draynor, another Karamja/Catherby/Al
+  Kharid. Whole mine is 15 s in Node.
+  - **NOT working: matching an `AreaType` to a cluster by hand-written
+    profile.** Four of eight area types collapse onto one 52-region cluster,
+    and `town` does not pick the Varrock cluster. Cause identified — the
+    `relief` axis reads building foundations as terrain. **Don't tune the table
+    by eye**; that is the guesswork archetypes exist to remove.
+  - **Planning brief + `procgen/` file handoff — BUILT 2026-08-07, untested in
+    the browser.** The Plan tab explains the flow and offers three buttons:
+    *Write brief to procgen/*, *Read plan now*, *Copy to clipboard*. The brief
+    (~10 KB) is everything a planner needs to know about THIS cache — resolved
+    species, ground roles as bound, measured densities, the role vocabulary,
+    and the mined place types. **No API key needed**: `claude.ts` only ever
+    WRITES a plan, so one authored anywhere runs through the identical
+    generator, sanitizer and seed. `planningBrief()` is the same text the API
+    layer sends as its system prompt, so all three routes share one source.
+    - `procgen/` lives in the opened cache root (`PROCGEN_DIR`/`BRIEF_FILE`/
+      `PLAN_FILE` in `claude.ts`) and is **filtered out of the entry sidebar**
+      in `readCacheDir` — it holds no cache data and has no loader.
+    - After writing a brief the panel polls `procgen/plan.json` every 2 s and
+      loads it automatically. It compares `lastModified` against when the
+      brief was written, so a stale plan from an earlier area is ignored.
+    - **Test:** folder is created on first use; the sidebar does NOT list it;
+      the loose-files "doesn't look like a cache folder" check still passes on
+      reopen; the plan loads on its own within ~2 s of being written; *Read
+      plan now* works when polling isn't running; a malformed plan still gets
+      the control-character repair path in `runPlanJson`.
+  - **DEFECT in the brief: two "scenery per 100 tiles" figures, 15x apart,
+    same word (found 2026-08-08 by generating the brief and reading it).**
+    `planningBrief` states "all scenery together, buildings included, comes to
+    under 4 per 100" and "a density of 10 is already a wall of trunks; 25 is a
+    solid carpet" — then `describeMine()` lists place types at **12 to 75
+    scenery/100 tiles**. They count different populations: the archetype figure
+    is loc shapes 10/11/22 on plane 0 (so it includes floor decoration and all
+    indoor clutter — the digest's own "commonest growth" lists bench, crate,
+    barrel), while the survey figure is landscape scenery only. A planner that
+    trusts the digest asks for density ~29 and gets silently capped to 12 by
+    `sanitizePlan`. **FIXED 2026-08-08** — labelling, not measurement: the
+    digest now prints `allLocs/100` and `commonest objects`, carries an explicit
+    note that it counts furniture and floor decoration, runs 10-20x the
+    landscape figure, and is NOT what `scatter[].density` takes. `describeMine`,
+    `describeArchetype` and the `scenery` / `sceneryPer100` field docs all say
+    so. **Found only by generating the brief and reading it** — which is the
+    argument for doing that before authoring any plan.
+  - **Next: let the planner choose.** `describeMine()` already emits the digest
+    (each place type's measured profile, densities, commonest growth). Feeding
+    that to `claude.ts` and having it pick the archetype is both the better fix
+    and exactly what Cody asked for — Claude supplies intent/judgement, the
+    generator supplies vocabulary. `matchArchetype` stays as the no-key
+    fallback.
+  - **Then: thread it through.** `ProcPlan` needs an `areaType`/archetype
+    field, and the generator needs to take ground bands, scatter densities and
+    path materials from the matched archetype instead of the plan.
+
+- **BIG ONE — plan v2: the plan should stop deciding MATERIALS.** Read
+  `docs/map-learning.md` §9a. Cody's point: a plan is written either by
+  hand-coded themes or by a language model from a description, and **neither
+  has read the map** — so every underlayId, species list and density in a plan
+  is a guess overriding the one component that knows. The plan should carry
+  intent (area type, zones, plot count, building kinds, path structure, relief,
+  mood); the generator should supply the vocabulary (ground materials, path
+  surface, species, densities). Mechanism: **archetypes learned by clustering
+  real regions** — proven viable 2026-08-07, k-means over 1,549 regions
+  produces recognisable place types (one cluster contains Varrock; another is
+  empty grassland at 19 scenery / 7 walls). Also feed the planner a summary of
+  the mine so authored plans are informed. Depends on the (species, id)
+  scoring change.
+- **Roles are AUTHORED now — BUILT 2026-08-08, untested in the browser.** Read
+  `docs/map-learning.md` §12c. All 17 themes emit roles, and `claude.ts`'s tool
+  schema exposes `role` on every rule (it did not before, while the prompt said
+  "prefer roles" — the instruction was unfollowable). Verified through the real
+  modules on the real cache via `scratchpad/rig/roles.ts`: all 17 generate,
+  deterministic, none empty, nothing unresolved.
+  - **THE FINDING: five palette roles are bound to Karamja materials.**
+    `grass` (byte 49), `grassLush` (48), `grassDead` (50), `trackEarth` (65)
+    and `sand` (62) are jungle ground in this cache — byte 65 is 62% tropical
+    canopy / 86% jungle undergrowth and is our open-country PATH material, and
+    bytes 50 and 62 have a tropical tree as their commonest canopy. Cause: the
+    palette was bound by prevalence across a 15-settlement survey that included
+    **Brimhaven, which is on Karamja**. The temperate greens are **160, 161,
+    163, 164**. Roles did not cause this — species lists were hiding it.
+  - **Palette REBOUND 2026-08-08** (Cody's call) — six roles moved to the
+    lowest-jungle material that still looks like the role: `grass` 48→160,
+    `grassLush` 47→92, `grassMid` 160→159, `grassDead` 49→12, `mud` 62→9,
+    `trackEarth` 64→69, `sand` 61→130. `trackEarth` is the striking one: 64 and
+    69 are the *same rgb*, differing only in texture, and 64 was the most jungle
+    ground in the cache. This answers `docs/procgen.md` Q2. **Not eyeballed** —
+    it changes how every generated region looks.
+  - **`karamja_tropics` now names its own ground** (`JUNGLE` in `planner.ts`,
+    ids 47/48/49/61 — the ones the palette had been wrongly bound to), because
+    the palette is temperate-only now. Jungle came straight back: 52% jungle
+    against 50% for the old hardcoded mix, from the SAME `role: 'canopy'` /
+    `role: 'undergrowth'` rules. Proper fix later is jungle palette roles or an
+    archetype supplying ground + species together.
+  - **Water was invisible to zones, plots and PATHS (fixed 2026-08-08).**
+    `f.isWater` was only ever filled in by `paintGround`, which runs AFTER
+    `applyZones`, `placePlots` and `paintPaths` — so the router's own water
+    penalty was dead code and a coast plan routed roads out into the open sea
+    (Cody's screenshot). Three fixes: `markWaterLevel` now runs right after
+    `computeSlopes`; area-edge portals retry for a dry point and drop the side
+    if it has none (on an east-facing coast the whole of side 1 is sea, so the
+    GOAL was wet and no cost function could help); and the water step cost went
+    12 → 200, so a narrow inlet can still be crossed but the sea is never
+    cheaper than a hill. Verified 183 → 0 path-in-water tiles, and confirmed the
+    check fails when the fix is disabled.
+    - **A FOURTH cause, found later the same day: the route avoided water but
+      its WIDTH did not.** `paint()` widens a route 2-4 tiles with no water
+      test, so a road running dry along a shore spilled into the sea; the water
+      overlay then covered the paving and left the path's bare UNDERLAY showing
+      as the brown stair-step triangles. Only ~10 tiles, only near a coastline
+      — which is why it survived the routing fix and only reappeared once
+      `branches: 2` put more road along the shore. Also fixed: the spur BFS
+      (`distanceFromPaths`) flooded through water, so "furthest dry land" could
+      be a headland across an inlet that the spur then had to swim to.
+  - **Holes in the shoreline were a PLAN bug, not a generator one (2026-08-08).**
+    Cody saw the beach stop for a tile and resume. Measured: the beach band is a
+    proper band, not a fringe — 77% sand at 1 tile from the water, tapering to
+    34% at 6 — so the height-window vocabulary is adequate and no code changed.
+    The gaps were a second material at weight 1 in the beach band, i.e. a
+    contrasting dry-grass tile in every sixth beach tile, including the row
+    touching the water; isolated single tiles also break corner blending.
+    `sand 8 / dead grass 1` plus a second pure-sand band nearer the water took
+    the waterline from 77.5% to **95.4%** sand (the remaining 7 tiles are a path
+    reaching the sea, which is correct).
+    **The brief's own advice caused this** — "vary the ground, a single material
+    reads as a painted plane" is right for broad areas and wrong for a 1-3 tile
+    transition band. `planningBrief` now carries the counterpoint: the narrower
+    the band, the fewer materials, and the row touching water should be one.
+  - **Zones had no idea water existed (fixed 2026-08-08).** `applyZones`
+    flattened, mean-averaged and claimed tiles with no water test, so a coastal
+    zone levelled the SEABED into a shelf — and the flatten skirt reaches 10
+    tiles OUTSIDE the zone, so further than the circle — then `paintGround`
+    painted its dark town earth over the beach band and the shoreline vanished
+    under a flat dark slab. Zones now clip to land for the flatten, the height
+    mean (a half-submerged zone used to average toward sea level and sink
+    itself) and the zone mask, and a zone that is mostly sea reports a warning.
+    It immediately caught a grove sitting 364-sea-to-345-land.
+  - **`coastAngle` is documented BACKWARDS (doc fixed 2026-08-08, math left
+    alone).** `types.ts` and the tool schema both said "the direction the open
+    sea lies in, 0 = east". The mask projects along `(cos, sin)` and treats a
+    LARGE projection as inland, so `coastAngle: 0` puts land east and open sea
+    WEST — measured on a 2x2, every tile below x=32 is sea. Only the
+    description was changed: every shipped theme's shoreline is built on the
+    current behaviour, so flipping the math would move `coastal`,
+    `catherby_coast` and `karamja_tropics` coastlines. Worth deciding whether
+    to flip it and re-baseline the themes instead.
+  - **Palette rebind shipped two APPEARANCE bugs — see §12c.** Candidates were
+    ranked by rgb, which `GroundMaterial.rgb` says outright is not what a
+    textured tile looks like. `sand`→130 is texture 725, **paving slabs**;
+    `grassDead`→12 is texture 66, gravel. Reverted to 61 and 49. **View
+    `textures/<id>/<id>.png` before binding a ground role.**
+  - **`kharid_desert` did not come right** — tree_tropical 9%→5% but
+    tree_evergreen 8% and no palms. Desert sand is a no-evidence context, same
+    gap as snow; needs archetypes, not another rebind.
+  - **Kept as explicit species deliberately:** Seers' maple and the Seers /
+    Catherby flower rates — a theme named after a local fact is what a global
+    context model cannot recover. The balance BETWEEN roles also stays the
+    plan's job (`barbarian_wilds` is now two rules, canopy 0.78 + deadwood 1.59).
+  - **Count the mix on plane 0 only** when measuring: a tropical tree is four
+    locs and an oak two, so counting every placement over-reads multi-part
+    species several times over.
+- **Known deviation: every generated tropical gets its crown.** The real map
+  gives 1326 a plane-2 crown only 58% of the time; our modal walk is
+  all-or-nothing, so our groves are more uniform than the game's. Fix is to
+  store each layer's measured rate and roll per tree. Costs an index version
+  bump (another rescan). Offered, not yet done.
+- **Multi-part trees — BUILT 2026-08-07, untested in the browser.** Oak, yew,
   evergreen and tropical trees now emit their plane-1 canopy (a different
   object id) alongside the trunk, same shape and rotation. Map harvested from
   the real map at 97-100% pair rates.
-- **Vertical / upper storeys** — BLOCKED on an unknown: how the cache
-  represents an upper-storey floor or opening is untraced. Verify against
-  darkan-bot-refactor before designing on top of it. This blocks *buildings*
-  only — canopies needed no floor concept and are done.
+- **Vertical / upper storeys — UNBLOCKED 2026-08-08.** Read
+  `docs/map-learning.md` §13. **There is no explicit floor or opening concept.**
+  An upper storey is an ordinary terrain plane carrying an OVERLAY (underlays
+  essentially do not exist above plane 0 — 7.2% vs 55.1%) and a stored height
+  that is a **delta from the plane below** (absent = exactly 960, one storey;
+  a stored byte of 1 = flush). "Line the staircase up" means matching
+  coordinates and nothing else.
+  - **Tile-flags bit table** (flags are a 5-bit value 1..32, map opcodes 50-81
+    written as `opcode - 49`): `0x1` unwalkable, `0x2` bridge (read from plane 1
+    specifically), `0x4` roof removal, `0x8` force collision plane 0, `0x10`
+    hidden. Bits 5-7 are unused, confirmed at 0.0% on every plane.
+  - **`0x8` is NOT a floor flag** — it is upper-plane-only (0.0% on plane 0,
+    5.2% on plane 1) and looked exactly like one, but it forces the COLLISION
+    plane to 0. The distribution pointed the wrong way; only the client's
+    naming settled it.
+  - **Sub-question ANSWERED 2026-08-08 — an upper floor is OVERLAY TERRAIN.**
+    Wall-ring flood fill over all 2,413 regions (`scratchpad/rig/interiors.ts`):
+    plane-1 room and hall interiors are **70-72% overlay, 8-11% underlay**. The
+    ground floor is the mirror image (60% underlay) because it inherits the
+    outdoor terrain; upstairs there is none to inherit, so the floor is painted.
+    Roof locs beneath an upper interior: **0.0-0.4%** — roofs are NOT floors.
+    Floor decoration (type 22) is on 27-43% of tiles, but that is rugs laid on
+    the floor (layer 5), not the floor.
+  - **Overhang rate for layer 6: ~25% on plane 1** (74.8% of room tiles sit over
+    the room or wall below), 23% on plane 2, 8% on plane 3. Containment is the
+    rule, as §6 assumed, but the exception is substantial. Read as an upper
+    bound — a room over a structure this region doesn't fully enclose scores as
+    overhang.
+  - **Upper-floor material vocabulary:** the four commonest plane-1 room-floor
+    overlays (242, 95, 5, 190) are ALL texture 595 — one wooden floor dominates
+    upstairs, where plane 0 is far more varied.
+  - **Two measurement traps, both of which produced plausible wrong numbers:**
+    pooling all interior tiles instead of bucketing by pocket size read 38.5%
+    overlay instead of 70% (courtyards and compounds counted as "inside"); and
+    testing containment as "over the room below" rather than "over the room *or
+    wall* below" inflated overhang from 25% to 35%.
 
 ## Multi-region editing (BUILT 2026-08-06 — untested in the browser)
 
