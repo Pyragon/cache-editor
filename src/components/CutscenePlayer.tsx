@@ -137,6 +137,7 @@ const TALL_LOC_UNITS = 1000 << 2
 const TALL_COLUMN_DOWN = 512 + (1000 << 2)
 
 const VOLUME_KEY = 'cache-editor:cutscene-volume'
+const UNMUTED_VOLUME_KEY = 'cache-editor:cutscene-unmuted-volume'
 
 /** No def to read ambient/contrast from, so the client's base values. */
 const PLAYER_LIGHTING = { ambient: 64, contrast: 850 }
@@ -441,6 +442,46 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
       return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1
     } catch { return 1 }
   })
+  // The level the mute button restores. Persisted alongside the volume, so a
+  // session that ends muted still unmutes to its old level.
+  const unmutedVolumeRef = useRef(0)
+  if (unmutedVolumeRef.current === 0) {
+    let v = volume
+    if (v === 0) {
+      try { v = parseFloat(localStorage.getItem(UNMUTED_VOLUME_KEY) ?? '') } catch { v = NaN }
+    }
+    unmutedVolumeRef.current = Number.isFinite(v) && v > 0 ? Math.min(1, v) : 1
+  }
+  const rememberUnmuted = (v: number) => {
+    unmutedVolumeRef.current = v
+    try { localStorage.setItem(UNMUTED_VOLUME_KEY, String(v)) } catch { /* private mode */ }
+  }
+  const toggleMute = () => {
+    if (volume > 0) setVolume(0)
+    else setVolume(unmutedVolumeRef.current)
+  }
+  // A slider gesture (drag, or held arrow keys) passes through every step on
+  // its way down, so the level to restore is only settled when it ends: the
+  // final value, or the value it started from if it ended at 0. Otherwise
+  // dragging to 0 would "remember" the 1% it passed just before.
+  const volumeRef = useRef(volume)
+  volumeRef.current = volume
+  const gestureStartRef = useRef<number | null>(null)
+  const beginVolumeGesture = (kind: 'pointer' | 'key') => {
+    if (gestureStartRef.current !== null) return
+    gestureStartRef.current = volumeRef.current
+    // pointercancel too, or a lost pointerup would leave the gesture open forever
+    const endEvents = kind === 'pointer' ? ['pointerup', 'pointercancel'] : ['keyup']
+    const end = () => {
+      for (const ev of endEvents) window.removeEventListener(ev, end)
+      const start = gestureStartRef.current
+      gestureStartRef.current = null
+      const v = volumeRef.current
+      if (v > 0) rememberUnmuted(v)
+      else if (start !== null && start > 0) rememberUnmuted(start)
+    }
+    for (const ev of endEvents) window.addEventListener(ev, end)
+  }
   const audioRef = useRef<CutsceneAudio | null>(null)
 
   const playingRef = useRef(playing)
@@ -2783,8 +2824,16 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
             {clockValue(cycle, unit)} / {clockValue(durationCycles, unit)}{clockSuffix(unit)}
             <span className="cutscene-player-actioncount">{rt.current.cursor}/{def.actions.length}</span>
           </span>
-          <label className="cutscene-player-volume" title={`Volume ${Math.round(volume * 100)}%`}>
-            <span aria-hidden>{volume === 0 ? '🔇' : '🔊'}</span>
+          <div className="cutscene-player-volume" title={`Volume ${Math.round(volume * 100)}%`}>
+            <button
+              type="button"
+              className="cutscene-player-mute"
+              onClick={toggleMute}
+              aria-label={volume === 0 ? 'Unmute' : 'Mute'}
+              title={volume === 0 ? 'Unmute' : 'Mute'}
+            >
+              {volume === 0 ? '🔇' : '🔊'}
+            </button>
             <input
               type="range"
               min={0}
@@ -2793,9 +2842,11 @@ export default function CutscenePlayer({ def, rootHandle, onCycle, unit = 'secon
               value={Math.round(volume * 100)}
               style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` } as React.CSSProperties}
               aria-label="Volume"
+              onPointerDown={() => beginVolumeGesture('pointer')}
+              onKeyDown={() => beginVolumeGesture('key')}
               onChange={(e) => setVolume(Number(e.target.value) / 100)}
             />
-          </label>
+          </div>
         </div>
         <div className="cutscene-player-stepbar">
           <label className="cutscene-player-step">
